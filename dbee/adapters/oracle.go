@@ -123,5 +123,45 @@ func (*Oracle) GetHelpers(opts *core.TableOptions) map[string]string {
 			opts.Schema,
 			opts.Table,
 		),
+
+		"Generate Call": fmt.Sprintf(`
+SELECT
+  'DECLARE' || CHR(10) ||
+  LISTAGG(
+    CASE
+      WHEN in_out IN ('OUT', 'IN/OUT') THEN '  v_' || LOWER(argument_name) || ' ' || data_type ||
+        CASE WHEN data_type IN ('VARCHAR2', 'CHAR', 'NVARCHAR2') THEN '(4000)' ELSE '' END || ';'
+      ELSE NULL
+    END,
+    CHR(10)
+  ) WITHIN GROUP (ORDER BY position) || CHR(10) ||
+  'BEGIN' || CHR(10) ||
+  '  ' || '%s.' || object_name || '(' || CHR(10) ||
+  LISTAGG(
+    '    ' || LOWER(argument_name) || ' => ' ||
+    CASE
+      WHEN in_out = 'IN' THEN ':' || LOWER(argument_name)
+      ELSE 'v_' || LOWER(argument_name)
+    END,
+    ',' || CHR(10)
+  ) WITHIN GROUP (ORDER BY position) || CHR(10) ||
+  '  );' || CHR(10) ||
+  LISTAGG(
+    CASE
+      WHEN in_out IN ('OUT', 'IN/OUT') THEN '  DBMS_OUTPUT.PUT_LINE(''' || LOWER(argument_name) || ': '' || v_' || LOWER(argument_name) || ');'
+      ELSE NULL
+    END,
+    CHR(10)
+  ) WITHIN GROUP (ORDER BY position) || CHR(10) ||
+  'END;' AS call_template
+FROM all_arguments
+WHERE owner = '%s'
+  AND object_name = '%s'
+  AND argument_name IS NOT NULL
+GROUP BY object_name`,
+			opts.Schema,
+			opts.Schema,
+			opts.Table,
+		),
 	}
 }
