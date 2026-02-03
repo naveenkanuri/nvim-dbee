@@ -147,3 +147,124 @@ func (suite *OracleTestSuite) TestShouldReturnColumns() {
 	assert.NoError(t, err)
 	assert.Equal(t, want, got)
 }
+
+func (suite *OracleTestSuite) TestPLSQL_AnonymousBlock_WithOutput() {
+	t := suite.T()
+
+	query := `
+BEGIN
+  DBMS_OUTPUT.PUT_LINE('Hello from PL/SQL!');
+  DBMS_OUTPUT.PUT_LINE('Second line');
+END;`
+
+	wantCols := []string{"OUTPUT"}
+	wantRows := []core.Row{
+		{"Hello from PL/SQL!"},
+		{"Second line"},
+	}
+
+	gotRows, gotCols, _, err := th.GetResult(t, suite.d, query)
+	assert.NoError(t, err)
+
+	assert.Equal(t, wantCols, gotCols)
+	assert.Equal(t, wantRows, gotRows)
+}
+
+func (suite *OracleTestSuite) TestPLSQL_AnonymousBlock_NoOutput() {
+	t := suite.T()
+
+	query := `
+BEGIN
+  NULL;
+END;`
+
+	wantCols := []string{"OUTPUT"}
+
+	gotRows, gotCols, _, err := th.GetResult(t, suite.d, query)
+	assert.NoError(t, err)
+
+	assert.Equal(t, wantCols, gotCols)
+	assert.Empty(t, gotRows)
+}
+
+func (suite *OracleTestSuite) TestPLSQL_DeclareBlock() {
+	t := suite.T()
+
+	query := `
+DECLARE
+  v_msg VARCHAR2(100) := 'Declared variable';
+BEGIN
+  DBMS_OUTPUT.PUT_LINE(v_msg);
+END;`
+
+	wantCols := []string{"OUTPUT"}
+	wantRows := []core.Row{{"Declared variable"}}
+
+	gotRows, gotCols, _, err := th.GetResult(t, suite.d, query)
+	assert.NoError(t, err)
+
+	assert.Equal(t, wantCols, gotCols)
+	assert.Equal(t, wantRows, gotRows)
+}
+
+func (suite *OracleTestSuite) TestPLSQL_CallProcedure() {
+	t := suite.T()
+
+	// First create the procedure
+	createProc := `
+CREATE OR REPLACE PROCEDURE test_hello(p_name IN VARCHAR2) AS
+BEGIN
+  DBMS_OUTPUT.PUT_LINE('Hello, ' || p_name || '!');
+END;`
+
+	_, _, _, err := th.GetResult(t, suite.d, createProc)
+	assert.NoError(t, err)
+
+	// Now call it using BEGIN block
+	query := `
+BEGIN
+  test_hello('World');
+END;`
+
+	wantCols := []string{"OUTPUT"}
+	wantRows := []core.Row{{"Hello, World!"}}
+
+	gotRows, gotCols, _, err := th.GetResult(t, suite.d, query)
+	assert.NoError(t, err)
+
+	assert.Equal(t, wantCols, gotCols)
+	assert.Equal(t, wantRows, gotRows)
+}
+
+func (suite *OracleTestSuite) TestPLSQL_Error() {
+	t := suite.T()
+
+	query := `
+BEGIN
+  INVALID_PROCEDURE();
+END;`
+
+	call := suite.d.Execute(query, func(cs core.CallState, c *core.Call) {
+		if cs == core.CallStateExecutingFailed {
+			// Should contain PLS error
+			assert.ErrorContains(t, c.Err(), "PLS-")
+		}
+	})
+	assert.NotNil(t, call)
+}
+
+func (suite *OracleTestSuite) TestRegularSQL_NoRegression() {
+	t := suite.T()
+
+	// Regular SELECT should still work without OUTPUT column
+	query := "SELECT 1 AS num FROM dual"
+
+	wantCols := []string{"NUM"}
+	wantRows := []core.Row{{"1"}}
+
+	gotRows, gotCols, _, err := th.GetResult(t, suite.d, query)
+	assert.NoError(t, err)
+
+	assert.Equal(t, wantCols, gotCols)
+	assert.Equal(t, wantRows, gotRows)
+}
