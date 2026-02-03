@@ -26,8 +26,10 @@ func (d *oracleDriver) Query(ctx context.Context, query string) (core.ResultStre
 	// Create a context with longer timeout for Oracle queries.
 	// go-ora defaults to 30s which is too short for many queries.
 	// The parent context can still cancel early if user requests it.
-	queryCtx, cancel := context.WithTimeout(ctx, oracleQueryTimeout)
-	defer cancel()
+	// Note: We don't defer cancel() because the ResultStream may still need
+	// the context after Query() returns. The context will be cleaned up when
+	// the parent ctx is cancelled or the timeout expires.
+	queryCtx, _ := context.WithTimeout(ctx, oracleQueryTimeout)
 
 	// Remove the trailing semicolon from the query - for some reason it isn't supported in go_ora
 	query = strings.TrimSuffix(query, ";")
@@ -67,9 +69,10 @@ func (d *oracleDriver) executePLSQL(ctx context.Context, query string) (core.Res
 
 	// Step 2: Execute the PL/SQL block
 	// Note: Query() strips trailing semicolons, but PL/SQL blocks need them.
-	// We add it back only if the query doesn't already end with one.
+	// Exception: CALL statements don't use semicolons in Oracle.
 	plsqlQuery := query
-	if !strings.HasSuffix(strings.TrimSpace(query), ";") {
+	isCall := strings.HasPrefix(strings.ToUpper(strings.TrimSpace(query)), "CALL ")
+	if !isCall && !strings.HasSuffix(strings.TrimSpace(query), ";") {
 		plsqlQuery = query + ";"
 	}
 	_, err = conn.ExecContext(ctx, plsqlQuery)
