@@ -26,7 +26,8 @@ func (o *Oracle) Connect(url string) (core.Driver, error) {
 	}
 
 	return &oracleDriver{
-		c: builders.NewClient(db),
+		c:  builders.NewClient(db),
+		db: db,
 	}, nil
 }
 

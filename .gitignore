@@ -1,2 +1,5 @@
 doc/tags
 *.log
+docs/plans/
+CLAUDE.md
+dbee/dbee

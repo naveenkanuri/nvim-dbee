@@ -2,58 +2,83 @@ package adapters
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/kndndrj/nvim-dbee/dbee/core"
 	"github.com/kndndrj/nvim-dbee/dbee/core/builders"
 )
 
+// oracleQueryTimeout is the default timeout for Oracle query execution.
+// go-ora defaults to 30s which is too short for many queries.
+const oracleQueryTimeout = 30 * time.Minute
+
 var _ core.Driver = (*oracleDriver)(nil)
 
 type oracleDriver struct {
-	c *builders.Client
+	c  *builders.Client
+	db *sql.DB
 }
 
 func (d *oracleDriver) Query(ctx context.Context, query string) (core.ResultStream, error) {
+	// Create a context with longer timeout for Oracle queries.
+	// go-ora defaults to 30s which is too short for many queries.
+	// The parent context can still cancel early if user requests it.
+	queryCtx, cancel := context.WithTimeout(ctx, oracleQueryTimeout)
+	defer cancel()
+
 	// Remove the trailing semicolon from the query - for some reason it isn't supported in go_ora
 	query = strings.TrimSuffix(query, ";")
 
 	// Check if this is a PL/SQL block
 	if isPLSQL(query) {
-		return d.executePLSQL(ctx, query)
+		return d.executePLSQL(queryCtx, query)
 	}
 
 	// Use Exec or Query depending on the query
 	action := strings.ToLower(strings.Split(query, " ")[0])
 	hasReturnValues := strings.Contains(strings.ToLower(query), " returning ")
 	if (action == "update" || action == "delete" || action == "insert") && !hasReturnValues {
-		return d.c.Exec(ctx, query)
+		return d.c.Exec(queryCtx, query)
 	}
 
-	return d.c.QueryUntilNotEmpty(ctx, query)
+	return d.c.QueryUntilNotEmpty(queryCtx, query)
 }
 
 // executePLSQL handles PL/SQL block execution with DBMS_OUTPUT capture.
-// NOTE: This requires all database calls to execute on the same session/connection.
-// With the default go-ora connection pool settings, this typically works because
-// connections are reused for sequential operations. If you encounter empty output,
-// ensure your connection pool is not configured for multiple concurrent connections.
+// Uses a dedicated connection to ensure all operations happen in the same Oracle session,
+// since DBMS_OUTPUT is session-scoped.
 func (d *oracleDriver) executePLSQL(ctx context.Context, query string) (core.ResultStream, error) {
+	// Get a dedicated connection from the pool - CRITICAL for DBMS_OUTPUT
+	// which is session-scoped. All operations must happen on the same connection.
+	conn, err := d.db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get connection: %w", err)
+	}
+	defer conn.Close()
+
 	// Step 1: Enable DBMS_OUTPUT with 1MB buffer
-	_, err := d.c.Exec(ctx, "BEGIN DBMS_OUTPUT.ENABLE(1000000); END")
+	_, err = conn.ExecContext(ctx, "BEGIN DBMS_OUTPUT.ENABLE(1000000); END;")
 	if err != nil {
 		return nil, fmt.Errorf("failed to enable DBMS_OUTPUT: %w", err)
 	}
 
 	// Step 2: Execute the PL/SQL block
-	_, err = d.c.Exec(ctx, query)
+	// Note: Query() strips trailing semicolons, but PL/SQL blocks need them.
+	// We add it back only if the query doesn't already end with one.
+	plsqlQuery := query
+	if !strings.HasSuffix(strings.TrimSpace(query), ";") {
+		plsqlQuery = query + ";"
+	}
+	_, err = conn.ExecContext(ctx, plsqlQuery)
 	if err != nil {
 		return nil, err
 	}
 
-	// Step 3: Fetch DBMS_OUTPUT lines
-	output, err := d.fetchDBMSOutput(ctx)
+	// Step 3: Fetch DBMS_OUTPUT lines (using same connection)
+	output, err := d.fetchDBMSOutputFromConn(ctx, conn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch DBMS_OUTPUT: %w", err)
 	}
@@ -63,43 +88,35 @@ func (d *oracleDriver) executePLSQL(ctx context.Context, query string) (core.Res
 	return buildDBMSOutputResultStream(lines), nil
 }
 
-// fetchDBMSOutput retrieves all lines from the DBMS_OUTPUT buffer using GET_LINE in a loop.
-func (d *oracleDriver) fetchDBMSOutput(ctx context.Context) (string, error) {
+// fetchDBMSOutputFromConn retrieves all lines from the DBMS_OUTPUT buffer using GET_LINE.
+// Must use the same connection that executed the PL/SQL block.
+func (d *oracleDriver) fetchDBMSOutputFromConn(ctx context.Context, conn *sql.Conn) (string, error) {
 	var output strings.Builder
 
 	for {
-		// Fetch one line at a time using GET_LINE
-		// The query returns line text and status (0=success, 1=no more lines)
-		result, err := d.c.Query(ctx, `
-			SELECT line, status FROM (
-				SELECT DBMS_OUTPUT.GET_LINE(line, status) AS dummy, line, status
-				FROM (SELECT CAST(NULL AS VARCHAR2(32767)) AS line, CAST(NULL AS INTEGER) AS status FROM dual)
-			)`)
+		// Pre-allocate buffer for line - DBMS_OUTPUT lines can be up to 32767 chars
+		// go-ora needs this hint for OUT parameter sizing
+		line := strings.Repeat(" ", 32767)
+		var status int64
+
+		// Call DBMS_OUTPUT.GET_LINE as a procedure with OUT parameters
+		// Using named parameters as required by go-ora for OUT binds
+		_, err := conn.ExecContext(ctx, `BEGIN DBMS_OUTPUT.GET_LINE(:line, :status); END;`,
+			sql.Named("line", sql.Out{Dest: &line}),
+			sql.Named("status", sql.Out{Dest: &status}))
 		if err != nil {
-			// If we can't fetch, return what we have
-			return output.String(), nil
+			// Return error info as output for debugging
+			return output.String() + "[GET_LINE error: " + err.Error() + "]", nil
 		}
 
-		// Read the result
-		if !result.HasNext() {
-			result.Close()
+		// status 0 = success, 1 = no more lines
+		if status != 0 {
 			break
 		}
 
-		row, err := result.Next()
-		result.Close()
-		if err != nil || len(row) < 2 {
-			break
-		}
-
-		// Check status - if not "0", no more lines
-		status, ok := row[1].(string)
-		if !ok || status != "0" {
-			break
-		}
-
-		// Append the line
-		if line, ok := row[0].(string); ok && line != "" {
+		// Trim the pre-allocated spaces and add to output
+		line = strings.TrimRight(line, " ")
+		if line != "" {
 			output.WriteString(line)
 			output.WriteString("\n")
 		}
