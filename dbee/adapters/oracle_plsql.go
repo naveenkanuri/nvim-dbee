@@ -39,3 +39,22 @@ func isPLSQL(query string) bool {
 
 	return false
 }
+
+// parseDBMSOutputLines splits DBMS_OUTPUT content into individual lines,
+// filtering out empty lines.
+func parseDBMSOutputLines(raw string) []string {
+	if raw == "" {
+		return []string{}
+	}
+
+	lines := strings.Split(raw, "\n")
+	result := make([]string, 0, len(lines))
+
+	for _, line := range lines {
+		if line != "" {
+			result = append(result, line)
+		}
+	}
+
+	return result
+}

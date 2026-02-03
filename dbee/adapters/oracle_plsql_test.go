@@ -6,6 +6,31 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func TestParseDBMSOutputLines(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want []string
+	}{
+		{"single line", "hello", []string{"hello"}},
+		{"multiple lines", "line1\nline2\nline3", []string{"line1", "line2", "line3"}},
+		{"empty string", "", []string{}},
+		{"only newlines", "\n\n", []string{}},
+		{"trailing newline", "hello\n", []string{"hello"}},
+		{"leading newline", "\nhello", []string{"hello"}},
+		{"mixed empty lines", "line1\n\nline2", []string{"line1", "line2"}},
+		{"unicode content", "こんにちは\n世界", []string{"こんにちは", "世界"}},
+		{"special chars", "a=1; b='test'", []string{"a=1; b='test'"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseDBMSOutputLines(tt.raw)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestIsPLSQL(t *testing.T) {
 	tests := []struct {
 		name  string
