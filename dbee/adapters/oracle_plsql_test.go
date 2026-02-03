@@ -3,6 +3,7 @@ package adapters
 import (
 	"testing"
 
+	"github.com/kndndrj/nvim-dbee/dbee/core"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -65,4 +66,30 @@ func TestIsPLSQL(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestBuildDBMSOutputResultStream(t *testing.T) {
+	lines := []string{"line1", "line2", "line3"}
+
+	stream := buildDBMSOutputResultStream(lines)
+
+	// Check header
+	assert.Equal(t, core.Header{"OUTPUT"}, stream.Header())
+
+	// Check rows
+	var rows []core.Row
+	for stream.HasNext() {
+		row, err := stream.Next()
+		assert.NoError(t, err)
+		rows = append(rows, row)
+	}
+
+	assert.Equal(t, []core.Row{{"line1"}, {"line2"}, {"line3"}}, rows)
+}
+
+func TestBuildDBMSOutputResultStream_Empty(t *testing.T) {
+	stream := buildDBMSOutputResultStream([]string{})
+
+	assert.Equal(t, core.Header{"OUTPUT"}, stream.Header())
+	assert.False(t, stream.HasNext())
 }

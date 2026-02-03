@@ -3,6 +3,9 @@ package adapters
 import (
 	"regexp"
 	"strings"
+
+	"github.com/kndndrj/nvim-dbee/dbee/core"
+	"github.com/kndndrj/nvim-dbee/dbee/core/builders"
 )
 
 // plsqlCreatePattern matches CREATE [OR REPLACE] PROCEDURE|FUNCTION|PACKAGE|TRIGGER|TYPE
@@ -57,4 +60,26 @@ func parseDBMSOutputLines(raw string) []string {
 	}
 
 	return result
+}
+
+// buildDBMSOutputResultStream creates a ResultStream from DBMS_OUTPUT lines.
+func buildDBMSOutputResultStream(lines []string) core.ResultStream {
+	idx := 0
+
+	return builders.NewResultStreamBuilder().
+		WithHeader(core.Header{"OUTPUT"}).
+		WithNextFunc(
+			func() (core.Row, error) {
+				if idx >= len(lines) {
+					return nil, nil
+				}
+				row := core.Row{lines[idx]}
+				idx++
+				return row, nil
+			},
+			func() bool {
+				return idx < len(lines)
+			},
+		).
+		Build()
 }
