@@ -144,8 +144,10 @@ func newCallFromExecutor(executor func(context.Context) (ResultStream, error), q
 		// execute the function
 		eventsCh <- CallStateExecuting
 		iter, err := executor(ctx)
+		// Capture timing immediately after executor returns, before SetIter/archive
+		// so it's available when CallStateRetrieving event fires
+		c.timeTaken = time.Since(c.timestamp)
 		if err != nil {
-			c.timeTaken = time.Since(c.timestamp)
 			c.err = err
 			eventsCh <- CallStateExecutingFailed
 			close(c.done)
@@ -155,7 +157,6 @@ func newCallFromExecutor(executor func(context.Context) (ResultStream, error), q
 		// set iterator to result
 		err = c.result.SetIter(iter, func() { eventsCh <- CallStateRetrieving })
 		if err != nil {
-			c.timeTaken = time.Since(c.timestamp)
 			c.err = err
 			eventsCh <- CallStateRetrievingFailed
 			close(c.done)
@@ -165,14 +166,12 @@ func newCallFromExecutor(executor func(context.Context) (ResultStream, error), q
 		// archive the result
 		err = c.archive.setResult(c.result)
 		if err != nil {
-			c.timeTaken = time.Since(c.timestamp)
 			c.err = err
 			eventsCh <- CallStateArchiveFailed
 			close(c.done)
 			return
 		}
 
-		c.timeTaken = time.Since(c.timestamp)
 		eventsCh <- CallStateArchived
 		close(c.done)
 	}()

@@ -87,6 +87,7 @@ function ResultUI:on_call_state_changed(data)
   -- perform action based on the state
   if call.state == "executing" then
     self.stop_progress()
+    self:set_default_result_window() -- clear old timing from winbar
     self:display_progress()
   elseif call.state == "retrieving" then
     self.stop_progress()
