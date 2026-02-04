@@ -405,6 +405,9 @@ function EditorUI:namespace_remove_note(id, note_id)
   -- delete record
   self.notes[namespace][note_id] = nil
 
+  -- Clean up associated call tracking
+  self.note_calls[note_id] = nil
+
   self:trigger_event("note_removed", { note_id = note_id })
 end
 
@@ -473,9 +476,11 @@ function EditorUI:restore_note_result(note_id)
     return
   elseif state == "retrieving" or state == "archived" then
     self.result:page_current()
-  elseif state == "executing_failed" or state == "retrieving_failed" or state == "canceled" then
-    -- Terminal states won't fire more events, so trigger display manually
-    pcall(function() self.result:page_current() end)
+  elseif state == "executing_failed" or state == "retrieving_failed"
+      or state == "archive_failed" or state == "canceled" then
+    -- Terminal states won't fire more events, so render error display.
+    -- display_status works because set_call above already set current_call.
+    self.result:display_status()
   end
 end
 
