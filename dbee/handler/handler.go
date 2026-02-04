@@ -227,6 +227,23 @@ func (h *Handler) ConnectionGetStructure(connID core.ConnectionID) ([]*core.Stru
 	return layout, nil
 }
 
+func (h *Handler) ConnectionGetStructureAsync(connID core.ConnectionID) {
+	c, ok := h.lookupConnection[connID]
+	if !ok {
+		h.events.StructureLoaded(connID, nil, fmt.Errorf("unknown connection with id: %q", connID))
+		return
+	}
+
+	go func() {
+		layout, err := c.GetStructure()
+		if err != nil {
+			h.events.StructureLoaded(connID, nil, fmt.Errorf("c.GetStructure: %w", err))
+			return
+		}
+		h.events.StructureLoaded(connID, layout, nil)
+	}()
+}
+
 func (h *Handler) ConnectionGetColumns(connID core.ConnectionID, opts *core.TableOptions) ([]*core.Column, error) {
 	c, ok := h.lookupConnection[connID]
 	if !ok {

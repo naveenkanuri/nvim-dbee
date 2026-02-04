@@ -131,6 +131,15 @@ func mountEndpoints(p *plugin.Plugin, h *handler.Handler) {
 			return handler.WrapStructures(str), err
 		})
 
+	p.RegisterEndpoint(
+		"DbeeConnectionGetStructureAsync",
+		func(args *struct {
+			ID core.ConnectionID `msgpack:",array"`
+		},
+		) {
+			h.ConnectionGetStructureAsync(args.ID)
+		})
+
 	p.RegisterEndpoint("DbeeConnectionGetColumns", func(args *struct {
 		ID   core.ConnectionID `msgpack:",array"`
 		Opts *struct {

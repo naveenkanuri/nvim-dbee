@@ -2,6 +2,7 @@ package handler
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/neovim/go-client/nvim"
 
@@ -63,4 +64,41 @@ func (eb *eventBus) DatabaseSelected(id core.ConnectionID, dbname string) {
 	}`, id, dbname)
 
 	eb.callLua("database_selected", data)
+}
+
+// StructureLoaded is called when async structure loading completes.
+func (eb *eventBus) StructureLoaded(id core.ConnectionID, structures []*core.Structure, loadErr error) {
+	errMsg := "nil"
+	if loadErr != nil {
+		errMsg = fmt.Sprintf("[[%s]]", loadErr.Error())
+	}
+
+	// Serialize structures as Lua table
+	structLua := "nil"
+	if structures != nil {
+		structLua = structuresToLua(structures)
+	}
+
+	data := fmt.Sprintf(`{
+		conn_id = %q,
+		structures = %s,
+		error = %s,
+	}`, id, structLua, errMsg)
+
+	eb.callLua("structure_loaded", data)
+}
+
+// structuresToLua serializes []*core.Structure to a Lua table literal.
+func structuresToLua(structures []*core.Structure) string {
+	var b strings.Builder
+	b.WriteString("{")
+	for i, s := range structures {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		b.WriteString(fmt.Sprintf(`{name=%q,schema=%q,type=%q,children=%s}`,
+			s.Name, s.Schema, s.Type.String(), structuresToLua(s.Children)))
+	}
+	b.WriteString("}")
+	return b.String()
 }
