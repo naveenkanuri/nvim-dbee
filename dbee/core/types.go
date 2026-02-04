@@ -58,6 +58,8 @@ const (
 	StructureTypeSource
 	StructureTypeManaged
 	StructureTypeSchema
+	StructureTypeProcedure
+	StructureTypeFunction
 )
 
 // String returns the string representation of the StructureType
@@ -81,6 +83,10 @@ func (s StructureType) String() string {
 		return "managed"
 	case StructureTypeSchema:
 		return "schema"
+	case StructureTypeProcedure:
+		return "procedure"
+	case StructureTypeFunction:
+		return "function"
 	default:
 		return ""
 	}
@@ -153,6 +159,10 @@ func StructureTypeFromString(s string) StructureType {
 		return StructureTypeTable
 	case "view":
 		return StructureTypeView
+	case "procedure":
+		return StructureTypeProcedure
+	case "function":
+		return StructureTypeFunction
 	default:
 		return StructureTypeNone
 	}
