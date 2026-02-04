@@ -292,6 +292,41 @@ function ResultUI:set_call(call)
   self.stop_progress()
 end
 
+-- Restore a call's display state (used when switching editor notes).
+-- Handles all call states: shows spinner for executing, results for
+-- retrieving/archived, error message for failed/canceled states.
+---@param call CallDetails
+function ResultUI:restore_call(call)
+  self:set_call(call)
+
+  if call.state == "executing" then
+    self:set_default_result_window()
+    self:display_progress()
+  elseif call.state == "retrieving" or call.state == "archived" then
+    self:page_current()
+  elseif call.state == "executing_failed" or call.state == "retrieving_failed"
+      or call.state == "archive_failed" or call.state == "canceled" then
+    self:display_status()
+  else
+    self:set_default_result_window()
+  end
+end
+
+-- Clear the result display (used when switching to a note with no query history).
+function ResultUI:clear()
+  self.stop_progress()
+  self.current_call = nil
+  self.page_index = 0
+  self.page_ammount = 0
+
+  vim.api.nvim_buf_set_option(self.bufnr, "modifiable", true)
+  vim.api.nvim_buf_set_lines(self.bufnr, 0, -1, false, {})
+  vim.api.nvim_buf_set_option(self.bufnr, "modifiable", false)
+  vim.api.nvim_buf_set_option(self.bufnr, "modified", false)
+
+  self:set_default_result_window()
+end
+
 -- Gets the currently displayed call.
 ---@return CallDetails?
 function ResultUI:get_call()

@@ -463,25 +463,11 @@ end
 function EditorUI:restore_note_result(note_id)
   local saved_call = self.note_calls[note_id]
   if not saved_call then
+    self.result:clear()
     return
   end
 
-  self.result:set_call(saved_call)
-
-  -- Re-render based on the call's current state
-  local state = saved_call.state
-  if state == "executing" then
-    -- Call is still running, ResultUI will pick up state changes
-    -- via on_call_state_changed since current_call.id now matches
-    return
-  elseif state == "retrieving" or state == "archived" then
-    self.result:page_current()
-  elseif state == "executing_failed" or state == "retrieving_failed"
-      or state == "archive_failed" or state == "canceled" then
-    -- Terminal states won't fire more events, so render error display.
-    -- display_status works because set_call above already set current_call.
-    self.result:display_status()
-  end
+  self.result:restore_call(saved_call)
 end
 
 -- Sets note with id as the current note
