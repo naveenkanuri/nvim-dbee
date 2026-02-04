@@ -525,6 +525,14 @@ function EditorUI:on_call_state_changed(data)
     return
   end
 
+  -- Update stored note_calls with latest call state
+  for note_id, stored_call in pairs(self.note_calls) do
+    if stored_call.id == data.call.id then
+      self.note_calls[note_id] = data.call
+      break
+    end
+  end
+
   if data.call.state ~= "executing_failed" then
     return
   end
