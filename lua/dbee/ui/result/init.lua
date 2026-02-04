@@ -163,7 +163,9 @@ function ResultUI:display_status()
 
   if self.current_call.error and self.current_call.error ~= "" then
     table.insert(lines, "Reason:")
-    table.insert(lines, "    " .. string.gsub(self.current_call.error, "\n", " "))
+    for err_line in string.gmatch(self.current_call.error, "[^\n]+") do
+      table.insert(lines, "    " .. err_line)
+    end
   end
 
   vim.api.nvim_buf_set_option(self.bufnr, "modifiable", true)

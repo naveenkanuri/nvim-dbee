@@ -62,6 +62,61 @@ func parseDBMSOutputLines(raw string) []string {
 	return result
 }
 
+// formatOracleError formats Oracle error messages for better readability.
+// Converts wall of text into separate lines per error.
+func formatOracleError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	errStr := err.Error()
+
+	// Check if it looks like an Oracle error
+	if !strings.Contains(errStr, "ORA-") && !strings.Contains(errStr, "PLS-") {
+		return err
+	}
+
+	formatted := errStr
+
+	// Step 1: Format "line X, column Y:" to compact form FIRST
+	// (must happen before newline insertion so we don't consume the newlines)
+	formatted = regexp.MustCompile(`line\s+(\d+),?\s*column\s+(\d+):\s*`).ReplaceAllString(formatted, "[L$1:C$2] ")
+
+	// Step 2: Add newlines before each error code (except the first)
+	formatted = regexp.MustCompile(`\s+(ORA-\d+:)`).ReplaceAllString(formatted, "\n$1")
+	formatted = regexp.MustCompile(`\s+(PLS-\d+:)`).ReplaceAllString(formatted, "\n$1")
+
+	// Trim each line
+	lines := strings.Split(formatted, "\n")
+	var cleaned []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			cleaned = append(cleaned, line)
+		}
+	}
+
+	if len(cleaned) == 0 {
+		return err
+	}
+
+	return &formattedError{original: err, formatted: strings.Join(cleaned, "\n")}
+}
+
+// formattedError wraps an error with formatted message
+type formattedError struct {
+	original  error
+	formatted string
+}
+
+func (e *formattedError) Error() string {
+	return e.formatted
+}
+
+func (e *formattedError) Unwrap() error {
+	return e.original
+}
+
 // buildDBMSOutputResultStream creates a ResultStream from DBMS_OUTPUT lines.
 func buildDBMSOutputResultStream(lines []string) core.ResultStream {
 	idx := 0

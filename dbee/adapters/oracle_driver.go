@@ -83,7 +83,7 @@ func (d *oracleDriver) executePLSQL(ctx context.Context, query string) (core.Res
 	}
 	_, err = conn.ExecContext(ctx, plsqlQuery)
 	if err != nil {
-		return nil, err
+		return nil, formatOracleError(err)
 	}
 
 	// Step 3: Fetch DBMS_OUTPUT lines (using same connection)

@@ -85,7 +85,7 @@ func (d *oracleDriver) executePLSQLWithCursor(ctx context.Context, query string)
 		sql.Named(cursorParam, sql.Out{Dest: &cursor}))
 	if err != nil {
 		rawConn.Close()
-		return nil, err
+		return nil, formatOracleError(err)
 	}
 
 	// Query the cursor to get DataSet
