@@ -150,6 +150,9 @@ function EditorUI:get_actions()
       end
       local call = self.handler:connection_execute(conn.id, query)
       self.result:set_call(call)
+      if self.current_note_id then
+        self.note_calls[self.current_note_id] = call
+      end
     end,
     run_selection = function()
       local srow, scol, erow, ecol = utils.visual_selection()
@@ -167,6 +170,9 @@ function EditorUI:get_actions()
       end
       local call = self.handler:connection_execute(conn.id, query)
       self.result:set_call(call)
+      if self.current_note_id then
+        self.note_calls[self.current_note_id] = call
+      end
     end,
     run_under_cursor = function()
       local bufnr = vim.api.nvim_get_current_buf()
@@ -190,7 +196,11 @@ function EditorUI:get_actions()
         -- run the query
         local conn = self.handler:get_current_connection()
         if conn then
-          self.result:set_call(self.handler:connection_execute(conn.id, query))
+          local call = self.handler:connection_execute(conn.id, query)
+          self.result:set_call(call)
+          if self.current_note_id then
+            self.note_calls[self.current_note_id] = call
+          end
         end
 
         -- remove highlighting after delay
