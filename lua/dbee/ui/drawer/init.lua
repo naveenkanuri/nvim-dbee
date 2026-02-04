@@ -70,6 +70,7 @@ function DrawerUI:new(handler, editor, result, opts)
     disable_help = opts.disable_help or false,
     current_conn_id = current_conn.id,
     current_note_id = current_note.id,
+    structure_cache = {},
     window_options = vim.tbl_extend("force", {
       wrap = false,
       winfixheight = true,
@@ -105,6 +106,10 @@ function DrawerUI:new(handler, editor, result, opts)
     o:on_current_note_changed(data)
   end)
 
+  handler:register_event_listener("structure_loaded", function(data)
+    o:on_structure_loaded(data)
+  end)
+
   return o
 end
 
@@ -127,6 +132,21 @@ function DrawerUI:on_current_note_changed(data)
     return
   end
   self.current_note_id = data.note_id
+  self:refresh()
+end
+
+-- event listener for async structure loading
+---@private
+function DrawerUI:on_structure_loaded(data)
+  if not data or not data.conn_id then
+    return
+  end
+
+  self.structure_cache[data.conn_id] = {
+    structures = data.structures,
+    error = data.error,
+  }
+
   self:refresh()
 end
 
@@ -245,6 +265,7 @@ function DrawerUI:get_actions()
 
   return {
     refresh = function()
+      self.structure_cache = {}
       self:refresh()
     end,
     action_1 = function()
@@ -293,6 +314,46 @@ function DrawerUI:get_actions()
         expand_node(node)
       end
     end,
+
+    generate_call = function()
+      local node = self.tree:get_node()
+      if not node then
+        return
+      end
+
+      -- Only works on procedure/function nodes
+      if node.type ~= "procedure" and node.type ~= "function" then
+        return
+      end
+
+      local conn = self.handler:get_current_connection()
+      if not conn then
+        return
+      end
+
+      local helpers = self.handler:connection_get_helpers(conn.id, {
+        table = node.name,
+        schema = node.schema,
+        materialization = node.type,
+      })
+
+      local gen_call_query = helpers["Generate Call"]
+      if not gen_call_query then
+        return
+      end
+
+      -- Execute the Generate Call query - result appears in result pane
+      local call = self.handler:connection_execute(conn.id, gen_call_query)
+      self.result:set_call(call)
+
+      -- Create a local note for the procedure call
+      local note_name = "call_" .. node.name
+      pcall(function()
+        local note_id = self.editor:namespace_create_note(tostring(conn.id), note_name)
+        self.editor:set_current_note(note_id)
+        self:refresh()
+      end)
+    end,
   }
 end
 
@@ -318,7 +379,7 @@ function DrawerUI:refresh()
     table.insert(nodes, ly)
   end
   table.insert(nodes, convert.separator_node())
-  for _, ly in ipairs(convert.handler_nodes(self.handler, self.result)) do
+  for _, ly in ipairs(convert.handler_nodes(self.handler, self.result, self.structure_cache)) do
     table.insert(nodes, ly)
   end
 

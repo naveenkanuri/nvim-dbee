@@ -28,8 +28,9 @@ end
 ---@param handler Handler
 ---@param conn ConnectionParams
 ---@param result ResultUI
+---@param structure_cache table
 ---@return DrawerUINode[]
-local function connection_nodes(handler, conn, result)
+local function connection_nodes(handler, conn, result, structure_cache)
   ---@param structs DBStructure[]
   ---@param parent_id string
   ---@return DrawerUINode[]
@@ -88,8 +89,23 @@ local function connection_nodes(handler, conn, result)
     return nodes
   end
 
+  -- check cache for async-loaded structure
+  local parent_id = conn.id
+  local cached = structure_cache and structure_cache[conn.id]
+  local structs
+  if cached then
+    if cached.error then
+      return { NuiTree.Node({ id = parent_id .. "__error__", name = tostring(cached.error), type = "" }) }
+    end
+    structs = cached.structures or {}
+  else
+    -- trigger async load and show loading indicator
+    handler:connection_get_structure_async(conn.id)
+    return { NuiTree.Node({ id = parent_id .. "__loading__", name = "loading...", type = "" }) }
+  end
+
   -- recursively parse structure to drawer nodes
-  local nodes = to_tree_nodes(handler:connection_get_structure(conn.id), conn.id)
+  local nodes = to_tree_nodes(structs, conn.id)
 
   -- database switching
   local current_db, available_dbs = handler:connection_list_databases(conn.id)
@@ -117,8 +133,9 @@ end
 
 ---@param handler Handler
 ---@param result ResultUI
+---@param structure_cache table
 ---@return DrawerUINode[]
-local function handler_real_nodes(handler, result)
+local function handler_real_nodes(handler, result, structure_cache)
   ---@type DrawerUINode[]
   local nodes = {}
 
@@ -243,7 +260,7 @@ local function handler_real_nodes(handler, result)
         -- remove connection
         action_3 = delete_action,
         lazy_children = function()
-          return connection_nodes(handler, conn, result)
+          return connection_nodes(handler, conn, result, structure_cache)
         end,
       } --[[@as DrawerUINode]]
 
@@ -296,13 +313,14 @@ end
 
 ---@param handler Handler
 ---@param result ResultUI
+---@param structure_cache table
 ---@return DrawerUINode[]
-function M.handler_nodes(handler, result)
+function M.handler_nodes(handler, result, structure_cache)
   -- in case there are no sources defined, return helper nodes
   if #handler:get_sources() < 1 then
     return handler_help_nodes()
   end
-  return handler_real_nodes(handler, result)
+  return handler_real_nodes(handler, result, structure_cache)
 end
 
 -- whitespace between nodes

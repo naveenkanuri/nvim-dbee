@@ -228,6 +228,11 @@ function Handler:connection_get_structure(id)
 end
 
 ---@param id connection_id
+function Handler:connection_get_structure_async(id)
+  vim.fn.DbeeConnectionGetStructureAsync(id)
+end
+
+---@param id connection_id
 ---@param opts { table: string, schema: string, materialization: string }
 ---@return Column[]
 function Handler:connection_get_columns(id, opts)
