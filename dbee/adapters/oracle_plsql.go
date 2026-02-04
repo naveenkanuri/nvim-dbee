@@ -2,6 +2,7 @@ package adapters
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/kndndrj/nvim-dbee/dbee/core"
@@ -112,6 +113,29 @@ func (e *formattedError) Error() string {
 
 func (e *formattedError) Unwrap() error {
 	return e.original
+}
+
+// oracleErrorLocationPattern matches "line N, column M" in Oracle error messages.
+var oracleErrorLocationPattern = regexp.MustCompile(`line\s+(\d+),?\s*column\s+(\d+)`)
+
+// parseOracleErrorLocation extracts the first line and column number from an Oracle error message.
+// Returns (line, column, found). Line and column are 1-based.
+func parseOracleErrorLocation(errMsg string) (int, int, bool) {
+	matches := oracleErrorLocationPattern.FindStringSubmatch(errMsg)
+	if matches == nil || len(matches) < 3 {
+		return 0, 0, false
+	}
+
+	line, err := strconv.Atoi(matches[1])
+	if err != nil {
+		return 0, 0, false
+	}
+	col, err := strconv.Atoi(matches[2])
+	if err != nil {
+		return 0, 0, false
+	}
+
+	return line, col, true
 }
 
 // buildDBMSOutputResultStream creates a ResultStream from DBMS_OUTPUT lines.

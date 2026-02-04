@@ -68,6 +68,51 @@ func TestIsPLSQL(t *testing.T) {
 	}
 }
 
+func TestParseOracleErrorLocation(t *testing.T) {
+	tests := []struct {
+		name      string
+		errMsg    string
+		wantLine  int
+		wantCol   int
+		wantFound bool
+	}{
+		{
+			name:   "standard ORA error",
+			errMsg: "ORA-06550: line 3, column 5:\nPLS-00103: Encountered the symbol \"END\"",
+			wantLine: 3, wantCol: 5, wantFound: true,
+		},
+		{
+			name:   "no line info",
+			errMsg: "ORA-00942: table or view does not exist",
+			wantLine: 0, wantCol: 0, wantFound: false,
+		},
+		{
+			name:   "line 1",
+			errMsg: "ORA-06550: line 1, column 7:\nPLS-00201: identifier 'FOO' must be declared",
+			wantLine: 1, wantCol: 7, wantFound: true,
+		},
+		{
+			name:   "multiple errors - first wins",
+			errMsg: "ORA-06550: line 5, column 3:\nPLS-00103: error\nORA-06550: line 8, column 1:\nPLS-00103: another",
+			wantLine: 5, wantCol: 3, wantFound: true,
+		},
+		{
+			name:   "empty string",
+			errMsg: "",
+			wantLine: 0, wantCol: 0, wantFound: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			line, col, found := parseOracleErrorLocation(tt.errMsg)
+			assert.Equal(t, tt.wantFound, found)
+			assert.Equal(t, tt.wantLine, line)
+			assert.Equal(t, tt.wantCol, col)
+		})
+	}
+}
+
 func TestBuildDBMSOutputResultStream(t *testing.T) {
 	lines := []string{"line1", "line2", "line3"}
 
