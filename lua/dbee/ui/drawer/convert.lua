@@ -78,8 +78,11 @@ local function connection_nodes(handler, conn, result, structure_cache)
           }
         end
 
-        node.lazy_children = function()
-          return column_nodes(node_id, handler:connection_get_columns(conn.id, table_opts))
+        -- only tables and views have expandable columns
+        if struct.type == "table" or struct.type == "view" then
+          node.lazy_children = function()
+            return column_nodes(node_id, handler:connection_get_columns(conn.id, table_opts))
+          end
         end
       end
 

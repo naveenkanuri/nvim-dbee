@@ -136,8 +136,9 @@ func mountEndpoints(p *plugin.Plugin, h *handler.Handler) {
 		func(args *struct {
 			ID core.ConnectionID `msgpack:",array"`
 		},
-		) {
+		) (any, error) {
 			h.ConnectionGetStructureAsync(args.ID)
+			return nil, nil
 		})
 
 	p.RegisterEndpoint("DbeeConnectionGetColumns", func(args *struct {
