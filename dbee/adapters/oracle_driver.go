@@ -52,7 +52,13 @@ func (d *oracleDriver) Query(ctx context.Context, query string) (core.ResultStre
 // executePLSQL handles PL/SQL block execution with DBMS_OUTPUT capture.
 // Uses a dedicated connection to ensure all operations happen in the same Oracle session,
 // since DBMS_OUTPUT is session-scoped.
+// If the query contains /*CURSOR*/ markers, returns cursor results as a grid.
 func (d *oracleDriver) executePLSQL(ctx context.Context, query string) (core.ResultStream, error) {
+	// Check for cursor markers - if present, use cursor execution path
+	if hasCursorMarker(query) {
+		return d.executePLSQLWithCursor(ctx, query)
+	}
+
 	// Get a dedicated connection from the pool - CRITICAL for DBMS_OUTPUT
 	// which is session-scoped. All operations must happen on the same connection.
 	conn, err := d.db.Conn(ctx)
