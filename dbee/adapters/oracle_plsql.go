@@ -43,23 +43,20 @@ func isPLSQL(query string) bool {
 	return false
 }
 
-// parseDBMSOutputLines splits DBMS_OUTPUT content into individual lines,
-// filtering out empty lines.
+// parseDBMSOutputLines splits DBMS_OUTPUT content into individual lines.
+// Preserves intentional empty lines but strips trailing empty lines
+// (which may be artifacts from NEW_LINE flush).
 func parseDBMSOutputLines(raw string) []string {
 	if raw == "" {
 		return []string{}
 	}
 
-	lines := strings.Split(raw, "\n")
-	result := make([]string, 0, len(lines))
-
-	for _, line := range lines {
-		if line != "" {
-			result = append(result, line)
-		}
+	// Trim trailing newlines, then split
+	raw = strings.TrimRight(raw, "\n")
+	if raw == "" {
+		return []string{}
 	}
-
-	return result
+	return strings.Split(raw, "\n")
 }
 
 // formatOracleError formats Oracle error messages for better readability.

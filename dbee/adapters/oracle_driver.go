@@ -67,8 +67,8 @@ func (d *oracleDriver) executePLSQL(ctx context.Context, query string) (core.Res
 	}
 	defer conn.Close()
 
-	// Step 1: Enable DBMS_OUTPUT with 1MB buffer
-	_, err = conn.ExecContext(ctx, "BEGIN DBMS_OUTPUT.ENABLE(1000000); END;")
+	// Step 1: Enable DBMS_OUTPUT with unlimited buffer (uses session memory)
+	_, err = conn.ExecContext(ctx, "BEGIN DBMS_OUTPUT.ENABLE(NULL); END;")
 	if err != nil {
 		return nil, fmt.Errorf("failed to enable DBMS_OUTPUT: %w", err)
 	}
@@ -99,7 +99,9 @@ func (d *oracleDriver) executePLSQL(ctx context.Context, query string) (core.Res
 
 // fetchDBMSOutputFromConn retrieves all lines from the DBMS_OUTPUT buffer using GET_LINE.
 // Must use the same connection that executed the PL/SQL block.
+// Note: DBMS_OUTPUT.PUT (without PUT_LINE) content is only captured if followed by PUT_LINE.
 func (d *oracleDriver) fetchDBMSOutputFromConn(ctx context.Context, conn *sql.Conn) (string, error) {
+
 	var output strings.Builder
 
 	for {
@@ -124,11 +126,10 @@ func (d *oracleDriver) fetchDBMSOutputFromConn(ctx context.Context, conn *sql.Co
 		}
 
 		// Trim the pre-allocated spaces and add to output
+		// Preserve empty lines for formatted output
 		line = strings.TrimRight(line, " ")
-		if line != "" {
-			output.WriteString(line)
-			output.WriteString("\n")
-		}
+		output.WriteString(line)
+		output.WriteString("\n")
 	}
 
 	return output.String(), nil

@@ -66,7 +66,7 @@ func (d *oracleDriver) executePLSQLWithCursor(ctx context.Context, query string)
 	}
 
 	// Enable DBMS_OUTPUT first (same connection)
-	_, err = rawConn.ExecContext(ctx, "BEGIN DBMS_OUTPUT.ENABLE(1000000); END;")
+	_, err = rawConn.ExecContext(ctx, "BEGIN DBMS_OUTPUT.ENABLE(NULL); END;")
 	if err != nil {
 		rawConn.Close()
 		return nil, fmt.Errorf("failed to enable DBMS_OUTPUT: %w", err)
