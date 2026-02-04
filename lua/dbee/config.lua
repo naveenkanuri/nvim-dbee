@@ -150,6 +150,16 @@ config.default = {
         icon_highlight = "Type",
         text_highlight = "",
       },
+      procedure = {
+        icon = "",
+        icon_highlight = "Function",
+        text_highlight = "",
+      },
+      ["function"] = {
+        icon = "󰊕",
+        icon_highlight = "Function",
+        text_highlight = "",
+      },
       sink = {
         icon = "",
         icon_highlight = "String",

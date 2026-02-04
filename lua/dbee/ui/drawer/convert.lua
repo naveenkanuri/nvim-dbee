@@ -54,7 +54,7 @@ local function connection_nodes(handler, conn, result)
         type = struct.type,
       }, to_tree_nodes(struct.children, node_id)) --[[@as DrawerUINode]]
 
-      if struct.type == "table" or struct.type == "view" then
+      if struct.type == "table" or struct.type == "view" or struct.type == "procedure" or struct.type == "function" then
         local table_opts = { table = struct.name, schema = struct.schema, materialization = struct.type }
 
         -- table helpers
