@@ -176,7 +176,7 @@ end
 function layouts.Default:reset()
   vim.api.nvim_win_set_height(self.windows["result"], self.result_height)
   vim.api.nvim_win_set_width(self.windows["drawer"], self.drawer_width)
-  vim.api.nvim_win_set_height(self.windows["call_log"], self.result_height)
+  vim.api.nvim_win_set_height(self.windows["call_log"], self.call_log_height)
 end
 
 ---@package
