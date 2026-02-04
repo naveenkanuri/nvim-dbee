@@ -151,19 +151,23 @@ func (d *oracleDriver) Columns(opts *core.TableOptions) ([]*core.Column, error) 
 
 func (d *oracleDriver) Structure() ([]*core.Structure, error) {
 	query := `
-		SELECT owner, object_name, type
+		SELECT owner, object_name, object_type
 		FROM (
-			SELECT owner, table_name as object_name, 'TABLE' as type
+			SELECT owner, table_name as object_name, 'TABLE' as object_type
 			FROM all_tables
 			UNION ALL
-			SELECT owner, table_name as object_name, 'EXTERNAL TABLE' as type
+			SELECT owner, table_name as object_name, 'EXTERNAL TABLE' as object_type
 			FROM all_external_tables
 			UNION ALL
-			SELECT owner, view_name as object_name, 'VIEW' as type
+			SELECT owner, view_name as object_name, 'VIEW' as object_type
 			FROM all_views
 			UNION ALL
-			SELECT owner, mview_name as object_name, 'MATERIALIZED VIEW' as type
+			SELECT owner, mview_name as object_name, 'MATERIALIZED VIEW' as object_type
 			FROM all_mviews
+			UNION ALL
+			SELECT owner, object_name, object_type
+			FROM all_objects
+			WHERE object_type IN ('PROCEDURE', 'FUNCTION')
 		)
 		WHERE owner IN (SELECT username FROM all_users WHERE common = 'NO')
 		ORDER BY owner, object_name
@@ -182,12 +186,109 @@ func (d *oracleDriver) Structure() ([]*core.Structure, error) {
 			return core.StructureTypeView
 		case "MATERIALIZED VIEW":
 			return core.StructureTypeMaterializedView
+		case "PROCEDURE":
+			return core.StructureTypeProcedure
+		case "FUNCTION":
+			return core.StructureTypeFunction
 		default:
 			return core.StructureTypeNone
 		}
 	}
 
-	return core.GetGenericStructure(rows, decodeStructureType)
+	return oracleGroupedStructure(rows, decodeStructureType)
+}
+
+// oracleGroupedStructure builds a grouped structure tree:
+// schema -> tables/procedures/functions sections -> objects.
+// Empty sections are omitted.
+func oracleGroupedStructure(rows core.ResultStream, structTypeFn func(string) core.StructureType) ([]*core.Structure, error) {
+	type schemaData struct {
+		tables     []*core.Structure
+		procedures []*core.Structure
+		functions  []*core.Structure
+	}
+	schemas := make(map[string]*schemaData)
+
+	for rows.HasNext() {
+		row, err := rows.Next()
+		if err != nil {
+			return nil, err
+		}
+		if len(row) < 3 {
+			return nil, core.ErrInsufficienStructureInfo
+		}
+
+		schema, ok := row[0].(string)
+		if !ok {
+			return nil, fmt.Errorf("expected string for schema, got %T", row[0])
+		}
+		name, ok := row[1].(string)
+		if !ok {
+			return nil, fmt.Errorf("expected string for name, got %T", row[1])
+		}
+		typ, ok := row[2].(string)
+		if !ok {
+			return nil, fmt.Errorf("expected string for type, got %T", row[2])
+		}
+
+		if schemas[schema] == nil {
+			schemas[schema] = &schemaData{}
+		}
+
+		obj := &core.Structure{
+			Name:   name,
+			Schema: schema,
+			Type:   structTypeFn(typ),
+		}
+
+		switch obj.Type {
+		case core.StructureTypeProcedure:
+			schemas[schema].procedures = append(schemas[schema].procedures, obj)
+		case core.StructureTypeFunction:
+			schemas[schema].functions = append(schemas[schema].functions, obj)
+		default:
+			schemas[schema].tables = append(schemas[schema].tables, obj)
+		}
+	}
+
+	var structure []*core.Structure
+	for schema, data := range schemas {
+		var children []*core.Structure
+
+		if len(data.tables) > 0 {
+			children = append(children, &core.Structure{
+				Name:     "tables",
+				Schema:   schema,
+				Type:     core.StructureTypeNone,
+				Children: data.tables,
+			})
+		}
+		if len(data.procedures) > 0 {
+			children = append(children, &core.Structure{
+				Name:     "procedures",
+				Schema:   schema,
+				Type:     core.StructureTypeNone,
+				Children: data.procedures,
+			})
+		}
+		if len(data.functions) > 0 {
+			children = append(children, &core.Structure{
+				Name:     "functions",
+				Schema:   schema,
+				Type:     core.StructureTypeNone,
+				Children: data.functions,
+			})
+		}
+
+		structure = append(structure, &core.Structure{
+			Name:     schema,
+			Schema:   schema,
+			Type:     core.StructureTypeSchema,
+			Children: children,
+		})
+	}
+
+	return structure, nil
 }
 
 func (d *oracleDriver) Close() { d.c.Close() }
