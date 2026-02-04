@@ -15,7 +15,8 @@ function M.display(bufnr, opts)
   local spinner = opts.spinner or { "|", "/", "-", "\\" }
 
   local icon_index = 1
-  local start_time = vim.fn.reltimefloat(vim.fn.reltime())
+  local start_offset = opts.start_offset or 0
+  local start_time = vim.fn.reltimefloat(vim.fn.reltime()) - start_offset
 
   local function update()
     local passed_time = vim.fn.reltimefloat(vim.fn.reltime()) - start_time

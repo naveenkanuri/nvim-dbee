@@ -134,8 +134,13 @@ function ResultUI:set_default_result_window()
 end
 
 ---@private
-function ResultUI:display_progress()
-  self.stop_progress = progress.display(self.bufnr, self.progress_opts)
+---@param start_offset? number elapsed seconds to offset the timer by
+function ResultUI:display_progress(start_offset)
+  local opts = self.progress_opts
+  if start_offset then
+    opts = vim.tbl_extend("force", opts, { start_offset = start_offset })
+  end
+  self.stop_progress = progress.display(self.bufnr, opts)
 end
 
 ---@private
@@ -301,7 +306,9 @@ function ResultUI:restore_call(call)
 
   if call.state == "executing" then
     self:set_default_result_window()
-    self:display_progress()
+    -- Calculate elapsed time so the timer doesn't restart from 0
+    local elapsed = (vim.fn.localtime() * 1000000 - call.timestamp_us) / 1000000
+    self:display_progress(elapsed)
   elseif call.state == "retrieving" or call.state == "archived" then
     self:page_current()
   elseif call.state == "executing_failed" or call.state == "retrieving_failed"
