@@ -130,8 +130,16 @@ SELECT
   'DECLARE' || CHR(10) ||
   LISTAGG(
     CASE
-      WHEN in_out IN ('OUT', 'IN/OUT') THEN '  v_' || LOWER(argument_name) || ' ' || data_type ||
-        CASE WHEN data_type IN ('VARCHAR2', 'CHAR', 'NVARCHAR2') THEN '(4000)' ELSE '' END || ';'
+      WHEN in_out IN ('OUT', 'IN/OUT') THEN
+        '  v_' || LOWER(argument_name) || ' ' ||
+        CASE
+          WHEN data_type = 'REF CURSOR' THEN 'SYS_REFCURSOR;' || CHR(10) ||
+            '  -- Cursor fetch variables (adjust types to match cursor columns):' || CHR(10) ||
+            '  v_col1 VARCHAR2(4000);' || CHR(10) ||
+            '  v_col2 VARCHAR2(4000)'
+          WHEN data_type IN ('VARCHAR2', 'CHAR', 'NVARCHAR2') THEN data_type || '(4000)'
+          ELSE data_type
+        END || ';'
       ELSE NULL
     END,
     CHR(10)
@@ -149,7 +157,16 @@ SELECT
   '  );' || CHR(10) ||
   LISTAGG(
     CASE
-      WHEN in_out IN ('OUT', 'IN/OUT') THEN '  DBMS_OUTPUT.PUT_LINE(''' || LOWER(argument_name) || ': '' || v_' || LOWER(argument_name) || ');'
+      WHEN in_out IN ('OUT', 'IN/OUT') AND data_type = 'REF CURSOR' THEN
+        '  -- Fetch from cursor (adjust v_col variables to match cursor columns):' || CHR(10) ||
+        '  LOOP' || CHR(10) ||
+        '    FETCH v_' || LOWER(argument_name) || ' INTO v_col1, v_col2;' || CHR(10) ||
+        '    EXIT WHEN v_' || LOWER(argument_name) || '%NOTFOUND;' || CHR(10) ||
+        '    DBMS_OUTPUT.PUT_LINE(v_col1 || ''|'' || v_col2);' || CHR(10) ||
+        '  END LOOP;' || CHR(10) ||
+        '  CLOSE v_' || LOWER(argument_name) || ';'
+      WHEN in_out IN ('OUT', 'IN/OUT') THEN
+        '  DBMS_OUTPUT.PUT_LINE(''' || LOWER(argument_name) || ': '' || v_' || LOWER(argument_name) || ');'
       ELSE NULL
     END,
     CHR(10)
