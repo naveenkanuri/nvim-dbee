@@ -90,6 +90,8 @@ config.default = {
       -- { key = "c", mode = "n", action = "collapse" },
       -- { key = "e", mode = "n", action = "expand" },
       { key = "o", mode = "n", action = "toggle" },
+      -- generate call template for procedure/function
+      { key = "gC", mode = "n", action = "generate_call" },
       -- mappings for menu popups:
       { key = "<CR>", mode = "n", action = "menu_confirm" },
       { key = "y", mode = "n", action = "menu_yank" },
