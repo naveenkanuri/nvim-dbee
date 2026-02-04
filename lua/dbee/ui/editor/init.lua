@@ -38,6 +38,7 @@ end
 ---@field private diag_ns integer diagnostic namespace id
 ---@field private last_exec_offset integer? line offset of last executed query in buffer
 ---@field private last_exec_bufnr integer? buffer of last executed query
+---@field private note_calls table<note_id, CallDetails> last call per note
 local EditorUI = {}
 
 ---@param handler Handler
@@ -72,6 +73,7 @@ function EditorUI:new(handler, result, opts)
     diag_ns = vim.api.nvim_create_namespace("dbee_diagnostics"),
     last_exec_offset = nil,
     last_exec_bufnr = nil,
+    note_calls = {},
   }
   setmetatable(o, self)
   self.__index = self
