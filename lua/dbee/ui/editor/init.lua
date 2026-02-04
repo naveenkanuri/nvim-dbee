@@ -455,6 +455,30 @@ function EditorUI:get_current_note()
   return note
 end
 
+---@private
+---@param note_id note_id
+function EditorUI:restore_note_result(note_id)
+  local saved_call = self.note_calls[note_id]
+  if not saved_call then
+    return
+  end
+
+  self.result:set_call(saved_call)
+
+  -- Re-render based on the call's current state
+  local state = saved_call.state
+  if state == "executing" then
+    -- Call is still running, ResultUI will pick up state changes
+    -- via on_call_state_changed since current_call.id now matches
+    return
+  elseif state == "retrieving" or state == "archived" then
+    self.result:page_current()
+  elseif state == "executing_failed" or state == "retrieving_failed" or state == "canceled" then
+    -- Terminal states won't fire more events, so trigger display manually
+    pcall(function() self.result:page_current() end)
+  end
+end
+
 -- Sets note with id as the current note
 -- and opens it in the window
 ---@param id note_id
@@ -472,6 +496,9 @@ function EditorUI:set_current_note(id)
   self.current_note_id = id
 
   self:display_note(id)
+
+  -- Restore the note's last query result
+  self:restore_note_result(id)
 
   self:trigger_event("current_note_changed", { note_id = id })
 end
