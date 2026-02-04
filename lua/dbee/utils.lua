@@ -207,7 +207,7 @@ function M.query_under_cursor(bufnr)
 
   -- clean up the tmp_buf
   vim.api.nvim_buf_delete(tmp_buf, { force = true })
-  return query:gsub(";", ""), start_row, end_row
+  return query:gsub(";%s*$", ""), start_row, end_row
 end
 
 return M
