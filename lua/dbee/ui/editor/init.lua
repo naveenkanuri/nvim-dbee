@@ -2,6 +2,23 @@ local utils = require("dbee.utils")
 local common = require("dbee.ui.common")
 local welcome = require("dbee.ui.editor.welcome")
 
+--- Parse Oracle error location from error string.
+--- Returns (line, col) or (nil, nil) if not found.
+---@param err_msg string
+---@return integer?, integer?
+local function parse_oracle_error_location(err_msg)
+  local line, col = err_msg:match("line%s+(%d+),?%s*column%s+(%d+)")
+  if line and col then
+    return tonumber(line), tonumber(col)
+  end
+  -- Also check the formatted [L3:C5] form
+  line, col = err_msg:match("%[L(%d+):C(%d+)%]")
+  if line and col then
+    return tonumber(line), tonumber(col)
+  end
+  return nil, nil
+end
+
 ---@alias namespace_id "global"|string
 
 ---@alias note_id string
@@ -18,6 +35,9 @@ local welcome = require("dbee.ui.editor.welcome")
 ---@field private event_callbacks table<editor_event_name, event_listener[]> callbacks for events
 ---@field private window_options table<string, any> a table of window options.
 ---@field private buffer_options table<string, any> a table of buffer options for all notes.
+---@field private diag_ns integer diagnostic namespace id
+---@field private last_exec_offset integer? line offset of last executed query in buffer
+---@field private last_exec_bufnr integer? buffer of last executed query
 local EditorUI = {}
 
 ---@param handler Handler
@@ -49,9 +69,16 @@ function EditorUI:new(handler, result, opts)
       swapfile = false,
       filetype = "sql",
     }, opts.buffer_options or {}),
+    diag_ns = vim.api.nvim_create_namespace("dbee_diagnostics"),
+    last_exec_offset = nil,
+    last_exec_bufnr = nil,
   }
   setmetatable(o, self)
   self.__index = self
+
+  handler:register_event_listener("call_state_changed", function(data)
+    o:on_call_state_changed(data)
+  end)
 
   -- set the current note as first note from global namespace
   local global_notes = o:namespace_get_notes("global")
@@ -111,6 +138,10 @@ function EditorUI:get_actions()
       local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
       local query = table.concat(lines, "\n")
 
+      self.last_exec_offset = 0
+      self.last_exec_bufnr = bufnr
+      vim.diagnostic.reset(self.diag_ns, bufnr)
+
       local conn = self.handler:get_current_connection()
       if not conn then
         return
@@ -124,6 +155,10 @@ function EditorUI:get_actions()
       local selection = vim.api.nvim_buf_get_text(0, srow, scol, erow, ecol, {})
       local query = table.concat(selection, "\n")
 
+      self.last_exec_offset = srow
+      self.last_exec_bufnr = vim.api.nvim_get_current_buf()
+      vim.diagnostic.reset(self.diag_ns, self.last_exec_bufnr)
+
       local conn = self.handler:get_current_connection()
       if not conn then
         return
@@ -136,6 +171,10 @@ function EditorUI:get_actions()
       local query, srow, erow = utils.query_under_cursor(bufnr)
 
       if query ~= "" then
+        self.last_exec_offset = srow
+        self.last_exec_bufnr = bufnr
+        vim.diagnostic.reset(self.diag_ns, bufnr)
+
         -- highlight the statement that will be executed
         local ns_id = vim.api.nvim_create_namespace("dbee_query_highlight")
         vim.api.nvim_buf_clear_namespace(bufnr, ns_id, 0, -1)
@@ -465,6 +504,51 @@ function EditorUI:show(winid)
 
   -- configure window options (needs to be set after setting the buffer to window)
   common.configure_window_options(winid, self.window_options)
+end
+
+---@private
+---@param data { call: CallDetails }
+function EditorUI:on_call_state_changed(data)
+  if not data or not data.call then
+    return
+  end
+
+  if data.call.state ~= "executing_failed" then
+    return
+  end
+
+  local err_msg = data.call.error
+  if not err_msg or err_msg == "" then
+    return
+  end
+
+  local err_line, err_col = parse_oracle_error_location(err_msg)
+  if not err_line or not self.last_exec_bufnr or not self.last_exec_offset then
+    return
+  end
+
+  local buf_line = self.last_exec_offset + err_line - 1
+  local buf_col = (err_col or 1) - 1
+
+  local bufnr = self.last_exec_bufnr
+  if not vim.api.nvim_buf_is_valid(bufnr) then
+    return
+  end
+
+  local line_count = vim.api.nvim_buf_line_count(bufnr)
+  if buf_line >= line_count then
+    buf_line = line_count - 1
+  end
+
+  vim.diagnostic.set(self.diag_ns, bufnr, {
+    {
+      lnum = buf_line,
+      col = buf_col,
+      severity = vim.diagnostic.severity.ERROR,
+      message = err_msg,
+      source = "dbee",
+    },
+  })
 end
 
 return EditorUI
