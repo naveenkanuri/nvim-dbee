@@ -159,6 +159,42 @@ function M.random_string()
   return r(10)
 end
 
+--- Fallback: find the contiguous block of non-empty lines around cursor_row.
+--- Used when treesitter can't parse the statement (e.g. PL/SQL blocks).
+---@param lines string[]
+---@param cursor_row integer zero-based row index
+---@return string query, integer start_row, integer end_row
+local function query_block_at_cursor(lines, cursor_row)
+  -- If cursor is on an empty line, return empty
+  if not lines[cursor_row + 1] or lines[cursor_row + 1]:match("^%s*$") then
+    return "", cursor_row, cursor_row
+  end
+
+  -- Scan upward to find start of block
+  local start_row = cursor_row
+  while start_row > 0 and lines[start_row] and not lines[start_row]:match("^%s*$") do
+    start_row = start_row - 1
+  end
+  if not lines[start_row + 1] or lines[start_row + 1]:match("^%s*$") then
+    start_row = start_row + 1
+  end
+
+  -- Scan downward to find end of block
+  local end_row = cursor_row
+  while end_row < #lines - 1 and lines[end_row + 2] and not lines[end_row + 2]:match("^%s*$") do
+    end_row = end_row + 1
+  end
+
+  -- Extract the block
+  local block_lines = {}
+  for i = start_row, end_row do
+    table.insert(block_lines, lines[i + 1]) -- lines is 1-indexed
+  end
+  local query = table.concat(block_lines, "\n")
+
+  return query, start_row, end_row
+end
+
 --- Get the SQL statement under the cursor and its range (using treesitter).
 --- Potential returns are 1. the SQL query, 2. empty string, 3. nil if filetype isn't SQL.
 ---@param bufnr integer buffer containing the SQL queries.
@@ -207,6 +243,12 @@ function M.query_under_cursor(bufnr)
 
   -- clean up the tmp_buf
   vim.api.nvim_buf_delete(tmp_buf, { force = true })
+
+  -- Fallback: if treesitter didn't find a statement, use blank-line separation
+  if query == "" then
+    query, start_row, end_row = query_block_at_cursor(lines, cursor_row)
+  end
+
   return query:gsub(";%s*$", ""), start_row, end_row
 end
 
