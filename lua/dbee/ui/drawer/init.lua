@@ -346,13 +346,37 @@ function DrawerUI:get_actions()
       local call = self.handler:connection_execute(conn.id, gen_call_query)
       self.result:set_call(call)
 
-      -- Create a local note for the procedure call
-      local note_name = "call_" .. node.name
-      pcall(function()
-        local note_id = self.editor:namespace_create_note(tostring(conn.id), note_name)
+      -- Open or create a local note for the procedure call
+      local note_name = "call_" .. node.name .. ".sql"
+      local namespace_id = tostring(conn.id)
+      local existing_notes = self.editor:namespace_get_notes(namespace_id)
+      local found_id = nil
+      for _, n in ipairs(existing_notes) do
+        if n.name == note_name then
+          found_id = n.id
+          break
+        end
+      end
+
+      if found_id then
+        self.editor:set_current_note(found_id)
+      else
+        local note_id = self.editor:namespace_create_note(namespace_id, note_name)
         self.editor:set_current_note(note_id)
         self:refresh()
-      end)
+
+        -- Populate new note with a call template (handles zero-arg procedures
+        -- where the Generate Call SQL returns empty results)
+        local current_note = self.editor:get_current_note()
+        if current_note and current_note.bufnr then
+          local buf_lines = vim.api.nvim_buf_get_lines(current_note.bufnr, 0, -1, false)
+          local is_empty = #buf_lines == 0 or (#buf_lines == 1 and buf_lines[1] == "")
+          if is_empty then
+            local template = "BEGIN\n  " .. node.schema .. "." .. node.name .. ";\nEND;"
+            vim.api.nvim_buf_set_lines(current_note.bufnr, 0, -1, false, vim.split(template, "\n"))
+          end
+        end
+      end
     end,
   }
 end
