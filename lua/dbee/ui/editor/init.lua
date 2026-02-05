@@ -39,6 +39,7 @@ end
 ---@field private last_exec_offset integer? line offset of last executed query in buffer
 ---@field private last_exec_bufnr integer? buffer of last executed query
 ---@field private note_calls table<note_id, CallDetails> last call per note
+---@field private note_exec_meta table<note_id, { bufnr: integer, offset: integer }> execution metadata per note
 local EditorUI = {}
 
 ---@param handler Handler
@@ -74,6 +75,7 @@ function EditorUI:new(handler, result, opts)
     last_exec_offset = nil,
     last_exec_bufnr = nil,
     note_calls = {},
+    note_exec_meta = {},
   }
   setmetatable(o, self)
   self.__index = self
@@ -152,6 +154,10 @@ function EditorUI:get_actions()
       self.result:set_call(call)
       if self.current_note_id then
         self.note_calls[self.current_note_id] = call
+        self.note_exec_meta[self.current_note_id] = {
+          bufnr = self.last_exec_bufnr,
+          offset = self.last_exec_offset,
+        }
       end
     end,
     run_selection = function()
@@ -172,6 +178,10 @@ function EditorUI:get_actions()
       self.result:set_call(call)
       if self.current_note_id then
         self.note_calls[self.current_note_id] = call
+        self.note_exec_meta[self.current_note_id] = {
+          bufnr = self.last_exec_bufnr,
+          offset = self.last_exec_offset,
+        }
       end
     end,
     run_under_cursor = function()
@@ -200,6 +210,10 @@ function EditorUI:get_actions()
           self.result:set_call(call)
           if self.current_note_id then
             self.note_calls[self.current_note_id] = call
+            self.note_exec_meta[self.current_note_id] = {
+              bufnr = self.last_exec_bufnr,
+              offset = self.last_exec_offset,
+            }
           end
         end
 
@@ -407,6 +421,7 @@ function EditorUI:namespace_remove_note(id, note_id)
 
   -- Clean up associated call tracking
   self.note_calls[note_id] = nil
+  self.note_exec_meta[note_id] = nil
 
   self:trigger_event("note_removed", { note_id = note_id })
 end
@@ -561,24 +576,37 @@ function EditorUI:on_call_state_changed(data)
   end
 
   local err_line, err_col = parse_oracle_error_location(err_msg)
-  if not err_line or not self.last_exec_bufnr or not self.last_exec_offset then
+  if not err_line then
     return
   end
 
-  local buf_line = self.last_exec_offset + err_line - 1
+  -- Find the note that owns this call to get the correct buffer and offset
+  local exec_bufnr = self.last_exec_bufnr
+  local exec_offset = self.last_exec_offset or 0
+  for note_id, stored_call in pairs(self.note_calls) do
+    if stored_call.id == data.call.id then
+      local meta = self.note_exec_meta[note_id]
+      if meta then
+        exec_bufnr = meta.bufnr
+        exec_offset = meta.offset
+      end
+      break
+    end
+  end
+
+  if not exec_bufnr or not vim.api.nvim_buf_is_valid(exec_bufnr) then
+    return
+  end
+
+  local buf_line = exec_offset + err_line - 1
   local buf_col = (err_col or 1) - 1
 
-  local bufnr = self.last_exec_bufnr
-  if not vim.api.nvim_buf_is_valid(bufnr) then
-    return
-  end
-
-  local line_count = vim.api.nvim_buf_line_count(bufnr)
+  local line_count = vim.api.nvim_buf_line_count(exec_bufnr)
   if buf_line >= line_count then
     buf_line = line_count - 1
   end
 
-  vim.diagnostic.set(self.diag_ns, bufnr, {
+  vim.diagnostic.set(self.diag_ns, exec_bufnr, {
     {
       lnum = buf_line,
       col = buf_col,
