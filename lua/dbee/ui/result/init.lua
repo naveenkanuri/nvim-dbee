@@ -38,6 +38,7 @@ function ResultUI:new(handler, opts)
     focus_result = opts.focus_result,
     mappings = opts.mappings or {},
     stop_progress = function() end,
+    _progress_running = false,
     progress_opts = opts.progress or {},
     window_options = vim.tbl_extend("force", {
       wrap = false,
@@ -85,17 +86,26 @@ function ResultUI:on_call_state_changed(data)
   self.current_call = call
 
   -- perform action based on the state
-  if call.state == "executing" then
-    self.stop_progress()
-    self:set_default_result_window() -- clear old timing from winbar
-    self:display_progress()
-  elseif call.state == "retrieving" then
+  if call.state == "executing" or call.state == "retrieving" then
+    -- Keep spinner running during both phases to avoid blocking
+    -- the main thread with synchronous RPC during row retrieval.
+    if not self._progress_running then
+      self.stop_progress()
+      self:set_default_result_window()
+      self:display_progress()
+      self._progress_running = true
+    end
+  elseif call.state == "archived" then
+    self._progress_running = false
     self.stop_progress()
     self:page_current()
-  elseif call.state == "executing_failed" or call.state == "retrieving_failed" or call.state == "canceled" then
+  elseif call.state == "executing_failed" or call.state == "retrieving_failed"
+      or call.state == "archive_failed" or call.state == "canceled" then
+    self._progress_running = false
     self.stop_progress()
     self:display_status()
   else
+    self._progress_running = false
     self.stop_progress()
   end
 end
@@ -309,7 +319,11 @@ function ResultUI:restore_call(call)
     -- Calculate elapsed time so the timer doesn't restart from 0
     local elapsed = (vim.fn.localtime() * 1000000 - call.timestamp_us) / 1000000
     self:display_progress(elapsed)
-  elseif call.state == "retrieving" or call.state == "archived" then
+  elseif call.state == "retrieving" then
+    self:set_default_result_window()
+    local elapsed = (vim.fn.localtime() * 1000000 - call.timestamp_us) / 1000000
+    self:display_progress(elapsed)
+  elseif call.state == "archived" then
     self:page_current()
   elseif call.state == "executing_failed" or call.state == "retrieving_failed"
       or call.state == "archive_failed" or call.state == "canceled" then
