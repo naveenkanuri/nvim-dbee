@@ -32,6 +32,7 @@ func (d *oracleDriver) Query(ctx context.Context, query string) (core.ResultStre
 	queryCtx, _ := context.WithTimeout(ctx, oracleQueryTimeout)
 
 	// Remove the trailing semicolon from the query - for some reason it isn't supported in go_ora
+	query = strings.TrimSpace(query)
 	query = strings.TrimSuffix(query, ";")
 
 	// Check if this is a PL/SQL block
