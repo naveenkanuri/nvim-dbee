@@ -223,7 +223,7 @@ function CallLogUI:refresh()
 
   -- dummy node if no calls
   if vim.tbl_isempty(calls) then
-    self.tree:set_nodes { NuiTree.Node { id = tostring(math.random()), text = "Call log will be displayed here!" } }
+    self.tree:set_nodes { NuiTree.Node { id = "__empty__", text = "Call log will be displayed here!" } }
     self.tree:render()
     return
   end
@@ -234,7 +234,7 @@ function CallLogUI:refresh()
 
   local nodes = {}
   for _, c in ipairs(calls) do
-    table.insert(nodes, NuiTree.Node { id = tostring(math.random()), call = c })
+    table.insert(nodes, NuiTree.Node { id = c.id, call = c })
   end
 
   self.tree:set_nodes(nodes)
