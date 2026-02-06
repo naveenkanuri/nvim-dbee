@@ -159,6 +159,21 @@ function dbee.pick_connections()
         { c.database or "", "SnacksPickerComment" },
       }
     end,
+    preview = function(ctx)
+      local c = ctx.item.conn
+      local lines = {}
+      if c.is_current then
+        lines[#lines + 1] = "** Active Connection **"
+        lines[#lines + 1] = ""
+      end
+      lines[#lines + 1] = "Name: " .. c.name
+      lines[#lines + 1] = "Type: " .. c.type
+      if c.database then
+        lines[#lines + 1] = "Database: " .. c.database
+      end
+      lines[#lines + 1] = "ID:   " .. c.id
+      ctx.preview:set_lines(lines)
+    end,
     confirm = function(picker, item)
       picker:close()
       api.core.set_current_connection(item.conn.id)
