@@ -179,19 +179,62 @@ function dbee.pick_history()
     return
   end
 
-  local items = {}
+  local all_items = {}
   for i, entry in ipairs(history) do
-    table.insert(items, {
+    table.insert(all_items, {
       idx = i,
       score = i,
-      text = entry.query_preview .. "  " .. entry.time,
+      text = entry.query_preview,
       entry = entry,
     })
   end
 
+  -- Date token matchers keyed by prefix
+  local date_tokens = {
+    ["today:"] = function(ts)
+      local start = os.time({ year = tonumber(os.date("%Y")), month = tonumber(os.date("%m")), day = tonumber(os.date("%d")), hour = 0 })
+      return ts >= start
+    end,
+    ["yesterday:"] = function(ts)
+      local today_start = os.time({ year = tonumber(os.date("%Y")), month = tonumber(os.date("%m")), day = tonumber(os.date("%d")), hour = 0 })
+      return ts >= today_start - 86400 and ts < today_start
+    end,
+    ["week:"] = function(ts)
+      return ts >= os.time() - 7 * 86400
+    end,
+    ["month:"] = function(ts)
+      return ts >= os.time() - 30 * 86400
+    end,
+  }
+
+  local active_date_fn = nil
+
   require("snacks").picker({
     title = "Dbee History",
-    items = items,
+    items = all_items,
+    filter = {
+      transform = function(_, filter)
+        local pattern = filter.pattern or ""
+        local prev = active_date_fn
+        active_date_fn = nil
+        for token, fn in pairs(date_tokens) do
+          if pattern:sub(1, #token) == token then
+            active_date_fn = fn
+            filter.pattern = pattern:sub(#token + 1)
+            break
+          end
+        end
+        -- Force refresh when date filter changes (added or removed)
+        if active_date_fn ~= prev then
+          return true
+        end
+      end,
+    },
+    transform = function(item)
+      if active_date_fn and not active_date_fn(item.entry.timestamp) then
+        return false
+      end
+    end,
     format = function(item)
       local e = item.entry
       return {

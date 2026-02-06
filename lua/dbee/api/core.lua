@@ -286,6 +286,7 @@ function core.get_call_history()
       duration = duration,
       time = time,
       date = date_str,
+      timestamp = call.timestamp_us and math.floor(call.timestamp_us / 1000000) or 0,
     })
   end
 
