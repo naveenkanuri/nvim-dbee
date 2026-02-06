@@ -485,6 +485,18 @@ function EditorUI:restore_note_result(note_id)
   self.result:restore_call(saved_call)
 end
 
+--- Find the note associated with a call ID.
+---@param call_id string
+---@return note_id|nil
+function EditorUI:find_note_for_call(call_id)
+  for note_id, stored_call in pairs(self.note_calls) do
+    if stored_call.id == call_id then
+      return note_id
+    end
+  end
+  return nil
+end
+
 -- Sets note with id as the current note
 -- and opens it in the window
 ---@param id note_id

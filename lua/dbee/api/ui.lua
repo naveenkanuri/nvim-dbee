@@ -222,4 +222,48 @@ function ui.result_do_action(action)
   state.result():do_action(action)
 end
 
+--- Get all notes from all namespaces.
+--- Returns a flat list with namespace info included.
+---@return { id: note_id, name: string, namespace: namespace_id, file: string?, bufnr: integer? }[]
+function ui.editor_get_all_notes()
+  local editor = state.editor()
+  local all_notes = {}
+
+  -- Get global notes
+  for _, note in ipairs(editor:namespace_get_notes("global")) do
+    table.insert(all_notes, {
+      id = note.id,
+      name = note.name,
+      namespace = "global",
+      file = note.file,
+      bufnr = note.bufnr,
+    })
+  end
+
+  -- Get local notes for current connection
+  local handler = state.handler()
+  local conn = handler:get_current_connection()
+  if conn then
+    local namespace = tostring(conn.id)
+    for _, note in ipairs(editor:namespace_get_notes(namespace)) do
+      table.insert(all_notes, {
+        id = note.id,
+        name = note.name,
+        namespace = conn.name or namespace,
+        file = note.file,
+        bufnr = note.bufnr,
+      })
+    end
+  end
+
+  return all_notes
+end
+
+--- Find the note associated with a call ID.
+---@param call_id string
+---@return note_id|nil
+function ui.editor_find_note_for_call(call_id)
+  return state.editor():find_note_for_call(call_id)
+end
+
 return ui
