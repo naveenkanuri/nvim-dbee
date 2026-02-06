@@ -194,6 +194,14 @@ function dbee.pick_history()
     return
   end
 
+  -- Build connection name lookup for token matching
+  local all_conns = api.core.get_all_connections()
+  local conn_names = {} -- lowercase name/id → conn_id
+  for _, conn in ipairs(all_conns) do
+    conn_names[conn.name:lower()] = conn.id
+    conn_names[conn.id:lower()] = conn.id
+  end
+
   local all_items = {}
   for i, entry in ipairs(history) do
     table.insert(all_items, {
@@ -223,6 +231,31 @@ function dbee.pick_history()
   }
 
   local active_date_fn = nil
+  local active_conn_id = nil
+
+  -- Parse tokens from pattern (left-to-right, multiple allowed)
+  local function parse_tokens(pattern)
+    active_date_fn = nil
+    active_conn_id = nil
+    -- Parse tokens left to right
+    while true do
+      local token = pattern:match("^(%S+:)%s*")
+      if not token then break end
+      local token_lower = token:sub(1, -2):lower() -- strip trailing ':'
+      -- Check date tokens first
+      if date_tokens[token] then
+        active_date_fn = date_tokens[token]
+        pattern = pattern:sub(#token + 1):gsub("^%s+", "")
+      -- Check connection names/IDs
+      elseif conn_names[token_lower] then
+        active_conn_id = conn_names[token_lower]
+        pattern = pattern:sub(#token + 1):gsub("^%s+", "")
+      else
+        break -- unknown token, treat as search text
+      end
+    end
+    return pattern
+  end
 
   require("snacks").picker({
     title = "Dbee History",
@@ -230,17 +263,10 @@ function dbee.pick_history()
     filter = {
       transform = function(_, filter)
         local pattern = filter.pattern or ""
-        local prev = active_date_fn
-        active_date_fn = nil
-        for token, fn in pairs(date_tokens) do
-          if pattern:sub(1, #token) == token then
-            active_date_fn = fn
-            filter.pattern = pattern:sub(#token + 1)
-            break
-          end
-        end
-        -- Force refresh when date filter changes (added or removed)
-        if active_date_fn ~= prev then
+        local prev_date = active_date_fn
+        local prev_conn = active_conn_id
+        filter.pattern = parse_tokens(pattern)
+        if active_date_fn ~= prev_date or active_conn_id ~= prev_conn then
           return true
         end
       end,
@@ -249,11 +275,15 @@ function dbee.pick_history()
       if active_date_fn and not active_date_fn(item.entry.timestamp) then
         return false
       end
+      if active_conn_id and item.entry.conn_id ~= active_conn_id then
+        return false
+      end
     end,
     format = function(item)
       local e = item.entry
       return {
         { e.state_icon .. "  ", e.state_icon == "✓" and "SnacksPickerMatch" or "SnacksPickerComment" },
+        { e.conn_id .. "  ", "SnacksPickerLabel" },
         { e.query_preview, "SnacksPickerFile" },
         { "  " },
         { e.duration, "SnacksPickerComment" },

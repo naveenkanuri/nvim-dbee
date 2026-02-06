@@ -224,71 +224,73 @@ function core.get_all_connections()
   return all_conns
 end
 
---- Get call history for current connection with display-friendly metadata.
----@return { call: CallDetails, query_preview: string, state_icon: string, duration: string, time: string }[]
+--- Get call history for all connections with display-friendly metadata.
+---@return { call: CallDetails, query_preview: string, state_icon: string, duration: string, time: string, date: string, timestamp: number, conn_name: string, conn_id: string }[]
 function core.get_call_history()
   local handler = state.handler()
-  local conn = handler:get_current_connection()
-  if not conn then
-    return {}
-  end
-
-  local calls = handler:connection_get_calls(conn.id)
-  if not calls then
-    return {}
-  end
+  local all_conns = core.get_all_connections()
 
   local history = {}
-  for _, call in ipairs(calls) do
-    -- State icon
-    local icon = "?"
-    if call.state == "archived" then
-      icon = "✓"
-    elseif call.state == "executing" or call.state == "retrieving" then
-      icon = "⏳"
-    elseif call.state == "canceled" then
-      icon = "⊘"
-    elseif call.state:match("failed$") then
-      icon = "✗"
-    end
+  for _, conn in ipairs(all_conns) do
+    local calls = handler:connection_get_calls(conn.id)
+    if calls then
+      for _, call in ipairs(calls) do
+        -- State icon
+        local icon = "?"
+        if call.state == "archived" then
+          icon = "✓"
+        elseif call.state == "executing" or call.state == "retrieving" then
+          icon = "⏳"
+        elseif call.state == "canceled" then
+          icon = "⊘"
+        elseif call.state:match("failed$") then
+          icon = "✗"
+        end
 
-    -- Duration
-    local duration = "running"
-    if call.time_taken_us and call.time_taken_us > 0 then
-      duration = string.format("%.1fs", call.time_taken_us / 1000000)
-    end
+        -- Duration
+        local duration = "running"
+        if call.time_taken_us and call.time_taken_us > 0 then
+          duration = string.format("%.1fs", call.time_taken_us / 1000000)
+        end
 
-    -- Time (from timestamp_us) — show date if not today
-    local time = ""
-    local date_str = ""
-    if call.timestamp_us then
-      local ts = math.floor(call.timestamp_us / 1000000)
-      local today = os.date("%Y-%m-%d")
-      local call_date = os.date("%Y-%m-%d", ts)
-      if call_date == today then
-        time = os.date("%H:%M", ts)
-      else
-        time = os.date("%m-%d %H:%M", ts)
+        -- Time (from timestamp_us) — show date if not today
+        local time = ""
+        local date_str = ""
+        if call.timestamp_us then
+          local ts = math.floor(call.timestamp_us / 1000000)
+          local today = os.date("%Y-%m-%d")
+          local call_date = os.date("%Y-%m-%d", ts)
+          if call_date == today then
+            time = os.date("%H:%M", ts)
+          else
+            time = os.date("%m-%d %H:%M", ts)
+          end
+          date_str = os.date("%Y-%m-%d", ts)
+        end
+
+        -- Query preview (first 50 chars, single line)
+        local preview = (call.query or ""):gsub("\n", " "):sub(1, 50)
+        if #(call.query or "") > 50 then
+          preview = preview .. "..."
+        end
+
+        table.insert(history, {
+          call = call,
+          query_preview = preview,
+          state_icon = icon,
+          duration = duration,
+          time = time,
+          date = date_str,
+          timestamp = call.timestamp_us and math.floor(call.timestamp_us / 1000000) or 0,
+          conn_name = conn.name,
+          conn_id = conn.id,
+        })
       end
-      date_str = os.date("%Y-%m-%d", ts)
     end
-
-    -- Query preview (first 50 chars, single line)
-    local preview = (call.query or ""):gsub("\n", " "):sub(1, 50)
-    if #(call.query or "") > 50 then
-      preview = preview .. "..."
-    end
-
-    table.insert(history, {
-      call = call,
-      query_preview = preview,
-      state_icon = icon,
-      duration = duration,
-      time = time,
-      date = date_str,
-      timestamp = call.timestamp_us and math.floor(call.timestamp_us / 1000000) or 0,
-    })
   end
+
+  -- Sort by timestamp descending (newest first)
+  table.sort(history, function(a, b) return a.timestamp > b.timestamp end)
 
   return history
 end
