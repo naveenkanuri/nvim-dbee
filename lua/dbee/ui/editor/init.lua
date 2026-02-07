@@ -550,6 +550,12 @@ function EditorUI:display_note(id)
   -- configure options and mappings on new buffer
   common.configure_buffer_options(bufnr, self.buffer_options)
   common.configure_buffer_mappings(bufnr, self:get_actions(), self.mappings)
+
+  -- queue buffer for dbee LSP attachment (LSP starts when structure_loaded fires)
+  local ok, lsp = pcall(require, "dbee.lsp")
+  if ok then
+    lsp.queue_buffer(bufnr)
+  end
 end
 
 ---@param winid integer

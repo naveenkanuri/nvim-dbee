@@ -66,6 +66,12 @@ local function setup_ui()
   m.editor = EditorUI:new(m.handler, m.result, m.config.editor)
   m.drawer = DrawerUI:new(m.handler, m.editor, m.result, m.config.drawer)
 
+  -- register LSP event listeners for schema cache management
+  local ok, lsp = pcall(require, "dbee.lsp")
+  if ok then
+    lsp.register_events()
+  end
+
   m.ui_loaded = true
 end
 
