@@ -115,7 +115,7 @@ function EditorUI:new(handler, result, opts)
 end
 
 ---@private
---- Persist the current note's file path and last execution line to disk.
+--- Persist the current note's file path and cursor line to disk.
 function EditorUI:save_last_note()
   local note = self:search_note(self.current_note_id)
   if not note then
@@ -123,9 +123,15 @@ function EditorUI:save_last_note()
   end
 
   local cursor_line = nil
-  local meta = self.note_exec_meta[self.current_note_id]
-  if meta then
-    cursor_line = meta.offset
+
+  if note.bufnr and vim.api.nvim_buf_is_valid(note.bufnr) then
+    for _, win in ipairs(vim.api.nvim_list_wins()) do
+      if vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_buf(win) == note.bufnr then
+        local pos = vim.api.nvim_win_get_cursor(win)
+        cursor_line = math.max((pos[1] or 1) - 1, 0)
+        break
+      end
+    end
   end
 
   local dir = vim.fs.dirname(self.state_file)
