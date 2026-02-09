@@ -22,6 +22,10 @@ type oracleDriver struct {
 	db *sql.DB
 }
 
+type oracleExecContexter interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
 func (d *oracleDriver) Query(ctx context.Context, query string) (core.ResultStream, error) {
 	// Create a context with longer timeout for Oracle queries.
 	// go-ora defaults to 30s which is too short for many queries.
@@ -112,7 +116,7 @@ func (d *oracleDriver) executePLSQL(ctx context.Context, query string) (core.Res
 // fetchDBMSOutputFromConn retrieves all lines from the DBMS_OUTPUT buffer using GET_LINE.
 // Must use the same connection that executed the PL/SQL block.
 // Note: DBMS_OUTPUT.PUT (without PUT_LINE) content is only captured if followed by PUT_LINE.
-func (d *oracleDriver) fetchDBMSOutputFromConn(ctx context.Context, conn *sql.Conn) (string, error) {
+func (d *oracleDriver) fetchDBMSOutputFromConn(ctx context.Context, conn oracleExecContexter) (string, error) {
 
 	var output strings.Builder
 
@@ -128,8 +132,7 @@ func (d *oracleDriver) fetchDBMSOutputFromConn(ctx context.Context, conn *sql.Co
 			sql.Named("line", sql.Out{Dest: &line}),
 			sql.Named("status", sql.Out{Dest: &status}))
 		if err != nil {
-			// Return error info as output for debugging
-			return output.String() + "[GET_LINE error: " + err.Error() + "]", nil
+			return output.String(), fmt.Errorf("DBMS_OUTPUT.GET_LINE: %w", err)
 		}
 
 		// status 0 = success, 1 = no more lines
