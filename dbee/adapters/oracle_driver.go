@@ -26,10 +26,8 @@ func (d *oracleDriver) Query(ctx context.Context, query string) (core.ResultStre
 	// Create a context with longer timeout for Oracle queries.
 	// go-ora defaults to 30s which is too short for many queries.
 	// The parent context can still cancel early if user requests it.
-	// Note: We don't defer cancel() because the ResultStream may still need
-	// the context after Query() returns. The context will be cleaned up when
-	// the parent ctx is cancelled or the timeout expires.
-	queryCtx, _ := context.WithTimeout(ctx, oracleQueryTimeout)
+	queryCtx, cancel := context.WithTimeout(ctx, oracleQueryTimeout)
+	defer cancel()
 
 	// Remove the trailing semicolon from the query - for some reason it isn't supported in go_ora
 	query = strings.TrimSpace(query)
