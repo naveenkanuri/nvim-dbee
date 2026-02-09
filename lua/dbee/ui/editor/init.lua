@@ -40,6 +40,8 @@ end
 ---@field private last_exec_bufnr integer? buffer of last executed query
 ---@field private note_calls table<note_id, CallDetails> last call per note
 ---@field private note_exec_meta table<note_id, { bufnr: integer, offset: integer }> execution metadata per note
+---@field private state_file string path to persist last-active note state
+---@field private pending_cursor_line? integer one-shot cursor line to restore on first display
 local EditorUI = {}
 
 ---@param handler Handler
@@ -76,6 +78,8 @@ function EditorUI:new(handler, result, opts)
     last_exec_bufnr = nil,
     note_calls = {},
     note_exec_meta = {},
+    state_file = vim.fn.stdpath("state") .. "/dbee/last_note.json",
+    pending_cursor_line = nil,
   }
   setmetatable(o, self)
   self.__index = self
@@ -84,16 +88,107 @@ function EditorUI:new(handler, result, opts)
     o:on_call_state_changed(data)
   end)
 
-  -- set the current note as first note from global namespace
-  local global_notes = o:namespace_get_notes("global")
-  if not vim.tbl_isempty(global_notes) then
-    o.current_note_id = global_notes[1].id
-  else
-    -- otherwise create a welcome note in global namespace
-    o.current_note_id = o:create_welcome_note()
+  -- restore last-active note from previous session, or fall back to first global note
+  local restored = false
+  local last = o:load_last_note()
+  if last then
+    local note_id = o:resolve_note_from_file(last.file)
+    if note_id then
+      o.current_note_id = note_id
+      if last.cursor_line then
+        o.pending_cursor_line = last.cursor_line
+      end
+      restored = true
+    end
+  end
+
+  if not restored then
+    local global_notes = o:namespace_get_notes("global")
+    if not vim.tbl_isempty(global_notes) then
+      o.current_note_id = global_notes[1].id
+    else
+      o.current_note_id = o:create_welcome_note()
+    end
   end
 
   return o
+end
+
+---@private
+--- Persist the current note's file path and last execution line to disk.
+function EditorUI:save_last_note()
+  local note = self:search_note(self.current_note_id)
+  if not note then
+    return
+  end
+
+  local cursor_line = nil
+  local meta = self.note_exec_meta[self.current_note_id]
+  if meta then
+    cursor_line = meta.offset
+  end
+
+  local dir = vim.fs.dirname(self.state_file)
+  vim.fn.mkdir(dir, "p")
+
+  local f = io.open(self.state_file, "w")
+  if not f then
+    return
+  end
+  f:write(vim.json.encode({ file = note.file, cursor_line = cursor_line }))
+  f:close()
+end
+
+---@private
+--- Read persisted last-note state from disk.
+---@return { file: string, cursor_line: integer? }?
+function EditorUI:load_last_note()
+  local f = io.open(self.state_file, "r")
+  if not f then
+    return nil
+  end
+  local content = f:read("*a")
+  f:close()
+
+  local ok, data = pcall(vim.json.decode, content)
+  if not ok or type(data) ~= "table" or not data.file then
+    return nil
+  end
+  return data
+end
+
+---@private
+--- Given a file path, find or load the note and return its note_id.
+---@param file string
+---@return note_id?
+function EditorUI:resolve_note_from_file(file)
+  if vim.fn.filereadable(file) ~= 1 then
+    return nil
+  end
+
+  -- check already-loaded namespaces
+  local note = self:search_note_with_file(file)
+  if note then
+    return note.id
+  end
+
+  -- derive namespace from path: strip directory prefix, take first component
+  local prefix = self.directory .. "/"
+  if vim.startswith(file, prefix) then
+    local rel = file:sub(#prefix + 1)
+    local namespace = rel:match("^([^/]+)")
+    if namespace then
+      -- load that namespace (triggers load_notes_from_disk)
+      self:namespace_get_notes(namespace)
+      -- search again
+      note = self:search_note_with_file(file)
+      if note then
+        return note.id
+      end
+    end
+  end
+
+  return nil
 end
 
 ---@private
@@ -158,6 +253,7 @@ function EditorUI:get_actions()
           bufnr = self.last_exec_bufnr,
           offset = self.last_exec_offset,
         }
+        self:save_last_note()
       end
     end,
     run_selection = function()
@@ -182,6 +278,7 @@ function EditorUI:get_actions()
           bufnr = self.last_exec_bufnr,
           offset = self.last_exec_offset,
         }
+        self:save_last_note()
       end
     end,
     run_under_cursor = function()
@@ -214,6 +311,7 @@ function EditorUI:get_actions()
               bufnr = self.last_exec_bufnr,
               offset = self.last_exec_offset,
             }
+            self:save_last_note()
           end
         end
 
@@ -465,6 +563,10 @@ function EditorUI:note_rename(id, name)
   self.notes[namespace][id].name = name
 
   self:trigger_event("note_state_changed", { note = self.notes[namespace][id] })
+
+  if id == self.current_note_id then
+    self:save_last_note()
+  end
 end
 
 ---@return note_details?
@@ -519,6 +621,8 @@ function EditorUI:set_current_note(id)
   self:restore_note_result(id)
 
   self:trigger_event("current_note_changed", { note_id = id })
+
+  self:save_last_note()
 end
 
 ---@private
@@ -537,6 +641,7 @@ function EditorUI:display_note(id)
   if note.bufnr and vim.api.nvim_buf_is_valid(note.bufnr) then
     vim.api.nvim_win_set_buf(self.winid, note.bufnr)
     vim.api.nvim_set_current_win(self.winid)
+    self:apply_pending_cursor()
     return
   end
 
@@ -556,6 +661,29 @@ function EditorUI:display_note(id)
   if ok then
     lsp.queue_buffer(bufnr)
   end
+
+  self:apply_pending_cursor()
+end
+
+---@private
+--- Apply and clear the one-shot pending cursor position.
+function EditorUI:apply_pending_cursor()
+  if not self.pending_cursor_line then
+    return
+  end
+  if not self.winid or not vim.api.nvim_win_is_valid(self.winid) then
+    self.pending_cursor_line = nil
+    return
+  end
+
+  local bufnr = vim.api.nvim_win_get_buf(self.winid)
+  local line_count = vim.api.nvim_buf_line_count(bufnr)
+  local target = math.min(self.pending_cursor_line + 1, line_count)
+  if target < 1 then
+    target = 1
+  end
+  vim.api.nvim_win_set_cursor(self.winid, { target, 0 })
+  self.pending_cursor_line = nil
 end
 
 ---@param winid integer
