@@ -333,10 +333,7 @@ function dbee.pick_history()
               if not match then goto continue end
               api.ui.editor_set_current_note(note.id)
               local current_note = api.ui.editor_get_current_note()
-              api.ui.result_set_call(call)
-              if call.state == "archived" or call.state == "retrieving" then
-                api.ui.result_page_current()
-              end
+              api.ui.result_restore_call(call)
               -- Find the editor window and focus it
               if current_note and current_note.bufnr then
                 vim.schedule(function()
@@ -360,10 +357,7 @@ function dbee.pick_history()
       end
 
       -- No note found — show results and open floating query preview
-      api.ui.result_set_call(call)
-      if call.state == "archived" or call.state == "retrieving" then
-        api.ui.result_page_current()
-      end
+      api.ui.result_restore_call(call)
 
       -- Open floating preview with query text
       local query = call.query or ""

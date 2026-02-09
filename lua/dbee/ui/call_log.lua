@@ -185,10 +185,7 @@ function CallLogUI:get_actions()
         return
       end
 
-      if call.state == "archived" or call.state == "retrieving" then
-        self.result:set_call(call)
-        self.result:page_current()
-      end
+      self.result:restore_call(call)
     end,
     cancel_call = function()
       local node = self.tree:get_node()

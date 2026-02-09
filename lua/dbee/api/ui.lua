@@ -179,6 +179,12 @@ function ui.result_set_call(call)
   state.result():set_call(call)
 end
 
+--- Restore call's display state in results UI.
+---@param call CallDetails
+function ui.result_restore_call(call)
+  state.result():restore_call(call)
+end
+
 --- Gets the currently displayed call.
 ---@return CallDetails|nil
 function ui.result_get_call()
