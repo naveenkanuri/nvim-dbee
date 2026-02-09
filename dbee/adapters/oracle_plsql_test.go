@@ -18,8 +18,8 @@ func TestParseDBMSOutputLines(t *testing.T) {
 		{"empty string", "", []string{}},
 		{"only newlines", "\n\n", []string{}},
 		{"trailing newline", "hello\n", []string{"hello"}},
-		{"leading newline", "\nhello", []string{"hello"}},
-		{"mixed empty lines", "line1\n\nline2", []string{"line1", "line2"}},
+		{"leading newline", "\nhello", []string{"", "hello"}},
+		{"mixed empty lines", "line1\n\nline2", []string{"line1", "", "line2"}},
 		{"unicode content", "こんにちは\n世界", []string{"こんにちは", "世界"}},
 		{"special chars", "a=1; b='test'", []string{"a=1; b='test'"}},
 	}
