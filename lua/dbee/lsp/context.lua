@@ -50,6 +50,18 @@ local column_keywords = {
   "values",
 }
 
+local sql_keywords_set = {
+  select = true, from = true, where = true, join = true, inner = true,
+  left = true, right = true, full = true, cross = true, outer = true,
+  on = true, ["and"] = true, ["or"] = true, ["in"] = true, ["not"] = true, as = true,
+  order = true, group = true, by = true, having = true, limit = true,
+  offset = true, union = true, all = true, distinct = true, set = true,
+  insert = true, into = true, update = true, delete = true, create = true,
+  alter = true, drop = true, null = true, is = true, like = true,
+  between = true, exists = true, case = true, when = true, ["then"] = true,
+  ["else"] = true, ["end"] = true, values = true, asc = true, desc = true,
+}
+
 --- Get the text of the current line up to the cursor position.
 ---@param params table LSP completion params
 ---@return string
@@ -66,65 +78,93 @@ local function get_text_before_cursor(params)
   return lines[1]:sub(1, col)
 end
 
---- Parse alias map from the full buffer text.
---- Scans FROM and JOIN clauses for aliases like: FROM employees e, departments d
+--- Get full buffer text up to the cursor position.
 ---@param bufnr integer
+---@param line integer
+---@param col integer
+---@return string
+local function get_buffer_text_before_cursor(bufnr, line, col)
+  local lines = vim.api.nvim_buf_get_lines(bufnr, 0, line + 1, false)
+  if not lines or #lines == 0 then
+    return ""
+  end
+
+  lines[#lines] = lines[#lines]:sub(1, col)
+  return table.concat(lines, "\n")
+end
+
+--- Parse alias map from the current statement up to the cursor.
+--- Scans FROM/JOIN/UPDATE/MERGE table aliases and prefers the latest binding.
+---@param bufnr integer
+---@param line integer
+---@param col integer
 ---@return table<string, { table: string, schema: string? }>
-local function parse_aliases(bufnr)
-  local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-  local text = table.concat(lines, " ")
+local function parse_aliases(bufnr, line, col)
+  local text = get_buffer_text_before_cursor(bufnr, line, col)
+  if text == "" then
+    return {}
+  end
+
+  -- Keep alias resolution scoped to the current statement only.
+  local stmt_start = text:match(".*();")
+  if stmt_start then
+    text = text:sub(stmt_start + 1)
+  end
+
+  ---@type table<string, { table: string, schema: string? }>
   local aliases = {}
+  local matches = {}
 
-  local lower = text:lower()
+  ---@param pattern string
+  ---@param specificity integer
+  local function add_matches(pattern, specificity)
+    local init = 1
+    while true do
+      local s, e, table_ref, alias = text:find(pattern, init)
+      if not s then
+        break
+      end
 
-  -- Scan for "table alias" and "table AS alias" patterns after FROM/JOIN keywords.
-  --   word.word word  (schema.table alias)
-  --   word word       (table alias) — but not SQL keywords
-  local sql_keywords_set = {
-    select = true, from = true, where = true, join = true, inner = true,
-    left = true, right = true, full = true, cross = true, outer = true,
-    on = true, ["and"] = true, ["or"] = true, ["in"] = true, ["not"] = true, as = true,
-    order = true, group = true, by = true, having = true, limit = true,
-    offset = true, union = true, all = true, distinct = true, set = true,
-    insert = true, into = true, update = true, delete = true, create = true,
-    alter = true, drop = true, null = true, is = true, like = true,
-    between = true, exists = true, case = true, when = true, ["then"] = true,
-    ["else"] = true, ["end"] = true, values = true, asc = true, desc = true,
-  }
+      local alias_lower = alias and alias:lower() or ""
+      if alias_lower ~= "" and not sql_keywords_set[alias_lower] then
+        local schema, tbl = table_ref:match("^([%w_]+)%.([%w_]+)$")
+        if not tbl then
+          tbl = table_ref
+          schema = nil
+        end
 
-  -- Match: schema.table AS alias
-  for schema, tbl, alias in text:gmatch("([%w_]+)%.([%w_]+)%s+[Aa][Ss]%s+([%w_]+)") do
-    aliases[alias:lower()] = { table = tbl, schema = schema }
-  end
+        matches[#matches + 1] = {
+          pos = s,
+          specificity = specificity,
+          alias = alias_lower,
+          table = tbl,
+          schema = schema,
+        }
+      end
 
-  -- Match: schema.table alias (not a keyword)
-  for schema, tbl, alias in text:gmatch("([%w_]+)%.([%w_]+)%s+([%w_]+)") do
-    local a = alias:lower()
-    if not sql_keywords_set[a] and not aliases[a] then
-      aliases[a] = { table = tbl, schema = schema }
+      init = e + 1
     end
   end
 
-  -- Match: table AS alias (no schema)
-  for tbl, alias in text:gmatch("([%w_]+)%s+[Aa][Ss]%s+([%w_]+)") do
-    local a = alias:lower()
-    if not aliases[a] then
-      aliases[a] = { table = tbl, schema = nil }
-    end
-  end
+  add_matches("[Ff][Rr][Oo][Mm]%s+([%w_%.]+)%s+([%w_]+)", 1)
+  add_matches("[Jj][Oo][Ii][Nn]%s+([%w_%.]+)%s+([%w_]+)", 1)
+  add_matches("[Uu][Pp][Dd][Aa][Tt][Ee]%s+([%w_%.]+)%s+([%w_]+)", 1)
+  add_matches("[Mm][Ee][Rr][Gg][Ee]%s+[Ii][Nn][Tt][Oo]%s+([%w_%.]+)%s+([%w_]+)", 1)
 
-  -- Match: FROM/JOIN table alias (no schema, no AS)
-  for tbl, alias in text:gmatch("[Ff][Rr][Oo][Mm]%s+([%w_]+)%s+([%w_]+)") do
-    local a = alias:lower()
-    if not sql_keywords_set[a] and not aliases[a] then
-      aliases[a] = { table = tbl, schema = nil }
+  add_matches("[Ff][Rr][Oo][Mm]%s+([%w_%.]+)%s+[Aa][Ss]%s+([%w_]+)", 2)
+  add_matches("[Jj][Oo][Ii][Nn]%s+([%w_%.]+)%s+[Aa][Ss]%s+([%w_]+)", 2)
+  add_matches("[Uu][Pp][Dd][Aa][Tt][Ee]%s+([%w_%.]+)%s+[Aa][Ss]%s+([%w_]+)", 2)
+  add_matches("[Mm][Ee][Rr][Gg][Ee]%s+[Ii][Nn][Tt][Oo]%s+([%w_%.]+)%s+[Aa][Ss]%s+([%w_]+)", 2)
+
+  table.sort(matches, function(a, b)
+    if a.pos == b.pos then
+      return a.specificity < b.specificity
     end
-  end
-  for tbl, alias in text:gmatch("[Jj][Oo][Ii][Nn]%s+([%w_]+)%s+([%w_]+)") do
-    local a = alias:lower()
-    if not sql_keywords_set[a] and not aliases[a] then
-      aliases[a] = { table = tbl, schema = nil }
-    end
+    return a.pos < b.pos
+  end)
+
+  for _, m in ipairs(matches) do
+    aliases[m.alias] = { table = m.table, schema = m.schema }
   end
 
   return aliases
@@ -168,7 +208,7 @@ function M.analyze(params)
 
     -- Otherwise it's table.column or alias.column
     local bufnr = vim.uri_to_bufnr(params.textDocument.uri)
-    local aliases = parse_aliases(bufnr)
+    local aliases = parse_aliases(bufnr, params.position.line, params.position.character)
     local lower_prefix = dot_prefix:lower()
 
     if aliases[lower_prefix] then
