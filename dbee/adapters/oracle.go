@@ -161,7 +161,7 @@ SELECT
         '  -- Fetch from cursor (adjust v_col variables to match cursor columns):' || CHR(10) ||
         '  LOOP' || CHR(10) ||
         '    FETCH v_' || LOWER(argument_name) || ' INTO v_col1, v_col2;' || CHR(10) ||
-        '    EXIT WHEN v_' || LOWER(argument_name) || '%NOTFOUND;' || CHR(10) ||
+        '    EXIT WHEN v_' || LOWER(argument_name) || '%%NOTFOUND;' || CHR(10) ||
         '    DBMS_OUTPUT.PUT_LINE(v_col1 || ''|'' || v_col2);' || CHR(10) ||
         '  END LOOP;' || CHR(10) ||
         '  CLOSE v_' || LOWER(argument_name) || ';'
