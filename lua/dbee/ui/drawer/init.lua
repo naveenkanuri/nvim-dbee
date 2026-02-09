@@ -30,9 +30,27 @@ local expansion = require("dbee.ui.drawer.expansion")
 ---@field private bufnr integer
 ---@field private current_conn_id? connection_id current active connection
 ---@field private current_note_id? note_id current active note
+---@field private pending_generated_calls table<string, { note_id: note_id, fallback_template: string }>
 ---@field private window_options table<string, any> a table of window options.
 ---@field private buffer_options table<string, any> a table of buffer options.
 local DrawerUI = {}
+
+---@private
+---@param text string
+---@return string
+local function normalize_text(text)
+  return tostring(text):gsub("\r\n", "\n")
+end
+
+---@private
+---@param schema string?
+---@param name string?
+---@return string
+local function default_call_template(schema, name)
+  local schema_name = schema or ""
+  local object_name = name or ""
+  return string.format("BEGIN\n  %s.%s;\nEND;", schema_name, object_name)
+end
 
 ---@param handler Handler
 ---@param editor EditorUI
@@ -70,6 +88,7 @@ function DrawerUI:new(handler, editor, result, opts)
     disable_help = opts.disable_help or false,
     current_conn_id = current_conn.id,
     current_note_id = current_note.id,
+    pending_generated_calls = {},
     structure_cache = {},
     window_options = vim.tbl_extend("force", {
       wrap = false,
@@ -110,6 +129,10 @@ function DrawerUI:new(handler, editor, result, opts)
     o:on_structure_loaded(data)
   end)
 
+  handler:register_event_listener("call_state_changed", function(data)
+    o:on_call_state_changed(data)
+  end)
+
   return o
 end
 
@@ -148,6 +171,143 @@ function DrawerUI:on_structure_loaded(data)
   }
 
   self:refresh()
+end
+
+---@private
+---@param call_id call_id
+---@return string?
+function DrawerUI:extract_generated_call_template(call_id)
+  local bufnr = vim.api.nvim_create_buf(false, true)
+  if not bufnr or bufnr == 0 then
+    return nil
+  end
+
+  local ok_store = pcall(function()
+    self.handler:call_store_result(call_id, "json", "buffer", {
+      extra_arg = bufnr,
+    })
+  end)
+  if not ok_store then
+    pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
+    return nil
+  end
+
+  local content = table.concat(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), "\n")
+  pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
+  if content == "" then
+    return nil
+  end
+
+  local ok_decode, decoded = pcall(vim.json.decode, content)
+  if not ok_decode or type(decoded) ~= "table" or #decoded == 0 then
+    return nil
+  end
+
+  local first = decoded[1]
+  if type(first) == "string" then
+    return normalize_text(first)
+  end
+  if type(first) ~= "table" then
+    return nil
+  end
+
+  if type(first.call_template) == "string" then
+    return normalize_text(first.call_template)
+  end
+  if type(first.CALL_TEMPLATE) == "string" then
+    return normalize_text(first.CALL_TEMPLATE)
+  end
+
+  for key, value in pairs(first) do
+    if type(value) == "string" and tostring(key):lower() == "call_template" then
+      return normalize_text(value)
+    end
+  end
+
+  for _, value in pairs(first) do
+    if type(value) == "string" then
+      return normalize_text(value)
+    end
+  end
+
+  return nil
+end
+
+---@private
+---@param note_id note_id
+---@param template string
+function DrawerUI:insert_generated_template_into_note(note_id, template)
+  if not template or vim.trim(template) == "" then
+    return
+  end
+
+  local note = self.editor:search_note(note_id)
+  if not note then
+    return
+  end
+
+  if not note.bufnr or not vim.api.nvim_buf_is_valid(note.bufnr) then
+    self.editor:set_current_note(note_id)
+    note = self.editor:search_note(note_id)
+  end
+  if not note or not note.bufnr or not vim.api.nvim_buf_is_valid(note.bufnr) then
+    return
+  end
+
+  local template_lines = vim.split(template, "\n", { plain = true })
+  local buf_lines = vim.api.nvim_buf_get_lines(note.bufnr, 0, -1, false)
+  local is_empty = #buf_lines == 0 or (#buf_lines == 1 and buf_lines[1] == "")
+
+  if is_empty then
+    vim.api.nvim_buf_set_lines(note.bufnr, 0, -1, false, template_lines)
+    return
+  end
+
+  local existing = table.concat(buf_lines, "\n")
+  if existing:find(template, 1, true) then
+    return
+  end
+
+  local to_append = {}
+  if buf_lines[#buf_lines] ~= "" then
+    table.insert(to_append, "")
+  end
+  for _, line in ipairs(template_lines) do
+    table.insert(to_append, line)
+  end
+
+  vim.api.nvim_buf_set_lines(note.bufnr, -1, -1, false, to_append)
+end
+
+-- event listener for call completion (used by Generate Call insertion)
+---@private
+---@param data { call: CallDetails }?
+function DrawerUI:on_call_state_changed(data)
+  if not data or not data.call or not data.call.id then
+    return
+  end
+
+  local pending = self.pending_generated_calls[data.call.id]
+  if not pending then
+    return
+  end
+
+  local state = data.call.state
+  if state == "executing" or state == "retrieving" then
+    return
+  end
+
+  self.pending_generated_calls[data.call.id] = nil
+  if state ~= "archived" then
+    return
+  end
+
+  local template = self:extract_generated_call_template(data.call.id)
+  if not template or vim.trim(template) == "" then
+    template = pending.fallback_template
+  end
+
+  self:insert_generated_template_into_note(pending.note_id, template)
 end
 
 ---@private
@@ -342,10 +502,6 @@ function DrawerUI:get_actions()
         return
       end
 
-      -- Execute the Generate Call query - result appears in result pane
-      local call = self.handler:connection_execute(conn.id, gen_call_query)
-      self.result:set_call(call)
-
       -- Open or create a local note for the procedure call
       local note_name = "call_" .. node.name .. ".sql"
       local namespace_id = tostring(conn.id)
@@ -358,25 +514,27 @@ function DrawerUI:get_actions()
         end
       end
 
-      if found_id then
-        self.editor:set_current_note(found_id)
-      else
-        local note_id = self.editor:namespace_create_note(namespace_id, note_name)
-        self.editor:set_current_note(note_id)
-        self:refresh()
-
-        -- Populate new note with a call template (handles zero-arg procedures
-        -- where the Generate Call SQL returns empty results)
-        local current_note = self.editor:get_current_note()
-        if current_note and current_note.bufnr then
-          local buf_lines = vim.api.nvim_buf_get_lines(current_note.bufnr, 0, -1, false)
-          local is_empty = #buf_lines == 0 or (#buf_lines == 1 and buf_lines[1] == "")
-          if is_empty then
-            local template = "BEGIN\n  " .. node.schema .. "." .. node.name .. ";\nEND;"
-            vim.api.nvim_buf_set_lines(current_note.bufnr, 0, -1, false, vim.split(template, "\n"))
-          end
-        end
+      local note_id = found_id
+      if not note_id then
+        note_id = self.editor:namespace_create_note(namespace_id, note_name)
       end
+
+      self.editor:set_current_note(note_id)
+      self:refresh()
+
+      -- Execute the Generate Call query - result appears in result pane.
+      -- Final insertion happens on call_state_changed after result is archived.
+      local call = self.handler:connection_execute(conn.id, gen_call_query)
+      self.result:set_call(call)
+      self.pending_generated_calls[call.id] = {
+        note_id = note_id,
+        fallback_template = default_call_template(node.schema, node.name),
+      }
+
+      if call.state == "archived" then
+        self:on_call_state_changed({ call = call })
+      end
+
     end,
   }
 end
