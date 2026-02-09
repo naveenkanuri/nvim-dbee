@@ -264,9 +264,7 @@ function SchemaCache:_load_columns_from_disk()
       if ok and cols then
         -- extract key from filename
         local fname = vim.fn.fnamemodify(path, ":t:r") -- remove dir and .json
-        local key = fname:sub(#prefix + 1):gsub("_", ".", 1) -- first _ back to .
-        -- reconstruct proper key from the columns data context
-        -- actually store with the encoded key
+        local key = fname:sub(#prefix + 1)
         self.columns[key] = cols
       end
     end
