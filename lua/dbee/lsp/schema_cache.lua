@@ -111,12 +111,18 @@ function SchemaCache:_flatten(structs, parent_schema)
     local stype = s.type or ""
     local schema = s.schema or parent_schema or ""
 
-    if stype == "" and s.children then
-      self.schemas[s.name] = true
-      if not self.tables[s.name] then
-        self.tables[s.name] = {}
+    if stype == "schema" then
+      local schema_name = schema ~= "" and schema or s.name
+      if schema_name == "" then
+        schema_name = "_default"
       end
-      self:_flatten(s.children, s.name)
+      self.schemas[schema_name] = true
+      if not self.tables[schema_name] then
+        self.tables[schema_name] = {}
+      end
+      if s.children then
+        self:_flatten(s.children, schema_name)
+      end
     elseif stype == "table" or stype == "view" then
       if schema == "" then
         schema = "_default"
@@ -127,7 +133,19 @@ function SchemaCache:_flatten(structs, parent_schema)
       end
       self.tables[schema][s.name] = { type = stype }
     elseif s.children then
-      self:_flatten(s.children, parent_schema)
+      local next_schema = schema
+      if next_schema == "" then
+        -- Backward compatibility for adapters that model schema containers
+        -- as empty-type nodes without explicit schema fields.
+        next_schema = s.name or ""
+        if next_schema ~= "" then
+          self.schemas[next_schema] = true
+          if not self.tables[next_schema] then
+            self.tables[next_schema] = {}
+          end
+        end
+      end
+      self:_flatten(s.children, next_schema ~= "" and next_schema or parent_schema)
     end
   end
 end
