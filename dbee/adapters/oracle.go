@@ -59,7 +59,7 @@ func (*Oracle) GetHelpers(opts *core.TableOptions) map[string]string {
 		)
 	}
 
-	return map[string]string{
+	helpers := map[string]string{
 		"Columns": fmt.Sprintf(`SELECT col.column_id,
 				col.owner AS schema_name,
 				col.table_name,
@@ -182,4 +182,58 @@ GROUP BY object_name`,
 			opts.Table,
 		),
 	}
+
+	if opts.Materialization == core.StructureTypeProcedure || opts.Materialization == core.StructureTypeFunction {
+		objectType := "PROCEDURE"
+		if opts.Materialization == core.StructureTypeFunction {
+			objectType = "FUNCTION"
+		}
+
+		helpers["Source"] = fmt.Sprintf(`
+			SELECT text AS source_line
+			FROM all_source
+			WHERE owner = '%s'
+				AND name = '%s'
+				AND type = '%s'
+			ORDER BY line`,
+
+			opts.Schema,
+			opts.Table,
+			objectType,
+		)
+
+		helpers["Arguments"] = fmt.Sprintf(`
+			SELECT position, argument_name, in_out, data_type, data_length, data_precision, data_scale
+			FROM all_arguments
+			WHERE owner = '%s'
+				AND object_name = '%s'
+				AND argument_name IS NOT NULL
+			ORDER BY position`,
+
+			opts.Schema,
+			opts.Table,
+		)
+	}
+
+	var ddlObjectType string
+	switch opts.Materialization {
+	case core.StructureTypeTable:
+		ddlObjectType = "TABLE"
+	case core.StructureTypeView:
+		ddlObjectType = "VIEW"
+	case core.StructureTypeProcedure:
+		ddlObjectType = "PROCEDURE"
+	case core.StructureTypeFunction:
+		ddlObjectType = "FUNCTION"
+	}
+	if ddlObjectType != "" {
+		helpers["DDL"] = fmt.Sprintf(
+			"SELECT DBMS_METADATA.GET_DDL('%s', '%s', '%s') AS ddl FROM dual",
+			ddlObjectType,
+			opts.Table,
+			opts.Schema,
+		)
+	}
+
+	return helpers
 }
