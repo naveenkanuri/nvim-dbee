@@ -78,7 +78,7 @@ func (d *oracleDriver) executePLSQL(ctx context.Context, query string) (core.Res
 	// Note: Query() strips trailing semicolons, but PL/SQL blocks need them.
 	// Exception: CALL statements don't use semicolons in Oracle.
 	plsqlQuery := query
-	isCall := strings.HasPrefix(strings.ToUpper(strings.TrimSpace(query)), "CALL ")
+	isCall := strings.HasPrefix(strings.ToUpper(stripLeadingSQLComments(query)), "CALL ")
 	if !isCall && !strings.HasSuffix(strings.TrimSpace(query), ";") {
 		plsqlQuery = query + ";"
 	}

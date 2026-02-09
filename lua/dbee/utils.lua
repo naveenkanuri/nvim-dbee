@@ -195,6 +195,27 @@ local function query_block_at_cursor(lines, cursor_row)
   return query, start_row, end_row
 end
 
+-- Keywords that cannot be the last word of a syntactically complete SQL statement.
+-- When a tree-sitter statement node ends with one of these, the parser has
+-- incorrectly split the statement and the next sibling should be merged back.
+-- Example: "select name from t fetch" | "first 10 rows only" — the parser
+-- treats "fetch" as a table alias, but the user intended FETCH FIRST.
+local SQL_INCOMPLETE_CLAUSE_ENDINGS = {
+  FETCH = true,     -- FETCH FIRST/NEXT N ROWS ONLY
+  OFFSET = true,    -- OFFSET N ROWS
+  LIMIT = true,     -- LIMIT N
+  ORDER = true,     -- ORDER BY
+  GROUP = true,     -- GROUP BY
+  PARTITION = true,  -- PARTITION BY
+  FOR = true,       -- FOR UPDATE
+  CONNECT = true,   -- Oracle: CONNECT BY
+  START = true,     -- Oracle: START WITH
+  UNION = true,     -- UNION ALL / UNION SELECT
+  INTERSECT = true, -- INTERSECT SELECT
+  EXCEPT = true,    -- EXCEPT SELECT
+  MINUS = true,     -- Oracle: MINUS SELECT
+}
+
 --- Get the SQL statement under the cursor and its range (using treesitter).
 --- Potential returns are 1. the SQL query, 2. empty string, 3. nil if filetype isn't SQL.
 ---@param bufnr integer buffer containing the SQL queries.
@@ -208,45 +229,69 @@ function M.query_under_cursor(bufnr)
 
   local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
   local cursor_row = vim.api.nvim_win_get_cursor(0)[1] - 1
-  local query = ""
-  local start_row, end_row = 0, 0
 
-  -- tmp_buf is a temporary buffer for treesitter to parse the SQL statements
-  local tmp_buf = vim.api.nvim_create_buf(false, true)
-
-  -- replace empty lines with semicolons to make sure treesitter parse them
-  -- as statement (still supports newlines between CTEs)
-  local content = vim.tbl_map(function(line)
-    return line ~= "" and line or ";"
-  end, lines)
-
-  vim.api.nvim_buf_set_lines(tmp_buf, 0, -1, false, content)
-
-  local parser = vim.treesitter.get_parser(tmp_buf, "sql", {})
-  if not parser then
-    vim.api.nvim_buf_delete(tmp_buf, { force = true })
-    return query, start_row, end_row
+  -- Step 1: Find the blank-line-delimited block around cursor.
+  -- This is the maximum extent of the query — tree-sitter can only narrow it down.
+  local block_query, block_start, block_end = query_block_at_cursor(lines, cursor_row)
+  if block_query == "" then
+    return "", cursor_row, cursor_row
   end
 
-  local root = parser:parse()[1]:root()
+  -- Step 2: Extract block lines for tree-sitter parsing
+  local block_lines = {}
+  for i = block_start, block_end do
+    table.insert(block_lines, lines[i + 1])
+  end
 
-  for node in root:iter_children() do
-    if node:type() == "statement" then
-      local node_start_row, _, node_end_row, _ = node:range()
-      if cursor_row >= node_start_row and cursor_row <= node_end_row then
-        query = vim.treesitter.get_node_text(node, tmp_buf)
-        start_row, end_row = node_start_row, node_end_row
-        break
+  -- Step 3: Use tree-sitter to find the specific statement within the block.
+  -- This handles blocks with multiple SQL statements separated by semicolons.
+  local tmp_buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(tmp_buf, 0, -1, false, block_lines)
+
+  local query = ""
+  local start_row, end_row = block_start, block_end
+
+  local ok, parser = pcall(vim.treesitter.get_parser, tmp_buf, "sql", {})
+  if ok and parser then
+    local root = parser:parse()[1]:root()
+    local cursor_in_block = cursor_row - block_start
+
+    for node in root:iter_children() do
+      if node:type() == "statement" then
+        local ns, _, ne, _ = node:range()
+        if cursor_in_block >= ns and cursor_in_block <= ne then
+          query = vim.treesitter.get_node_text(node, tmp_buf)
+          start_row, end_row = block_start + ns, block_start + ne
+
+          -- Merge continuation clauses split by the parser (e.g. FETCH FIRST)
+          local sibling = node:next_named_sibling()
+          while sibling do
+            local last_word = (query:match("(%S+)%s*$") or ""):upper()
+            if not SQL_INCOMPLETE_CLAUSE_ENDINGS[last_word] then
+              break
+            end
+            local sib_start, _, sib_end, _ = sibling:range()
+            if sib_start > (end_row - block_start) + 1 then
+              break
+            end
+            local sib_text = vim.treesitter.get_node_text(sibling, tmp_buf)
+            query = query .. " " .. sib_text
+            end_row = block_start + sib_end
+            sibling = sibling:next_named_sibling()
+          end
+
+          break
+        end
       end
     end
   end
 
-  -- clean up the tmp_buf
   vim.api.nvim_buf_delete(tmp_buf, { force = true })
 
-  -- Fallback: if treesitter didn't find a statement, use blank-line separation
+  -- Step 4: If tree-sitter couldn't narrow down, use the full block.
   if query == "" then
-    query, start_row, end_row = query_block_at_cursor(lines, cursor_row)
+    query = block_query
+    start_row, end_row = block_start, block_end
   end
 
   return query:gsub(";%s*$", ""), start_row, end_row

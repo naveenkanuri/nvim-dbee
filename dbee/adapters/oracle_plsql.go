@@ -18,8 +18,7 @@ var plsqlCreatePattern = regexp.MustCompile(`(?i)^CREATE\s+(OR\s+REPLACE\s+)?(PR
 // - DDL: CREATE [OR REPLACE] PROCEDURE|FUNCTION|PACKAGE|TRIGGER|TYPE
 // - Procedure calls: CALL procedure_name()
 func isPLSQL(query string) bool {
-	// Trim whitespace and get first word
-	trimmed := strings.TrimSpace(query)
+	trimmed := stripLeadingSQLComments(query)
 	if trimmed == "" {
 		return false
 	}
@@ -42,6 +41,32 @@ func isPLSQL(query string) bool {
 	}
 
 	return false
+}
+
+// stripLeadingSQLComments removes leading SQL line comments (-- ...)
+// and block comments (/* ... */) so that isPLSQL can detect the first keyword.
+func stripLeadingSQLComments(query string) string {
+	s := strings.TrimSpace(query)
+	for len(s) > 0 {
+		if strings.HasPrefix(s, "--") {
+			// Line comment: skip to end of line
+			if idx := strings.IndexByte(s, '\n'); idx >= 0 {
+				s = strings.TrimSpace(s[idx+1:])
+			} else {
+				return "" // entire query is a comment
+			}
+		} else if strings.HasPrefix(s, "/*") {
+			// Block comment: skip to closing */
+			if idx := strings.Index(s, "*/"); idx >= 0 {
+				s = strings.TrimSpace(s[idx+2:])
+			} else {
+				return "" // unclosed block comment
+			}
+		} else {
+			break
+		}
+	}
+	return s
 }
 
 // parseDBMSOutputLines splits DBMS_OUTPUT content into individual lines.
