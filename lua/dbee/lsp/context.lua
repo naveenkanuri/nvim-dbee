@@ -143,6 +143,14 @@ function M.analyze(params)
 
   local trimmed = text:match("^(.-)%s*$") or text
 
+  -- Some completion clients send requests before inserting trigger characters.
+  -- If completion was triggered by ".", emulate the post-insert text so alias
+  -- and table.column context detection still works.
+  local trigger_char = params.context and params.context.triggerCharacter
+  if trigger_char == "." and not trimmed:match("%.$") then
+    trimmed = trimmed .. "."
+  end
+
   -- Check for dot-completion: "word." at end of line
   local dot_prefix = trimmed:match("([%w_]+)%.$")
   if dot_prefix then
