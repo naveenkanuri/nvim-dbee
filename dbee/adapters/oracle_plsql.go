@@ -69,6 +69,37 @@ func stripLeadingSQLComments(query string) string {
 	return s
 }
 
+// stripTrailingSQLPlusSlashTerminator removes a trailing SQL*Plus "/"
+// command terminator line if present.
+//
+// Example input:
+//
+//	BEGIN ... END;
+//	/
+//
+// Returns:
+//
+//	BEGIN ... END;
+func stripTrailingSQLPlusSlashTerminator(query string) string {
+	s := strings.TrimSpace(query)
+	if s == "" {
+		return s
+	}
+
+	lines := strings.Split(s, "\n")
+	last := len(lines) - 1
+	if last >= 0 && strings.TrimSpace(lines[last]) == "/" {
+		lines = lines[:last]
+		// Drop any blank trailing lines left after removing "/"
+		for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+			lines = lines[:len(lines)-1]
+		}
+		return strings.Join(lines, "\n")
+	}
+
+	return s
+}
+
 // parseDBMSOutputLines splits DBMS_OUTPUT content into individual lines.
 // Preserves intentional empty lines but strips trailing empty lines
 // (which may be artifacts from NEW_LINE flush).

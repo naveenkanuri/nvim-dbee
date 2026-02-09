@@ -80,10 +80,10 @@ func (d *oracleDriver) executePLSQLWithCursor(ctx context.Context, query string)
 	}
 
 	// Add semicolon if needed
-	execQuery := cleanQuery
-	isCall := strings.HasPrefix(strings.ToUpper(strings.TrimSpace(cleanQuery)), "CALL ")
-	if !isCall && !strings.HasSuffix(strings.TrimSpace(cleanQuery), ";") {
-		execQuery = cleanQuery + ";"
+	execQuery := stripTrailingSQLPlusSlashTerminator(cleanQuery)
+	isCall := strings.HasPrefix(strings.ToUpper(strings.TrimSpace(execQuery)), "CALL ")
+	if !isCall && !strings.HasSuffix(strings.TrimSpace(execQuery), ";") {
+		execQuery += ";"
 	}
 
 	// Execute with all cursor OUT parameters
@@ -254,4 +254,3 @@ func buildMultiCursorResultStream(results []cursorData) core.ResultStream {
 		).
 		Build()
 }
-

@@ -27,7 +27,6 @@ func (d *oracleDriver) Query(ctx context.Context, query string) (core.ResultStre
 	// go-ora defaults to 30s which is too short for many queries.
 	// The parent context can still cancel early if user requests it.
 	queryCtx, cancel := context.WithTimeout(ctx, oracleQueryTimeout)
-	defer cancel()
 
 	// Remove the trailing semicolon from the query - for some reason it isn't supported in go_ora
 	query = strings.TrimSpace(query)
@@ -35,17 +34,31 @@ func (d *oracleDriver) Query(ctx context.Context, query string) (core.ResultStre
 
 	// Check if this is a PL/SQL block
 	if isPLSQL(query) {
-		return d.executePLSQL(queryCtx, query)
+		result, err := d.executePLSQL(queryCtx, query)
+		cancel()
+		return result, err
 	}
 
 	// Use Exec or Query depending on the query
 	action := strings.ToLower(strings.Split(query, " ")[0])
 	hasReturnValues := strings.Contains(strings.ToLower(query), " returning ")
 	if (action == "update" || action == "delete" || action == "insert") && !hasReturnValues {
-		return d.c.Exec(queryCtx, query)
+		result, err := d.c.Exec(queryCtx, query)
+		if err != nil {
+			cancel()
+			return nil, err
+		}
+		result.AddCallback(cancel)
+		return result, nil
 	}
 
-	return d.c.QueryUntilNotEmpty(queryCtx, query)
+	result, err := d.c.QueryUntilNotEmpty(queryCtx, query)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	result.AddCallback(cancel)
+	return result, nil
 }
 
 // executePLSQL handles PL/SQL block execution with DBMS_OUTPUT capture.
@@ -75,10 +88,10 @@ func (d *oracleDriver) executePLSQL(ctx context.Context, query string) (core.Res
 	// Step 2: Execute the PL/SQL block
 	// Note: Query() strips trailing semicolons, but PL/SQL blocks need them.
 	// Exception: CALL statements don't use semicolons in Oracle.
-	plsqlQuery := query
-	isCall := strings.HasPrefix(strings.ToUpper(stripLeadingSQLComments(query)), "CALL ")
-	if !isCall && !strings.HasSuffix(strings.TrimSpace(query), ";") {
-		plsqlQuery = query + ";"
+	plsqlQuery := stripTrailingSQLPlusSlashTerminator(query)
+	isCall := strings.HasPrefix(strings.ToUpper(stripLeadingSQLComments(plsqlQuery)), "CALL ")
+	if !isCall && !strings.HasSuffix(strings.TrimSpace(plsqlQuery), ";") {
+		plsqlQuery += ";"
 	}
 	_, err = conn.ExecContext(ctx, plsqlQuery)
 	if err != nil {
