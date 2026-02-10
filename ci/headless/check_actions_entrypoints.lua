@@ -15,6 +15,7 @@ local conn = { id = "conn_test", type = "oracle" }
 local calls = {}
 local poll_count = {}
 local ui_select_called = false
+local ui_input_calls = 0
 
 package.loaded["dbee.api"] = {
   core = {
@@ -76,13 +77,29 @@ local bufnr = vim.api.nvim_create_buf(false, true)
 vim.api.nvim_set_current_buf(bufnr)
 vim.bo[bufnr].filetype = "sql"
 vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, {
-  "select 1 from dual;",
+  "select :id from dual;",
 })
 vim.api.nvim_win_set_cursor(0, { 1, 18 })
+
+local saved_input = vim.ui.input
+vim.ui.input = function(_, cb)
+  ui_input_calls = ui_input_calls + 1
+  cb("1")
+end
 
 dbee.actions({ action = "execute" })
 if #calls ~= 1 then
   print("ACTIONS_FAIL=execute_count:" .. tostring(#calls))
+  vim.cmd("cquit 1")
+  return
+end
+if calls[1].query ~= "select 1 from dual" then
+  print("ACTIONS_FAIL=execute_query:" .. tostring(calls[1].query))
+  vim.cmd("cquit 1")
+  return
+end
+if ui_input_calls ~= 1 then
+  print("ACTIONS_FAIL=execute_prompt_count:" .. tostring(ui_input_calls))
   vim.cmd("cquit 1")
   return
 end
@@ -104,6 +121,7 @@ package.loaded["snacks"] = nil
 dbee.actions()
 
 vim.ui.select = saved_select
+vim.ui.input = saved_input
 
 if not ui_select_called then
   print("ACTIONS_FAIL=ui_select_not_called")

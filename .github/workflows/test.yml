@@ -43,6 +43,7 @@ jobs:
       matrix:
         script:
           - check_query_splitter.lua
+          - check_variables.lua
           - check_execute_script.lua
           - check_actions_entrypoints.lua
           - check_lsp_alias_rebinding.lua

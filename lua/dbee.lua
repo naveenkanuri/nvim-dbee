@@ -3,6 +3,7 @@ local api = require("dbee.api")
 local config = require("dbee.config")
 local utils = require("dbee.utils")
 local query_splitter = require("dbee.query_splitter")
+local variables = require("dbee.variables")
 
 ---@toc dbee.ref.contents
 
@@ -469,7 +470,7 @@ end
 ---Run SQL contextually from current buffer.
 ---In visual mode runs the selection.
 ---In normal mode runs the statement under cursor (SQL filetype only).
----@param opts? { query?: string }
+---@param opts? { query?: string, variables?: table<string, string> }
 function dbee.execute_context(opts)
   opts = opts or {}
 
@@ -491,12 +492,22 @@ function dbee.execute_context(opts)
     return
   end
 
-  dbee.execute(query)
+  local conn = api.core.get_current_connection()
+  local resolved, resolve_err = variables.resolve(query, {
+    adapter_type = conn and conn.type or nil,
+    values = opts.variables,
+  })
+  if resolve_err then
+    vim.notify(resolve_err, vim.log.levels.WARN)
+    return
+  end
+
+  dbee.execute(resolved or query)
 end
 
 ---Execute a script in deterministic statement order.
 ---Oracle scripts are split with PL/SQL awareness and '/' block terminators.
----@param opts? { query?: string, timeout_ms?: integer, stop_on_error?: boolean }
+---@param opts? { query?: string, timeout_ms?: integer, stop_on_error?: boolean, variables?: table<string, string> }
 ---@return CallDetails[] calls
 ---@return string? error_message
 function dbee.execute_script(opts)
@@ -517,6 +528,15 @@ function dbee.execute_script(opts)
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
     script = table.concat(lines, "\n")
   end
+
+  local resolved_script, resolve_err = variables.resolve(script, {
+    adapter_type = conn.type,
+    values = opts.variables,
+  })
+  if resolve_err then
+    return {}, resolve_err
+  end
+  script = resolved_script or script
 
   local queries = query_splitter.split(script, {
     adapter_type = conn.type,

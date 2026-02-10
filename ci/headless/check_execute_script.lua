@@ -185,6 +185,17 @@ local function run_scenario(name, opts)
   return true
 end
 
+local function with_ui_input(fake_input, fn)
+  local saved_ui_input = vim.ui.input
+  vim.ui.input = fake_input
+  local ok, a, b = pcall(fn)
+  vim.ui.input = saved_ui_input
+  if not ok then
+    error(a)
+  end
+  return a, b
+end
+
 local ok0 = run_scenario(
   "MISSING_CONNECTION",
   {
@@ -327,6 +338,101 @@ local ok6 = run_scenario(
   }
 )
 if not ok6 then
+  return
+end
+
+local function run_variable_prompt_scenario()
+  reset_dbee_modules()
+
+  local api, calls = make_fake_api({})
+  package.loaded["dbee.api"] = api
+  package.loaded["dbee.install"] = { exec = function() end }
+  package.loaded["dbee.config"] = {
+    merge_with_default = function(cfg)
+      return cfg or {}
+    end,
+    validate = function() end,
+  }
+
+  local dbee = require("dbee")
+  local prompts = {}
+  local answers = { "42", "ALICE" }
+  package.loaded["snacks.input"] = nil
+
+  local executed, err = with_ui_input(function(opts, cb)
+    prompts[#prompts + 1] = opts.prompt or ""
+    cb(answers[#prompts])
+  end, function()
+    return dbee.execute_script({
+      query = "SELECT :id FROM dual; SELECT '&name' FROM dual;",
+      timeout_ms = 500,
+    })
+  end)
+
+  if err ~= nil or #executed ~= 2 then
+    print("EXEC_SCRIPT_FAIL=VARIABLE_PROMPT:count_err=" .. tostring(#executed) .. ":" .. tostring(err))
+    vim.cmd("cquit 1")
+    return false
+  end
+  if calls[1].query ~= "SELECT 42 FROM dual;" or calls[2].query ~= "SELECT 'ALICE' FROM dual;" then
+    print("EXEC_SCRIPT_FAIL=VARIABLE_PROMPT:query_values")
+    vim.cmd("cquit 1")
+    return false
+  end
+  if #prompts ~= 2 then
+    print("EXEC_SCRIPT_FAIL=VARIABLE_PROMPT:prompt_count=" .. tostring(#prompts))
+    vim.cmd("cquit 1")
+    return false
+  end
+  if not prompts[1]:find("Bind :id", 1, true) or not prompts[2]:find("Substitute &name", 1, true) then
+    print("EXEC_SCRIPT_FAIL=VARIABLE_PROMPT:prompt_text")
+    vim.cmd("cquit 1")
+    return false
+  end
+
+  print("EXEC_SCRIPT_VARIABLE_PROMPT_COUNT=2")
+  return true
+end
+
+if not run_variable_prompt_scenario() then
+  return
+end
+
+local function run_variable_prompt_cancel_scenario()
+  reset_dbee_modules()
+
+  local api = make_fake_api({})
+  package.loaded["dbee.api"] = api
+  package.loaded["dbee.install"] = { exec = function() end }
+  package.loaded["dbee.config"] = {
+    merge_with_default = function(cfg)
+      return cfg or {}
+    end,
+    validate = function() end,
+  }
+
+  local dbee = require("dbee")
+  package.loaded["snacks.input"] = nil
+  local executed, err = with_ui_input(function(_, cb)
+    cb(nil)
+  end, function()
+    return dbee.execute_script({
+      query = "SELECT :id FROM dual;",
+      timeout_ms = 500,
+    })
+  end)
+
+  if #executed ~= 0 or type(err) ~= "string" or not err:find("canceled", 1, true) then
+    print("EXEC_SCRIPT_FAIL=VARIABLE_PROMPT_CANCEL:" .. tostring(#executed) .. ":" .. tostring(err))
+    vim.cmd("cquit 1")
+    return false
+  end
+
+  print("EXEC_SCRIPT_VARIABLE_PROMPT_CANCEL_COUNT=0")
+  return true
+end
+
+if not run_variable_prompt_cancel_scenario() then
   return
 end
 
