@@ -24,6 +24,8 @@ local SQL_START_PATTERNS = {
   "^INSERT%f[%W]",
   "^UPDATE%f[%W]",
   "^DELETE%f[%W]",
+  "^CREATE%f[%W]",
+  "^COMMENT%f[%W]",
   "^MERGE%f[%W]",
   "^WITH%f[%W]",
   "^EXPLAIN%f[%W]",
@@ -90,7 +92,7 @@ local function split_non_plsql(text)
   local in_single = false
   local in_double = false
   local in_line_comment = false
-  local in_block_comment = false
+  local block_comment_depth = 0
 
   local function append_char(ch)
     buf[#buf + 1] = ch
@@ -98,7 +100,7 @@ local function split_non_plsql(text)
 
   local function flush_statement()
     local stmt = utils.trim(table.concat(buf))
-    if stmt ~= "" then
+    if stmt ~= "" and strip_leading_sql_comments(stmt) ~= "" then
       queries[#queries + 1] = stmt
     end
     buf = {}
@@ -117,11 +119,15 @@ local function split_non_plsql(text)
       goto continue
     end
 
-    if in_block_comment then
+    if block_comment_depth > 0 then
       append_char(ch)
-      if ch == "*" and next_ch == "/" then
+      if ch == "/" and next_ch == "*" then
         append_char(next_ch)
-        in_block_comment = false
+        block_comment_depth = block_comment_depth + 1
+        i = i + 2
+      elseif ch == "*" and next_ch == "/" then
+        append_char(next_ch)
+        block_comment_depth = block_comment_depth - 1
         i = i + 2
       else
         i = i + 1
@@ -172,7 +178,7 @@ local function split_non_plsql(text)
     if ch == "/" and next_ch == "*" then
       append_char(ch)
       append_char(next_ch)
-      in_block_comment = true
+      block_comment_depth = 1
       i = i + 2
       goto continue
     end
@@ -208,7 +214,21 @@ end
 ---@return boolean
 local function is_plsql_block_end_line(line)
   local compact = utils.trim(line):upper()
-  return compact:match("^END%s*;%s*$") ~= nil or compact:match("^END%s+[%w_$#]+%s*;%s*$") ~= nil
+  if compact:match("^END%s*;%s*$") then
+    return true
+  end
+
+  local ident = compact:match("^END%s+([%w_$#]+)%s*;%s*$")
+  if not ident then
+    return false
+  end
+
+  local control_flow = {
+    IF = true,
+    LOOP = true,
+    CASE = true,
+  }
+  return control_flow[ident] ~= true
 end
 
 ---@param lines string[]

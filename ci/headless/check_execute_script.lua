@@ -18,8 +18,14 @@ local function make_fake_api(opts)
   local fail_at_index = opts.fail_at_index
   local hang_at_index = opts.hang_at_index
   local on_poll = opts.on_poll
+  local execute_error_at_index = opts.execute_error_at_index
+  local no_connection = opts.no_connection
+  local cancel_applies_state = opts.cancel_applies_state ~= false
 
   local conn = { id = "conn_test", type = "oracle" }
+  if no_connection then
+    conn = nil
+  end
   local calls = {}
   local poll_count = {}
   local canceled_ids = {}
@@ -31,6 +37,9 @@ local function make_fake_api(opts)
 
   function core.connection_execute(_, query)
     local idx = #calls + 1
+    if execute_error_at_index and idx == execute_error_at_index then
+      error("execute_boom_" .. tostring(idx))
+    end
     local call = {
       id = "call_" .. tostring(idx),
       query = query,
@@ -78,10 +87,12 @@ local function make_fake_api(opts)
 
   function core.call_cancel(call_id)
     canceled_ids[#canceled_ids + 1] = call_id
-    for _, call in ipairs(calls) do
-      if call.id == call_id then
-        call.state = "canceled"
-        return
+    if cancel_applies_state then
+      for _, call in ipairs(calls) do
+        if call.id == call_id then
+          call.state = "canceled"
+          return
+        end
       end
     end
   end
@@ -172,6 +183,19 @@ local function run_scenario(name, opts)
     print("EXEC_SCRIPT_" .. name .. "_ERROR=" .. err)
   end
   return true
+end
+
+local ok0 = run_scenario(
+  "MISSING_CONNECTION",
+  {
+    script = "SELECT 1 FROM dual;",
+    api = { no_connection = true },
+    expected_count = 0,
+    expect_error_contains = "no connection currently selected",
+  }
+)
+if not ok0 then
+  return
 end
 
 local ok1 = run_scenario(
@@ -279,6 +303,79 @@ local ok5 = run_scenario(
   }
 )
 if not ok5 then
+  return
+end
+
+local ok6 = run_scenario(
+  "CANCEL_SINGLE_REQUEST",
+  {
+    script = "SELECT 1 FROM dual;",
+    api = {
+      hang_at_index = 1,
+      cancel_applies_state = false,
+      on_poll = function(ctx)
+        if ctx.poll_count == 1 then
+          local inner = require("dbee")
+          inner.cancel_script()
+        end
+      end,
+    },
+    timeout_ms = 250,
+    expected_count = 1,
+    expect_error_contains = "canceled",
+    expected_canceled_count = 1,
+  }
+)
+if not ok6 then
+  return
+end
+
+local function run_exception_cleanup_scenario()
+  reset_dbee_modules()
+
+  local api = make_fake_api({})
+  package.loaded["dbee.api"] = api
+  package.loaded["dbee.install"] = { exec = function() end }
+  package.loaded["dbee.config"] = {
+    merge_with_default = function(cfg)
+      return cfg or {}
+    end,
+    validate = function() end,
+  }
+
+  local dbee = require("dbee")
+  local original_open = dbee.open
+  dbee.open = function()
+    error("open_boom")
+  end
+
+  local first_calls, first_err = dbee.execute_script({
+    query = "SELECT 1 FROM dual;",
+    timeout_ms = 100,
+  })
+  if #first_calls ~= 0 or type(first_err) ~= "string" or not first_err:find("open_boom", 1, true) then
+    print("EXEC_SCRIPT_FAIL=EXCEPTION_CLEANUP:first_call=" .. tostring(first_err))
+    vim.cmd("cquit 1")
+    return false
+  end
+
+  dbee.open = original_open
+
+  local second_calls, second_err = dbee.execute_script({
+    query = "SELECT 1 FROM dual;",
+    timeout_ms = 100,
+  })
+  if #second_calls ~= 1 or second_err ~= nil then
+    print("EXEC_SCRIPT_FAIL=EXCEPTION_CLEANUP:second_call=" .. tostring(second_err))
+    vim.cmd("cquit 1")
+    return false
+  end
+
+  print("EXEC_SCRIPT_EXCEPTION_CLEANUP_COUNT=1")
+  return true
+end
+
+if not run_exception_cleanup_scenario() then
   return
 end
 

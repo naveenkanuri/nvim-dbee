@@ -26,7 +26,7 @@ local terminal_states = {
   canceled = true,
 }
 
----@type { id: integer, canceled: boolean, current_call_id: string?, conn_id: connection_id? }|nil
+---@type { canceled: boolean, current_call_id: string?, cancel_sent_call_id: string? }|nil
 local active_script_run = nil
 
 ---@param conn_id connection_id
@@ -44,14 +44,19 @@ end
 ---@param conn_id connection_id
 ---@param call_id call_id
 ---@param timeout_ms integer
----@param run_state? { id: integer, canceled: boolean, current_call_id: string?, conn_id: connection_id? }
+---@param run_state? { canceled: boolean, current_call_id: string?, cancel_sent_call_id: string? }
 ---@return boolean ok
 ---@return string|nil state
 local function wait_for_call_terminal_state(conn_id, call_id, timeout_ms, run_state)
   local state = nil
   local ok = vim.wait(timeout_ms, function()
     if run_state and run_state.canceled then
-      pcall(api.core.call_cancel, call_id)
+      if run_state.cancel_sent_call_id ~= call_id then
+        run_state.cancel_sent_call_id = call_id
+        pcall(api.core.call_cancel, call_id)
+      end
+      state = "canceled"
+      return true
     end
     state = find_call_state(conn_id, call_id)
     return state ~= nil and terminal_states[state] == true
@@ -503,7 +508,7 @@ function dbee.execute_script(opts)
 
   local conn = api.core.get_current_connection()
   if not conn then
-    error("no connection currently selected")
+    return {}, "no connection currently selected"
   end
 
   local script = utils.trim(opts.query)
@@ -525,45 +530,51 @@ function dbee.execute_script(opts)
   local stop_on_error = opts.stop_on_error ~= false
   local calls = {}
   local run_state = {
-    id = math.floor(vim.loop.hrtime() % 2147483647),
     canceled = false,
     current_call_id = nil,
-    conn_id = conn.id,
+    cancel_sent_call_id = nil,
   }
   active_script_run = run_state
   local err_msg = nil
 
-  dbee.open()
+  local ok_run, run_err = xpcall(function()
+    dbee.open()
 
-  for _, query in ipairs(queries) do
-    if run_state.canceled then
-      err_msg = "script execution canceled"
-      break
-    end
+    for _, query in ipairs(queries) do
+      if run_state.canceled then
+        err_msg = "script execution canceled"
+        break
+      end
 
-    local call = api.core.connection_execute(conn.id, query)
-    run_state.current_call_id = call.id
-    api.ui.result_set_call(call)
-    calls[#calls + 1] = call
+      local call = api.core.connection_execute(conn.id, query)
+      run_state.current_call_id = call.id
+      run_state.cancel_sent_call_id = nil
+      api.ui.result_set_call(call)
+      calls[#calls + 1] = call
 
-    local ok, state = wait_for_call_terminal_state(conn.id, call.id, timeout_ms, run_state)
-    if run_state.canceled or state == "canceled" then
-      err_msg = "script execution canceled"
-      break
+      local ok, state = wait_for_call_terminal_state(conn.id, call.id, timeout_ms, run_state)
+      if run_state.canceled or state == "canceled" then
+        err_msg = "script execution canceled"
+        break
+      end
+      if not ok then
+        err_msg = "script execution timed out waiting for call " .. tostring(call.id)
+        break
+      end
+      if state ~= "archived" and stop_on_error then
+        err_msg = "script execution stopped on state " .. tostring(state) .. " for call " .. tostring(call.id)
+        break
+      end
+      run_state.current_call_id = nil
     end
-    if not ok then
-      err_msg = "script execution timed out waiting for call " .. tostring(call.id)
-      break
-    end
-    if state ~= "archived" and stop_on_error then
-      err_msg = "script execution stopped on state " .. tostring(state) .. " for call " .. tostring(call.id)
-      break
-    end
-    run_state.current_call_id = nil
-  end
+  end, debug.traceback)
 
   if active_script_run == run_state then
     active_script_run = nil
+  end
+
+  if not ok_run then
+    err_msg = "script execution failed: " .. tostring(run_err)
   end
 
   return calls, err_msg
@@ -577,7 +588,11 @@ function dbee.cancel_script()
   end
 
   active_script_run.canceled = true
-  if active_script_run.current_call_id then
+  if
+    active_script_run.current_call_id
+    and active_script_run.cancel_sent_call_id ~= active_script_run.current_call_id
+  then
+    active_script_run.cancel_sent_call_id = active_script_run.current_call_id
     pcall(api.core.call_cancel, active_script_run.current_call_id)
   end
 end
