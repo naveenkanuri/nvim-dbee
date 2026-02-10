@@ -73,6 +73,20 @@ package.loaded["dbee.config"] = {
 
 local dbee = require("dbee")
 
+local function fail(msg)
+  print("ACTIONS_FAIL=" .. msg)
+  vim.cmd("cquit 1")
+end
+
+local function wait_until(label, predicate, timeout_ms)
+  local ok = vim.wait(timeout_ms or 1000, predicate, 20)
+  if ok then
+    return true
+  end
+  fail("timeout_" .. label)
+  return false
+end
+
 local bufnr = vim.api.nvim_create_buf(false, true)
 vim.api.nvim_set_current_buf(bufnr)
 vim.bo[bufnr].filetype = "sql"
@@ -88,65 +102,60 @@ vim.ui.input = function(_, cb)
 end
 
 dbee.actions({ action = "execute" })
+if not wait_until("execute_call", function()
+  return #calls == 1
+end) then
+  return
+end
 if #calls ~= 1 then
-  print("ACTIONS_FAIL=execute_count:" .. tostring(#calls))
-  vim.cmd("cquit 1")
+  fail("execute_count:" .. tostring(#calls))
   return
 end
 if calls[1].query ~= "select 1 from dual" then
-  print("ACTIONS_FAIL=execute_query:" .. tostring(calls[1].query))
-  vim.cmd("cquit 1")
+  fail("execute_query:" .. tostring(calls[1].query))
   return
 end
 if ui_input_calls ~= 1 then
-  print("ACTIONS_FAIL=execute_prompt_count:" .. tostring(ui_input_calls))
-  vim.cmd("cquit 1")
+  fail("execute_prompt_count:" .. tostring(ui_input_calls))
   return
 end
 
 dbee.actions({ action = "execute_script" })
 if #calls ~= 2 then
-  print("ACTIONS_FAIL=execute_script_count:" .. tostring(#calls))
-  vim.cmd("cquit 1")
+  fail("execute_script_count:" .. tostring(#calls))
   return
 end
 if calls[2].query ~= "select 1 from dual;" then
-  print("ACTIONS_FAIL=execute_script_query:" .. tostring(calls[2].query))
-  vim.cmd("cquit 1")
+  fail("execute_script_query:" .. tostring(calls[2].query))
   return
 end
 if ui_input_calls ~= 2 then
-  print("ACTIONS_FAIL=execute_script_prompt_count:" .. tostring(ui_input_calls))
-  vim.cmd("cquit 1")
+  fail("execute_script_prompt_count:" .. tostring(ui_input_calls))
   return
 end
 
 local _, direct_err = dbee.execute("select :id from dual;")
 if direct_err ~= nil then
-  print("ACTIONS_FAIL=direct_execute_err:" .. tostring(direct_err))
-  vim.cmd("cquit 1")
+  fail("direct_execute_err:" .. tostring(direct_err))
   return
 end
 if #calls ~= 3 then
-  print("ACTIONS_FAIL=direct_execute_count:" .. tostring(#calls))
-  vim.cmd("cquit 1")
+  fail("direct_execute_count:" .. tostring(#calls))
   return
 end
 if calls[3].query ~= "select 1 from dual;" then
-  print("ACTIONS_FAIL=direct_execute_query:" .. tostring(calls[3].query))
-  vim.cmd("cquit 1")
+  fail("direct_execute_query:" .. tostring(calls[3].query))
   return
 end
 if ui_input_calls ~= 3 then
-  print("ACTIONS_FAIL=direct_execute_prompt_count:" .. tostring(ui_input_calls))
-  vim.cmd("cquit 1")
+  fail("direct_execute_prompt_count:" .. tostring(ui_input_calls))
   return
 end
 
 local saved_select = vim.ui.select
-vim.ui.select = function(items, _, cb)
+vim.ui.select = function(_, _, cb)
   ui_select_called = true
-  cb(items[1])
+  cb(nil)
 end
 
 package.loaded["snacks"] = nil
@@ -156,8 +165,7 @@ vim.ui.select = saved_select
 vim.ui.input = saved_input
 
 if not ui_select_called then
-  print("ACTIONS_FAIL=ui_select_not_called")
-  vim.cmd("cquit 1")
+  fail("ui_select_not_called")
   return
 end
 

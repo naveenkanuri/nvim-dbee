@@ -1,6 +1,7 @@
 local utils = require("dbee.utils")
 local common = require("dbee.ui.common")
 local welcome = require("dbee.ui.editor.welcome")
+local variables = require("dbee.variables")
 
 --- Parse Oracle error location from error string.
 --- Returns (line, col) or (nil, nil) if not found.
@@ -234,6 +235,46 @@ end
 ---@private
 ---@return table<string, fun()>
 function EditorUI:get_actions()
+  local function execute_query_with_variables_async(conn, query, on_done)
+    variables.resolve_async(query, {
+      adapter_type = conn and conn.type or nil,
+    }, function(resolved, resolve_err)
+      if resolve_err then
+        vim.notify(resolve_err, vim.log.levels.WARN)
+        on_done(nil)
+        return
+      end
+
+      local ok, call_or_err = pcall(function()
+        return self.handler:connection_execute(conn.id, resolved)
+      end)
+      if not ok then
+        vim.notify(tostring(call_or_err), vim.log.levels.WARN)
+        on_done(nil)
+        return
+      end
+
+      on_done(call_or_err)
+    end)
+  end
+
+  local function set_result_for_note(note_id, call, bufnr, offset)
+    if not call then
+      return
+    end
+    self.result:set_call(call)
+    if note_id then
+      self.note_calls[note_id] = call
+      self.note_exec_meta[note_id] = {
+        bufnr = bufnr,
+        offset = offset,
+      }
+      if self.current_note_id == note_id then
+        self:save_last_note()
+      end
+    end
+  end
+
   return {
     run_file = function()
       if not self.winid or not vim.api.nvim_win_is_valid(self.winid) then
@@ -251,16 +292,12 @@ function EditorUI:get_actions()
       if not conn then
         return
       end
-      local call = self.handler:connection_execute(conn.id, query)
-      self.result:set_call(call)
-      if self.current_note_id then
-        self.note_calls[self.current_note_id] = call
-        self.note_exec_meta[self.current_note_id] = {
-          bufnr = self.last_exec_bufnr,
-          offset = self.last_exec_offset,
-        }
-        self:save_last_note()
-      end
+      local note_id = self.current_note_id
+      local exec_bufnr = self.last_exec_bufnr
+      local exec_offset = self.last_exec_offset
+      execute_query_with_variables_async(conn, query, function(call)
+        set_result_for_note(note_id, call, exec_bufnr, exec_offset)
+      end)
     end,
     run_selection = function()
       local srow, scol, erow, ecol = utils.visual_selection()
@@ -276,16 +313,12 @@ function EditorUI:get_actions()
       if not conn then
         return
       end
-      local call = self.handler:connection_execute(conn.id, query)
-      self.result:set_call(call)
-      if self.current_note_id then
-        self.note_calls[self.current_note_id] = call
-        self.note_exec_meta[self.current_note_id] = {
-          bufnr = self.last_exec_bufnr,
-          offset = self.last_exec_offset,
-        }
-        self:save_last_note()
-      end
+      local note_id = self.current_note_id
+      local exec_bufnr = self.last_exec_bufnr
+      local exec_offset = self.last_exec_offset
+      execute_query_with_variables_async(conn, query, function(call)
+        set_result_for_note(note_id, call, exec_bufnr, exec_offset)
+      end)
     end,
     run_under_cursor = function()
       local bufnr = vim.api.nvim_get_current_buf()
@@ -309,16 +342,12 @@ function EditorUI:get_actions()
         -- run the query
         local conn = self.handler:get_current_connection()
         if conn then
-          local call = self.handler:connection_execute(conn.id, query)
-          self.result:set_call(call)
-          if self.current_note_id then
-            self.note_calls[self.current_note_id] = call
-            self.note_exec_meta[self.current_note_id] = {
-              bufnr = self.last_exec_bufnr,
-              offset = self.last_exec_offset,
-            }
-            self:save_last_note()
-          end
+          local note_id = self.current_note_id
+          local exec_bufnr = self.last_exec_bufnr
+          local exec_offset = self.last_exec_offset
+          execute_query_with_variables_async(conn, query, function(call)
+            set_result_for_note(note_id, call, exec_bufnr, exec_offset)
+          end)
         end
 
         -- remove highlighting after delay

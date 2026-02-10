@@ -470,6 +470,37 @@ end
 ---Run SQL contextually from current buffer.
 ---In visual mode runs the selection.
 ---In normal mode runs the statement under cursor (SQL filetype only).
+---@param conn ConnectionParams
+---@param query string
+---@param opts? { variables?: table<string, string> }
+---@param on_done fun(call: CallDetails|nil, error_message: string|nil)
+local function execute_with_resolved_variables_async(conn, query, opts, on_done)
+  opts = opts or {}
+  variables.resolve_async(query, {
+    adapter_type = conn.type,
+    values = opts.variables,
+  }, function(resolved, resolve_err)
+    if resolve_err then
+      on_done(nil, resolve_err)
+      return
+    end
+
+    local ok, call_or_err = pcall(api.core.connection_execute, conn.id, resolved)
+    if not ok then
+      on_done(nil, tostring(call_or_err))
+      return
+    end
+
+    local call = call_or_err
+    api.ui.result_set_call(call)
+    dbee.open()
+    on_done(call, nil)
+  end)
+end
+
+---Run SQL contextually from current buffer.
+---In visual mode runs the selection.
+---In normal mode runs the statement under cursor (SQL filetype only).
 ---@param opts? { query?: string, variables?: table<string, string> }
 function dbee.execute_context(opts)
   opts = opts or {}
@@ -492,10 +523,17 @@ function dbee.execute_context(opts)
     return
   end
 
-  local _, err = dbee.execute(query, { variables = opts.variables })
-  if err then
-    vim.notify(err, vim.log.levels.WARN)
+  local conn = api.core.get_current_connection()
+  if not conn then
+    vim.notify("no connection currently selected", vim.log.levels.WARN)
+    return
   end
+
+  execute_with_resolved_variables_async(conn, query, opts, function(_, err)
+    if err then
+      vim.notify(err, vim.log.levels.WARN)
+    end
+  end)
 end
 
 ---Execute a script in deterministic statement order.
@@ -529,7 +567,7 @@ function dbee.execute_script(opts)
   if resolve_err then
     return {}, resolve_err
   end
-  script = resolved_script or script
+  script = resolved_script
 
   local queries = query_splitter.split(script, {
     adapter_type = conn.type,
@@ -747,7 +785,7 @@ function dbee.execute(query, opts)
     return nil, resolve_err
   end
 
-  local call = api.core.connection_execute(conn.id, resolved or query)
+  local call = api.core.connection_execute(conn.id, resolved)
   api.ui.result_set_call(call)
 
   dbee.open()

@@ -11,6 +11,8 @@ local function reset_dbee_modules()
   package.loaded["dbee.api"] = nil
   package.loaded["dbee.config"] = nil
   package.loaded["dbee.install"] = nil
+  package.loaded["dbee.query_splitter"] = nil
+  package.loaded["dbee.variables"] = nil
 end
 
 local function make_fake_api(opts)

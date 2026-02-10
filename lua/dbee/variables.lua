@@ -1,5 +1,9 @@
 local M = {}
 
+-- NOTE:
+-- Oracle variable support currently uses client-side text substitution.
+-- It does not use driver-level bind parameter binding yet.
+
 ---@class dbee.VariableToken
 ---@field key string
 ---@field kind "bind"|"substitution"
@@ -19,11 +23,39 @@ local function token_key(kind, name)
   return kind .. ":" .. name
 end
 
+---@param opts table
+---@param on_confirm fun(value?: string)
+---@return boolean
+local function open_input_prompt(opts, on_confirm)
+  if vim.ui and type(vim.ui.input) == "function" then
+    vim.ui.input(opts, on_confirm)
+    return true
+  end
+
+  local ok_snacks, snacks_input = pcall(require, "snacks.input")
+  if not ok_snacks or snacks_input == nil then
+    return false
+  end
+
+  if type(snacks_input) == "table" and type(snacks_input.input) == "function" then
+    snacks_input.input(opts, on_confirm)
+    return true
+  end
+
+  local ok_call = pcall(function()
+    ---@diagnostic disable-next-line: redundant-parameter
+    snacks_input(opts, on_confirm)
+  end)
+  return ok_call
+end
+
 ---@param text string
 ---@param start_index integer
 ---@return string|nil name
 ---@return integer|nil end_index
 local function read_identifier(text, start_index)
+  -- Intentionally requires an alphabetic/underscore first char.
+  -- Positional binds like :1/:2 are currently unsupported.
   local first = text:sub(start_index, start_index)
   if first == "" or not first:match("[A-Za-z_]") then
     return nil, nil
@@ -72,6 +104,9 @@ local function scan_tokens(text, on_token)
       goto continue
     end
 
+    -- Oracle '&' variables are SQL*Plus-style textual substitutions.
+    -- They may appear inside single-quoted literals, so we intentionally
+    -- scan for '&' before single-quote handling.
     if ch == "&" and not in_double then
       local prefix_len = 1
       if next_ch == "&" then
@@ -142,6 +177,19 @@ local function scan_tokens(text, on_token)
       if prev_ch ~= ":" then
         local name, end_idx = read_identifier(text, i + 1)
         if name then
+          -- Skip Oracle trigger pseudo-record fields (:NEW.col / :OLD.col).
+          -- Treating these as bind variables corrupts trigger definitions.
+          local upper = name:upper()
+          if upper == "NEW" or upper == "OLD" then
+            local k = end_idx + 1
+            while k <= n and text:sub(k, k):match("%s") do
+              k = k + 1
+            end
+            if text:sub(k, k) == "." then
+              i = end_idx + 1
+              goto continue
+            end
+          end
           on_token("bind", name, i, end_idx, text:sub(i, end_idx))
           i = end_idx + 1
           goto continue
@@ -200,20 +248,19 @@ local function prompt_variable_value(variable, timeout_ms)
     done = true
   end
 
-  local ok_snacks, snacks_input = pcall(require, "snacks.input")
-  if ok_snacks and snacks_input and type(snacks_input.input) == "function" then
-    snacks_input.input({
+  -- Open prompt on next loop tick so we are not in a keymap/action callback stack.
+  -- Using vim.ui.input allows snacks.nvim to provide floating input when configured.
+  vim.schedule(function()
+    if open_input_prompt({
       prompt = prompt,
       default = "",
-    }, on_confirm)
-  elseif vim.ui and type(vim.ui.input) == "function" then
-    vim.ui.input({
-      prompt = prompt,
-      default = "",
-    }, on_confirm)
-  else
-    return nil, "variable input UI is unavailable"
-  end
+    }, on_confirm) then
+      return
+    end
+
+    err = "variable input UI is unavailable"
+    done = true
+  end)
 
   local ok_wait = vim.wait(timeout_ms, function()
     return done
@@ -222,6 +269,8 @@ local function prompt_variable_value(variable, timeout_ms)
     err = "variable input timed out"
   elseif value == nil then
     err = "variable input canceled"
+  elseif value == "" then
+    err = "variable input empty"
   end
   if err then
     return nil, err
@@ -263,6 +312,108 @@ local function apply_values(query, values)
   return table.concat(out)
 end
 
+---@param variable dbee.VariableToken
+---@param on_done fun(value: string|nil, err: string|nil)
+local function prompt_variable_value_async(variable, on_done)
+  local prompt = variable.kind == "bind"
+      and ("Bind :" .. variable.name .. ": ")
+    or ("Substitute &" .. variable.name .. ": ")
+
+  local function handle_input(input)
+    if input == nil then
+      on_done(nil, "variable input canceled")
+      return
+    end
+    if input == "" then
+      on_done(nil, "variable input empty")
+      return
+    end
+    on_done(tostring(input), nil)
+  end
+
+  vim.schedule(function()
+    if open_input_prompt({
+      prompt = prompt,
+      default = "",
+    }, handle_input) then
+      return
+    end
+
+    on_done(nil, "variable input UI is unavailable")
+  end)
+end
+
+---@param query string
+---@param opts? { adapter_type?: string, values?: table<string, string>, prompt_async_fn?: fun(variable: dbee.VariableToken, on_done: fun(value: string|nil, err: string|nil)) }
+---@param on_done fun(resolved: string|nil, err: string|nil)
+function M.resolve_async(query, opts, on_done)
+  query = tostring(query or "")
+  opts = opts or {}
+
+  if not is_oracle(opts.adapter_type) then
+    on_done(query, nil)
+    return
+  end
+
+  local tokens = M.collect(query, opts)
+  if #tokens == 0 then
+    on_done(query, nil)
+    return
+  end
+
+  local provided = opts.values or {}
+  local resolved_values = {}
+  local prompt_async_fn = opts.prompt_async_fn or prompt_variable_value_async
+
+  local function get_provided(token)
+    local value = provided[token.key]
+    if value == nil then
+      value = provided[token.token]
+    end
+    if value == nil then
+      value = provided[token.name]
+    end
+    if value == nil then
+      return nil
+    end
+    return tostring(value)
+  end
+
+  local function step(index)
+    if index > #tokens then
+      on_done(apply_values(query, resolved_values), nil)
+      return
+    end
+
+    local token = tokens[index]
+    local preset = get_provided(token)
+    if preset ~= nil then
+      resolved_values[token.key] = preset
+      step(index + 1)
+      return
+    end
+
+    prompt_async_fn(token, function(value, err)
+      if err then
+        on_done(nil, err)
+        return
+      end
+      if value == nil then
+        on_done(nil, "variable input canceled")
+        return
+      end
+      if value == "" then
+        on_done(nil, "variable input empty")
+        return
+      end
+      resolved_values[token.key] = tostring(value)
+      step(index + 1)
+    end)
+  end
+
+  step(1)
+end
+
 ---@param query string
 ---@param opts? { adapter_type?: string, values?: table<string, string>, prompt_fn?: fun(variable: dbee.VariableToken): (string|nil), (string|nil), timeout_ms?: integer }
 ---@return string|nil resolved
@@ -301,6 +452,9 @@ function M.resolve(query, opts)
       end
       if prompted == nil then
         return nil, "variable input canceled"
+      end
+      if prompted == "" then
+        return nil, "variable input empty"
       end
       value = prompted
     end
