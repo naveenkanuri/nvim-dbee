@@ -34,8 +34,7 @@ jobs:
 
   lua-headless-regression:
     runs-on: ubuntu-22.04
-    continue-on-error: true
-    name: Lua Headless Regression (${{ matrix.script }}) [advisory]
+    name: Lua Headless Regression (${{ matrix.script }})
     defaults:
       run:
         working-directory: .
