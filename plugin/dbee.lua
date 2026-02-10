@@ -13,7 +13,10 @@ local commands = {
     require("dbee").actions()
   end,
   execute = function(args)
-    require("dbee").execute(table.concat(args, " "))
+    local _, err = require("dbee").execute(table.concat(args, " "))
+    if err then
+      vim.notify(err, vim.log.levels.WARN)
+    end
   end,
   execute_script = function(args)
     local query = table.concat(args, " ")

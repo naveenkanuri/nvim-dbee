@@ -492,17 +492,10 @@ function dbee.execute_context(opts)
     return
   end
 
-  local conn = api.core.get_current_connection()
-  local resolved, resolve_err = variables.resolve(query, {
-    adapter_type = conn and conn.type or nil,
-    values = opts.variables,
-  })
-  if resolve_err then
-    vim.notify(resolve_err, vim.log.levels.WARN)
-    return
+  local _, err = dbee.execute(query, { variables = opts.variables })
+  if err then
+    vim.notify(err, vim.log.levels.WARN)
   end
-
-  dbee.execute(resolved or query)
 end
 
 ---Execute a script in deterministic statement order.
@@ -736,16 +729,29 @@ end
 ---Convenience wrapper around some api functions that executes a query on
 ---current connection and pipes the output to result UI.
 ---@param query string
-function dbee.execute(query)
+---@param opts? { variables?: table<string, string> }
+---@return CallDetails|nil call
+---@return string|nil error_message
+function dbee.execute(query, opts)
+  opts = opts or {}
   local conn = api.core.get_current_connection()
   if not conn then
-    error("no connection currently selected")
+    return nil, "no connection currently selected"
   end
 
-  local call = api.core.connection_execute(conn.id, query)
+  local resolved, resolve_err = variables.resolve(query, {
+    adapter_type = conn.type,
+    values = opts.variables,
+  })
+  if resolve_err then
+    return nil, resolve_err
+  end
+
+  local call = api.core.connection_execute(conn.id, resolved or query)
   api.ui.result_set_call(call)
 
   dbee.open()
+  return call, nil
 end
 
 ---Store currently displayed result.

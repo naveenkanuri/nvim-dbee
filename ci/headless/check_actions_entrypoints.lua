@@ -110,6 +110,38 @@ if #calls ~= 2 then
   vim.cmd("cquit 1")
   return
 end
+if calls[2].query ~= "select 1 from dual;" then
+  print("ACTIONS_FAIL=execute_script_query:" .. tostring(calls[2].query))
+  vim.cmd("cquit 1")
+  return
+end
+if ui_input_calls ~= 2 then
+  print("ACTIONS_FAIL=execute_script_prompt_count:" .. tostring(ui_input_calls))
+  vim.cmd("cquit 1")
+  return
+end
+
+local _, direct_err = dbee.execute("select :id from dual;")
+if direct_err ~= nil then
+  print("ACTIONS_FAIL=direct_execute_err:" .. tostring(direct_err))
+  vim.cmd("cquit 1")
+  return
+end
+if #calls ~= 3 then
+  print("ACTIONS_FAIL=direct_execute_count:" .. tostring(#calls))
+  vim.cmd("cquit 1")
+  return
+end
+if calls[3].query ~= "select 1 from dual;" then
+  print("ACTIONS_FAIL=direct_execute_query:" .. tostring(calls[3].query))
+  vim.cmd("cquit 1")
+  return
+end
+if ui_input_calls ~= 3 then
+  print("ACTIONS_FAIL=direct_execute_prompt_count:" .. tostring(ui_input_calls))
+  vim.cmd("cquit 1")
+  return
+end
 
 local saved_select = vim.ui.select
 vim.ui.select = function(items, _, cb)
