@@ -50,7 +50,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Neovim
         run: |
-          curl -fsSLO https://github.com/neovim/neovim/releases/download/v0.10.3/nvim-linux-x86_64.tar.gz
+          curl -fsSLO https://github.com/neovim/neovim/releases/download/v0.11.6/nvim-linux-x86_64.tar.gz
           tar xzf nvim-linux-x86_64.tar.gz
           echo "${PWD}/nvim-linux-x86_64/bin" >> "${GITHUB_PATH}"
       - name: Run Headless Lua Check
