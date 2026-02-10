@@ -48,6 +48,13 @@
 ---| '"archive_failed"'
 ---| '"canceled"'
 
+---Categorized error class for failed calls.
+---@alias call_error_kind
+---| '"unknown"'
+---| '"disconnected"'
+---| '"timeout"'
+---| '"canceled"'
+
 ---Details and stats of a single call to database.
 ---@class CallDetails
 ---@field id call_id
@@ -56,6 +63,7 @@
 ---@field state call_state
 ---@field timestamp_us integer time in microseconds
 ---@field error? string error message in case of error
+---@field error_kind? call_error_kind categorized error class
 
 ---@divider -
 ---@tag dbee.ref.types.connection

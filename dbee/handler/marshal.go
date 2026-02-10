@@ -46,6 +46,7 @@ func (cw *callWrap) MarshalMsgPack(enc *msgpack.Encoder) error {
 		TimeTaken int64  `msgpack:"time_taken_us"`
 		Timestamp int64  `msgpack:"timestamp_us"`
 		Error     string `msgpack:"error,omitempty"`
+		ErrorKind string `msgpack:"error_kind,omitempty"`
 	}{
 		ID:        string(cw.call.GetID()),
 		Query:     cw.call.GetQuery(),
@@ -53,6 +54,7 @@ func (cw *callWrap) MarshalMsgPack(enc *msgpack.Encoder) error {
 		TimeTaken: cw.call.GetTimeTaken().Microseconds(),
 		Timestamp: cw.call.GetTimestamp().UnixMicro(),
 		Error:     errMsg,
+		ErrorKind: cw.call.ErrorKind(),
 	})
 }
 

@@ -148,6 +148,32 @@ func TestCall_FailedQuery(t *testing.T) {
 
 	// make sure all events passed
 	r.Equal(len(expectedEvents), eventIndex)
+	r.Equal("unknown", call.ErrorKind())
+}
+
+func TestCall_FailedQuery_DisconnectedKind(t *testing.T) {
+	r := require.New(t)
+
+	rows := mock.NewRows(0, 10)
+	adapter := mock.NewAdapter(rows,
+		mock.AdapterWithQuerySideEffect("fail", func(ctx context.Context) error {
+			return errors.New("dial tcp: lookup db.internal: no such host")
+		}),
+	)
+
+	connection, err := core.NewConnection(&core.ConnectionParams{}, adapter)
+	r.NoError(err)
+
+	call := connection.Execute("fail", nil)
+
+	select {
+	case <-call.Done():
+	case <-time.After(5 * time.Second):
+		t.Error("call did not finish in expected time")
+	}
+
+	r.Error(call.Err())
+	r.Equal("disconnected", call.ErrorKind())
 }
 
 func TestCall_Archive(t *testing.T) {

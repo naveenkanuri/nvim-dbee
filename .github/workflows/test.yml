@@ -47,6 +47,7 @@ jobs:
           - check_execute_script.lua
           - check_editor_variables.lua
           - check_actions_entrypoints.lua
+          - check_result_error_kinds.lua
           - check_lsp_alias_completion.lua
           - check_lsp_alias_rebinding.lua
           - check_run_note_queries_opts.lua

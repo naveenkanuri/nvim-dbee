@@ -25,8 +25,9 @@ type (
 		cancelFunc func()
 
 		// any error that might occur during execution
-		err  error
-		done chan struct{}
+		err       error
+		errorKind string
+		done      chan struct{}
 	}
 )
 
@@ -38,6 +39,7 @@ type callPersistent struct {
 	TimeTaken int64  `json:"time_taken_us"`
 	Timestamp int64  `json:"timestamp_us"`
 	Error     string `json:"error,omitempty"`
+	ErrorKind string `json:"error_kind,omitempty"`
 }
 
 func (c *Call) toPersistent() *callPersistent {
@@ -53,6 +55,7 @@ func (c *Call) toPersistent() *callPersistent {
 		TimeTaken: c.timeTaken.Microseconds(),
 		Timestamp: c.timestamp.UnixMicro(),
 		Error:     errMsg,
+		ErrorKind: c.errorKind,
 	}
 }
 
@@ -80,6 +83,10 @@ func (c *Call) UnmarshalJSON(data []byte) error {
 	if alias.Error != "" {
 		callErr = errors.New(alias.Error)
 	}
+	errorKind := alias.ErrorKind
+	if errorKind == "" && callErr != nil {
+		errorKind = classifyCallError(callErr)
+	}
 
 	*c = Call{
 		id:        CallID(alias.ID),
@@ -88,6 +95,7 @@ func (c *Call) UnmarshalJSON(data []byte) error {
 		timeTaken: time.Duration(alias.TimeTaken) * time.Microsecond,
 		timestamp: time.UnixMicro(alias.Timestamp),
 		err:       callErr,
+		errorKind: errorKind,
 
 		result:  new(Result),
 		archive: newArchive(CallID(alias.ID)),
@@ -149,6 +157,7 @@ func newCallFromExecutor(executor func(context.Context) (ResultStream, error), q
 		c.timeTaken = time.Since(c.timestamp)
 		if err != nil {
 			c.err = err
+			c.errorKind = classifyCallError(err)
 			eventsCh <- CallStateExecutingFailed
 			close(c.done)
 			return
@@ -158,6 +167,7 @@ func newCallFromExecutor(executor func(context.Context) (ResultStream, error), q
 		err = c.result.SetIter(iter, func() { eventsCh <- CallStateRetrieving })
 		if err != nil {
 			c.err = err
+			c.errorKind = classifyCallError(err)
 			eventsCh <- CallStateRetrievingFailed
 			close(c.done)
 			return
@@ -167,6 +177,7 @@ func newCallFromExecutor(executor func(context.Context) (ResultStream, error), q
 		err = c.archive.setResult(c.result)
 		if err != nil {
 			c.err = err
+			c.errorKind = classifyCallError(err)
 			eventsCh <- CallStateArchiveFailed
 			close(c.done)
 			return
@@ -201,6 +212,10 @@ func (c *Call) GetTimestamp() time.Time {
 
 func (c *Call) Err() error {
 	return c.err
+}
+
+func (c *Call) ErrorKind() string {
+	return c.errorKind
 }
 
 // Done returns a non-buffered channel that is closed when

@@ -160,12 +160,39 @@ function ResultUI:display_status()
   end
 
   local state = self.current_call.state
+  local error_kind = self.current_call.error_kind
 
   local msg = ""
   if state == "executing_failed" then
-    msg = "Call execution failed"
+    if error_kind == "disconnected" then
+      msg = "Call failed: connection lost"
+    elseif error_kind == "timeout" then
+      msg = "Call timed out"
+    elseif error_kind == "canceled" then
+      msg = "Call canceled"
+    else
+      msg = "Call execution failed"
+    end
   elseif state == "retrieving_failed" then
-    msg = "Failed retrieving results"
+    if error_kind == "disconnected" then
+      msg = "Result retrieval failed: connection lost"
+    elseif error_kind == "timeout" then
+      msg = "Result retrieval timed out"
+    elseif error_kind == "canceled" then
+      msg = "Call canceled"
+    else
+      msg = "Failed retrieving results"
+    end
+  elseif state == "archive_failed" then
+    if error_kind == "timeout" then
+      msg = "Result archiving timed out"
+    elseif error_kind == "disconnected" then
+      msg = "Result archiving failed: connection lost"
+    elseif error_kind == "canceled" then
+      msg = "Call canceled"
+    else
+      msg = "Failed archiving results"
+    end
   elseif state == "canceled" then
     msg = "Call canceled"
   end
