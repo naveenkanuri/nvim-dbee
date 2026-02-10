@@ -23,6 +23,8 @@ local function make_fake_api(opts)
   local execute_error_at_index = opts.execute_error_at_index
   local no_connection = opts.no_connection
   local cancel_applies_state = opts.cancel_applies_state ~= false
+  local execute_attempt = 0
+  local execute_error_fired = false
 
   local conn = { id = "conn_test", type = "oracle" }
   if no_connection then
@@ -38,8 +40,10 @@ local function make_fake_api(opts)
   end
 
   function core.connection_execute(_, query, opts)
+    execute_attempt = execute_attempt + 1
     local idx = #calls + 1
-    if execute_error_at_index and idx == execute_error_at_index then
+    if execute_error_at_index and not execute_error_fired and execute_attempt == execute_error_at_index then
+      execute_error_fired = true
       error("execute_boom_" .. tostring(idx))
     end
     local call = {
@@ -249,6 +253,39 @@ local ok2 = run_scenario(
   }
 )
 if not ok2 then
+  return
+end
+
+local ok2b = run_scenario(
+  "EXECUTE_ERROR_STOP_ON_FAIL",
+  {
+    script = "SELECT 1 FROM dual; SELECT 2 FROM dual; SELECT 3 FROM dual;",
+    api = { execute_error_at_index = 2 },
+    expected_count = 1,
+    expected_queries = {
+      "SELECT 1 FROM dual;",
+    },
+    expect_error_contains = "failed to start query",
+  }
+)
+if not ok2b then
+  return
+end
+
+local ok2c = run_scenario(
+  "EXECUTE_ERROR_CONTINUE",
+  {
+    script = "SELECT 1 FROM dual; SELECT 2 FROM dual; SELECT 3 FROM dual;",
+    api = { execute_error_at_index = 2 },
+    stop_on_error = false,
+    expected_count = 2,
+    expected_queries = {
+      "SELECT 1 FROM dual;",
+      "SELECT 3 FROM dual;",
+    },
+  }
+)
+if not ok2c then
   return
 end
 

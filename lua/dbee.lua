@@ -602,26 +602,41 @@ function dbee.execute_script(opts)
         adapter_type = conn.type,
         binds = script_exec_opts and script_exec_opts.binds or nil,
       })
-      local call = api.core.connection_execute(conn.id, query, query_exec_opts)
-      run_state.current_call_id = call.id
-      run_state.cancel_sent_call_id = nil
-      api.ui.result_set_call(call)
-      calls[#calls + 1] = call
+      local ok_exec, call_or_err = pcall(api.core.connection_execute, conn.id, query, query_exec_opts)
+      if not ok_exec then
+        if stop_on_error then
+          err_msg = "script execution failed to start query: " .. tostring(call_or_err)
+          break
+        end
+      else
+        local call = call_or_err
+        if not call or not call.id then
+          if stop_on_error then
+            err_msg = "script execution returned no call details"
+            break
+          end
+        else
+          run_state.current_call_id = call.id
+          run_state.cancel_sent_call_id = nil
+          api.ui.result_set_call(call)
+          calls[#calls + 1] = call
 
-      local ok, state = wait_for_call_terminal_state(conn.id, call.id, timeout_ms, run_state)
-      if run_state.canceled or state == "canceled" then
-        err_msg = "script execution canceled"
-        break
+          local ok, state = wait_for_call_terminal_state(conn.id, call.id, timeout_ms, run_state)
+          if run_state.canceled or state == "canceled" then
+            err_msg = "script execution canceled"
+            break
+          end
+          if not ok then
+            err_msg = "script execution timed out waiting for call " .. tostring(call.id)
+            break
+          end
+          if state ~= "archived" and stop_on_error then
+            err_msg = "script execution stopped on state " .. tostring(state) .. " for call " .. tostring(call.id)
+            break
+          end
+          run_state.current_call_id = nil
+        end
       end
-      if not ok then
-        err_msg = "script execution timed out waiting for call " .. tostring(call.id)
-        break
-      end
-      if state ~= "archived" and stop_on_error then
-        err_msg = "script execution stopped on state " .. tostring(state) .. " for call " .. tostring(call.id)
-        break
-      end
-      run_state.current_call_id = nil
     end
   end, debug.traceback)
 

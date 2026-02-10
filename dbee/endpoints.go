@@ -10,60 +10,124 @@ import (
 	"github.com/kndndrj/nvim-dbee/dbee/plugin"
 )
 
-func parseQueryExecuteOptions(raw any) *core.QueryExecuteOptions {
-	if raw == nil {
-		return nil
-	}
-
-	var optsMap map[string]any
+func parseAnyMap(raw any, fieldName string) (map[string]any, error) {
 	switch cast := raw.(type) {
 	case map[string]any:
-		optsMap = cast
+		return cast, nil
 	case map[any]any:
-		optsMap = map[string]any{}
+		out := map[string]any{}
 		for k, v := range cast {
 			key, ok := k.(string)
 			if !ok {
-				continue
+				return nil, fmt.Errorf("%s key must be string, got %T", fieldName, k)
 			}
-			optsMap[key] = v
+			out[key] = v
 		}
+		return out, nil
 	default:
-		return nil
+		return nil, fmt.Errorf("%s must be a map, got %T", fieldName, raw)
+	}
+}
+
+func stringifyBindValue(bindName string, raw any) (string, error) {
+	if raw == nil {
+		return "", fmt.Errorf("bind value for %q cannot be nil (use \"null\" typed literal instead)", bindName)
+	}
+
+	switch cast := raw.(type) {
+	case string:
+		return cast, nil
+	case []byte:
+		// msgpack binary payloads may surface as []byte.
+		return string(cast), nil
+	case bool:
+		if cast {
+			return "true", nil
+		}
+		return "false", nil
+	case int, int8, int16, int32, int64:
+		return fmt.Sprint(cast), nil
+	case uint, uint8, uint16, uint32, uint64:
+		return fmt.Sprint(cast), nil
+	case float32, float64:
+		return fmt.Sprint(cast), nil
+	default:
+		return "", fmt.Errorf("bind value for %q has unsupported type %T", bindName, raw)
+	}
+}
+
+func parseQueryBinds(raw any) (map[string]string, error) {
+	switch cast := raw.(type) {
+	case map[string]string:
+		// Defense-in-depth: msgpack currently decodes to map[string]any, but
+		// accepting this keeps direct/internal callers flexible.
+		out := map[string]string{}
+		for k, v := range cast {
+			out[k] = v
+		}
+		return out, nil
+	case map[string]any:
+		out := map[string]string{}
+		for k, v := range cast {
+			val, err := stringifyBindValue(k, v)
+			if err != nil {
+				return nil, err
+			}
+			out[k] = val
+		}
+		return out, nil
+	case map[any]any:
+		// Defense-in-depth for callers that bypass msgpack decoding.
+		out := map[string]string{}
+		for k, v := range cast {
+			key, ok := k.(string)
+			if !ok {
+				return nil, fmt.Errorf("query option \"binds\" key must be string, got %T", k)
+			}
+			val, err := stringifyBindValue(key, v)
+			if err != nil {
+				return nil, err
+			}
+			out[key] = val
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("query option \"binds\" must be a map, got %T", raw)
+	}
+}
+
+func parseQueryExecuteOptions(raw any) (*core.QueryExecuteOptions, error) {
+	if raw == nil {
+		return nil, nil
+	}
+
+	optsMap, err := parseAnyMap(raw, "query options")
+	if err != nil {
+		return nil, err
+	}
+
+	// Keep this allowlist in sync when adding new query execute options.
+	for key := range optsMap {
+		if key != "binds" {
+			return nil, fmt.Errorf("unsupported query option %q", key)
+		}
 	}
 
 	bindsRaw, ok := optsMap["binds"]
 	if !ok || bindsRaw == nil {
-		return nil
+		return nil, nil
 	}
 
-	binds := map[string]string{}
-	switch cast := bindsRaw.(type) {
-	case map[string]string:
-		for k, v := range cast {
-			binds[k] = v
-		}
-	case map[string]any:
-		for k, v := range cast {
-			binds[k] = fmt.Sprint(v)
-		}
-	case map[any]any:
-		for k, v := range cast {
-			key, ok := k.(string)
-			if !ok {
-				continue
-			}
-			binds[key] = fmt.Sprint(v)
-		}
-	default:
-		return nil
+	binds, err := parseQueryBinds(bindsRaw)
+	if err != nil {
+		return nil, err
 	}
 
 	if len(binds) == 0 {
-		return nil
+		return nil, nil
 	}
 
-	return &core.QueryExecuteOptions{Binds: binds}
+	return &core.QueryExecuteOptions{Binds: binds}, nil
 }
 
 func mountEndpoints(p *plugin.Plugin, h *handler.Handler) {
@@ -156,7 +220,10 @@ func mountEndpoints(p *plugin.Plugin, h *handler.Handler) {
 			Opts  any
 		},
 		) (any, error) {
-			opts := parseQueryExecuteOptions(args.Opts)
+			opts, err := parseQueryExecuteOptions(args.Opts)
+			if err != nil {
+				return nil, err
+			}
 			call, err := h.ConnectionExecute(args.ID, args.Query, opts)
 			return handler.WrapCall(call), err
 		})
