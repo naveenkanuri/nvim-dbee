@@ -17,11 +17,19 @@ local commands = {
   end,
   execute_script = function(args)
     local query = table.concat(args, " ")
+    local calls, err
     if query ~= "" then
-      require("dbee").execute_script({ query = query })
-      return
+      calls, err = require("dbee").execute_script({ query = query })
+    else
+      calls, err = require("dbee").execute_script()
     end
-    require("dbee").execute_script()
+    if err then
+      vim.notify(err, vim.log.levels.WARN)
+    end
+    return calls
+  end,
+  cancel_script = function()
+    require("dbee").cancel_script()
   end,
   store = function(args)
     -- args are "format", "output" and "extra_arg"

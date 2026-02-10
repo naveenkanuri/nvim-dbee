@@ -63,6 +63,13 @@ function M.log(level, message, subtitle)
   vim.notify(subtitle .. " " .. message, l, { title = "nvim-dbee" })
 end
 
+---Trim leading and trailing whitespace from a value.
+---@param value any
+---@return string
+function M.trim(value)
+  return (tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
 -- Gets keys of a map and sorts them by name
 ---@param obj table<string, any> map-like table
 ---@return string[]

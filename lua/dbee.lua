@@ -26,9 +26,8 @@ local terminal_states = {
   canceled = true,
 }
 
-local function trim(s)
-  return (tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", ""))
-end
+---@type { id: integer, canceled: boolean, current_call_id: string?, conn_id: connection_id? }|nil
+local active_script_run = nil
 
 ---@param conn_id connection_id
 ---@param call_id call_id
@@ -45,11 +44,15 @@ end
 ---@param conn_id connection_id
 ---@param call_id call_id
 ---@param timeout_ms integer
+---@param run_state? { id: integer, canceled: boolean, current_call_id: string?, conn_id: connection_id? }
 ---@return boolean ok
 ---@return string|nil state
-local function wait_for_call_terminal_state(conn_id, call_id, timeout_ms)
+local function wait_for_call_terminal_state(conn_id, call_id, timeout_ms, run_state)
   local state = nil
   local ok = vim.wait(timeout_ms, function()
+    if run_state and run_state.canceled then
+      pcall(api.core.call_cancel, call_id)
+    end
     state = find_call_state(conn_id, call_id)
     return state ~= nil and terminal_states[state] == true
   end, 50)
@@ -465,16 +468,16 @@ end
 function dbee.execute_context(opts)
   opts = opts or {}
 
-  local query = trim(opts.query)
+  local query = utils.trim(opts.query)
   if query == "" then
     local mode = vim.api.nvim_get_mode().mode
     if mode:match("^[vV\22]") then
       local srow, scol, erow, ecol = utils.visual_selection()
       local selection = vim.api.nvim_buf_get_text(0, srow, scol, erow, ecol, {})
-      query = trim(table.concat(selection, "\n"))
+      query = utils.trim(table.concat(selection, "\n"))
     else
       local under_cursor = utils.query_under_cursor(vim.api.nvim_get_current_buf())
-      query = trim(under_cursor)
+      query = utils.trim(under_cursor)
     end
   end
 
@@ -490,15 +493,20 @@ end
 ---Oracle scripts are split with PL/SQL awareness and '/' block terminators.
 ---@param opts? { query?: string, timeout_ms?: integer, stop_on_error?: boolean }
 ---@return CallDetails[] calls
+---@return string? error_message
 function dbee.execute_script(opts)
   opts = opts or {}
+
+  if active_script_run then
+    return {}, "script execution already in progress"
+  end
 
   local conn = api.core.get_current_connection()
   if not conn then
     error("no connection currently selected")
   end
 
-  local script = trim(opts.query)
+  local script = utils.trim(opts.query)
   if script == "" then
     local bufnr = vim.api.nvim_get_current_buf()
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
@@ -510,30 +518,68 @@ function dbee.execute_script(opts)
   })
   if #queries == 0 then
     vim.notify("No executable statements found in script", vim.log.levels.WARN)
-    return {}
+    return {}, nil
   end
 
   local timeout_ms = tonumber(opts.timeout_ms) or (30 * 60 * 1000)
   local stop_on_error = opts.stop_on_error ~= false
   local calls = {}
+  local run_state = {
+    id = math.floor(vim.loop.hrtime() % 2147483647),
+    canceled = false,
+    current_call_id = nil,
+    conn_id = conn.id,
+  }
+  active_script_run = run_state
+  local err_msg = nil
 
   dbee.open()
 
   for _, query in ipairs(queries) do
+    if run_state.canceled then
+      err_msg = "script execution canceled"
+      break
+    end
+
     local call = api.core.connection_execute(conn.id, query)
+    run_state.current_call_id = call.id
     api.ui.result_set_call(call)
     calls[#calls + 1] = call
 
-    local ok, state = wait_for_call_terminal_state(conn.id, call.id, timeout_ms)
-    if not ok then
-      error("script execution timed out waiting for call " .. tostring(call.id))
-    end
-    if state ~= "archived" and stop_on_error then
+    local ok, state = wait_for_call_terminal_state(conn.id, call.id, timeout_ms, run_state)
+    if run_state.canceled or state == "canceled" then
+      err_msg = "script execution canceled"
       break
     end
+    if not ok then
+      err_msg = "script execution timed out waiting for call " .. tostring(call.id)
+      break
+    end
+    if state ~= "archived" and stop_on_error then
+      err_msg = "script execution stopped on state " .. tostring(state) .. " for call " .. tostring(call.id)
+      break
+    end
+    run_state.current_call_id = nil
   end
 
-  return calls
+  if active_script_run == run_state then
+    active_script_run = nil
+  end
+
+  return calls, err_msg
+end
+
+---Cancel currently running script execution.
+function dbee.cancel_script()
+  if not active_script_run then
+    vim.notify("No running script execution", vim.log.levels.INFO)
+    return
+  end
+
+  active_script_run.canceled = true
+  if active_script_run.current_call_id then
+    pcall(api.core.call_cancel, active_script_run.current_call_id)
+  end
 end
 
 ---Open contextual action picker.
@@ -554,7 +600,17 @@ function dbee.actions(opts)
       id = "execute_script",
       label = "Execute Script",
       run = function()
-        dbee.execute_script()
+        local _, err = dbee.execute_script()
+        if err then
+          vim.notify(err, vim.log.levels.WARN)
+        end
+      end,
+    },
+    {
+      id = "cancel_script",
+      label = "Cancel Script",
+      run = function()
+        dbee.cancel_script()
       end,
     },
     {
@@ -599,7 +655,20 @@ function dbee.actions(opts)
 
   local ok_snacks, snacks = pcall(require, "snacks")
   if not ok_snacks then
-    dbee.execute_context()
+    if vim.ui and type(vim.ui.select) == "function" then
+      vim.ui.select(actions, {
+        prompt = "Dbee Actions",
+        format_item = function(item)
+          return item.label
+        end,
+      }, function(choice)
+        if choice then
+          choice.run()
+        end
+      end)
+    else
+      vim.notify("snacks.nvim not available and no vim.ui.select fallback", vim.log.levels.WARN)
+    end
     return
   end
 

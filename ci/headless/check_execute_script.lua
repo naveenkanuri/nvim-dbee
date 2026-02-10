@@ -13,11 +13,16 @@ local function reset_dbee_modules()
   package.loaded["dbee.install"] = nil
 end
 
-local function make_fake_api(fail_at_index)
+local function make_fake_api(opts)
+  opts = opts or {}
+  local fail_at_index = opts.fail_at_index
+  local hang_at_index = opts.hang_at_index
+  local on_poll = opts.on_poll
+
   local conn = { id = "conn_test", type = "oracle" }
   local calls = {}
   local poll_count = {}
-  local shown_calls = {}
+  local canceled_ids = {}
 
   local core = {}
   function core.get_current_connection()
@@ -40,7 +45,20 @@ local function make_fake_api(fail_at_index)
     local out = {}
     for i, call in ipairs(calls) do
       poll_count[call.id] = (poll_count[call.id] or 0) + 1
-      if poll_count[call.id] >= 1 then
+      if on_poll then
+        on_poll({
+          index = i,
+          call = call,
+          poll_count = poll_count[call.id],
+        })
+      end
+
+      if call.state == "canceled" then
+        -- Preserve explicit cancel state set by core.call_cancel.
+        call.state = "canceled"
+      elseif hang_at_index and i == hang_at_index then
+        call.state = "executing"
+      elseif poll_count[call.id] >= 1 then
         if fail_at_index and i == fail_at_index then
           call.state = "executing_failed"
         else
@@ -58,10 +76,18 @@ local function make_fake_api(fail_at_index)
     return out
   end
 
-  local ui = {}
-  function ui.result_set_call(call)
-    shown_calls[#shown_calls + 1] = call.id
+  function core.call_cancel(call_id)
+    canceled_ids[#canceled_ids + 1] = call_id
+    for _, call in ipairs(calls) do
+      if call.id == call_id then
+        call.state = "canceled"
+        return
+      end
+    end
   end
+
+  local ui = {}
+  function ui.result_set_call(_) end
 
   local api = {
     core = core,
@@ -82,13 +108,13 @@ local function make_fake_api(fail_at_index)
     end,
   }
 
-  return api, calls, shown_calls
+  return api, calls, canceled_ids
 end
 
-local function run_scenario(name, script, fail_at_index, expected_count, expected_second_query)
+local function run_scenario(name, opts)
   reset_dbee_modules()
 
-  local api, calls = make_fake_api(fail_at_index)
+  local api, calls, canceled_ids = make_fake_api(opts.api or {})
   package.loaded["dbee.api"] = api
   package.loaded["dbee.install"] = { exec = function() end }
   package.loaded["dbee.config"] = {
@@ -99,40 +125,73 @@ local function run_scenario(name, script, fail_at_index, expected_count, expecte
   }
 
   local dbee = require("dbee")
-  local executed = dbee.execute_script({
-    query = script,
-    timeout_ms = 500,
-    stop_on_error = true,
+  if opts.before_run then
+    opts.before_run(dbee)
+  end
+
+  local executed, err = dbee.execute_script({
+    query = opts.script,
+    timeout_ms = opts.timeout_ms or 500,
+    stop_on_error = opts.stop_on_error ~= false,
   })
 
-  if #executed ~= expected_count then
+  if #executed ~= opts.expected_count then
     print("EXEC_SCRIPT_FAIL=" .. name .. ":count=" .. tostring(#executed))
     vim.cmd("cquit 1")
     return false
   end
-  if expected_second_query and calls[2] and calls[2].query ~= expected_second_query then
-    print("EXEC_SCRIPT_FAIL=" .. name .. ":query2=" .. tostring(calls[2].query))
+  if opts.expected_queries then
+    for i, q in ipairs(opts.expected_queries) do
+      local got = calls[i] and calls[i].query or nil
+      if got ~= q then
+        print("EXEC_SCRIPT_FAIL=" .. name .. ":query" .. tostring(i) .. "=" .. tostring(got))
+        vim.cmd("cquit 1")
+        return false
+      end
+    end
+  end
+  if opts.expect_error_contains then
+    if type(err) ~= "string" or not err:find(opts.expect_error_contains, 1, true) then
+      print("EXEC_SCRIPT_FAIL=" .. name .. ":missing_error:" .. tostring(err))
+      vim.cmd("cquit 1")
+      return false
+    end
+  elseif err ~= nil then
+    print("EXEC_SCRIPT_FAIL=" .. name .. ":unexpected_error:" .. tostring(err))
+    vim.cmd("cquit 1")
+    return false
+  end
+  if opts.expected_canceled_count and #canceled_ids ~= opts.expected_canceled_count then
+    print("EXEC_SCRIPT_FAIL=" .. name .. ":canceled_count=" .. tostring(#canceled_ids))
     vim.cmd("cquit 1")
     return false
   end
 
   print("EXEC_SCRIPT_" .. name .. "_COUNT=" .. tostring(#executed))
+  if err then
+    print("EXEC_SCRIPT_" .. name .. "_ERROR=" .. err)
+  end
   return true
 end
 
 local ok1 = run_scenario(
   "ALL_OK",
-  table.concat({
-    "BEGIN",
-    "  DBMS_OUTPUT.PUT_LINE('a');",
-    "END;",
-    "/",
-    "SELECT * FROM dual;",
-    "SELECT * FROM dual;",
-  }, "\n"),
-  nil,
-  3,
-  "SELECT * FROM dual;"
+  {
+    script = table.concat({
+      "BEGIN",
+      "  DBMS_OUTPUT.PUT_LINE('a');",
+      "END;",
+      "/",
+      "SELECT * FROM dual;",
+      "SELECT * FROM dual;",
+    }, "\n"),
+    expected_count = 3,
+    expected_queries = {
+      "BEGIN\n  DBMS_OUTPUT.PUT_LINE('a');\nEND;",
+      "SELECT * FROM dual;",
+      "SELECT * FROM dual;",
+    },
+  }
 )
 if not ok1 then
   return
@@ -140,12 +199,86 @@ end
 
 local ok2 = run_scenario(
   "STOP_ON_FAIL",
-  "SELECT 1 FROM dual; SELECT 2 FROM dual; SELECT 3 FROM dual;",
-  2,
-  2,
-  "SELECT 2 FROM dual;"
+  {
+    script = "SELECT 1 FROM dual; SELECT 2 FROM dual; SELECT 3 FROM dual;",
+    api = { fail_at_index = 2 },
+    expected_count = 2,
+    expected_queries = {
+      "SELECT 1 FROM dual;",
+      "SELECT 2 FROM dual;",
+    },
+    expect_error_contains = "stopped on state executing_failed",
+  }
 )
 if not ok2 then
+  return
+end
+
+local ok3 = run_scenario(
+  "TIMEOUT_PARTIAL",
+  {
+    script = "SELECT 1 FROM dual; SELECT 2 FROM dual;",
+    api = { hang_at_index = 2 },
+    timeout_ms = 120,
+    expected_count = 2,
+    expected_queries = {
+      "SELECT 1 FROM dual;",
+      "SELECT 2 FROM dual;",
+    },
+    expect_error_contains = "timed out",
+  }
+)
+if not ok3 then
+  return
+end
+
+local ok4 = run_scenario(
+  "REENTRANCY_GUARD",
+  {
+    script = "SELECT 1 FROM dual;",
+    api = {
+      on_poll = function(ctx)
+        if ctx.index == 1 and ctx.poll_count == 1 then
+          local inner = require("dbee")
+          local _, reentrant_err = inner.execute_script({
+            query = "SELECT 99 FROM dual;",
+            timeout_ms = 100,
+          })
+          if not reentrant_err or not reentrant_err:find("already in progress", 1, true) then
+            print("EXEC_SCRIPT_FAIL=REENTRANCY_GUARD:missing_reentrant_error:" .. tostring(reentrant_err))
+            vim.cmd("cquit 1")
+          end
+        end
+      end,
+    },
+    expected_count = 1,
+    expected_queries = { "SELECT 1 FROM dual;" },
+  }
+)
+if not ok4 then
+  return
+end
+
+local ok5 = run_scenario(
+  "CANCEL",
+  {
+    script = "SELECT 1 FROM dual;",
+    api = {
+      hang_at_index = 1,
+      on_poll = function(ctx)
+        if ctx.poll_count == 1 then
+          local inner = require("dbee")
+          inner.cancel_script()
+        end
+      end,
+    },
+    timeout_ms = 500,
+    expected_count = 1,
+    expect_error_contains = "canceled",
+    expected_canceled_count = 1,
+  }
+)
+if not ok5 then
   return
 end
 

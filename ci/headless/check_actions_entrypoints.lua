@@ -14,6 +14,7 @@ package.loaded["dbee.install"] = nil
 local conn = { id = "conn_test", type = "oracle" }
 local calls = {}
 local poll_count = {}
+local ui_select_called = false
 
 package.loaded["dbee.api"] = {
   core = {
@@ -89,6 +90,23 @@ end
 dbee.actions({ action = "execute_script" })
 if #calls ~= 2 then
   print("ACTIONS_FAIL=execute_script_count:" .. tostring(#calls))
+  vim.cmd("cquit 1")
+  return
+end
+
+local saved_select = vim.ui.select
+vim.ui.select = function(items, _, cb)
+  ui_select_called = true
+  cb(items[1])
+end
+
+package.loaded["snacks"] = nil
+dbee.actions()
+
+vim.ui.select = saved_select
+
+if not ui_select_called then
+  print("ACTIONS_FAIL=ui_select_not_called")
   vim.cmd("cquit 1")
   return
 end
