@@ -1,12 +1,70 @@
 package main
 
 import (
+	"fmt"
+
 	"github.com/neovim/go-client/nvim"
 
 	"github.com/kndndrj/nvim-dbee/dbee/core"
 	"github.com/kndndrj/nvim-dbee/dbee/handler"
 	"github.com/kndndrj/nvim-dbee/dbee/plugin"
 )
+
+func parseQueryExecuteOptions(raw any) *core.QueryExecuteOptions {
+	if raw == nil {
+		return nil
+	}
+
+	var optsMap map[string]any
+	switch cast := raw.(type) {
+	case map[string]any:
+		optsMap = cast
+	case map[any]any:
+		optsMap = map[string]any{}
+		for k, v := range cast {
+			key, ok := k.(string)
+			if !ok {
+				continue
+			}
+			optsMap[key] = v
+		}
+	default:
+		return nil
+	}
+
+	bindsRaw, ok := optsMap["binds"]
+	if !ok || bindsRaw == nil {
+		return nil
+	}
+
+	binds := map[string]string{}
+	switch cast := bindsRaw.(type) {
+	case map[string]string:
+		for k, v := range cast {
+			binds[k] = v
+		}
+	case map[string]any:
+		for k, v := range cast {
+			binds[k] = fmt.Sprint(v)
+		}
+	case map[any]any:
+		for k, v := range cast {
+			key, ok := k.(string)
+			if !ok {
+				continue
+			}
+			binds[key] = fmt.Sprint(v)
+		}
+	default:
+		return nil
+	}
+
+	if len(binds) == 0 {
+		return nil
+	}
+
+	return &core.QueryExecuteOptions{Binds: binds}
+}
 
 func mountEndpoints(p *plugin.Plugin, h *handler.Handler) {
 	p.RegisterEndpoint(
@@ -95,9 +153,11 @@ func mountEndpoints(p *plugin.Plugin, h *handler.Handler) {
 		func(args *struct {
 			ID    core.ConnectionID `msgpack:",array"`
 			Query string
+			Opts  any
 		},
 		) (any, error) {
-			call, err := h.ConnectionExecute(args.ID, args.Query)
+			opts := parseQueryExecuteOptions(args.Opts)
+			call, err := h.ConnectionExecute(args.ID, args.Query, opts)
 			return handler.WrapCall(call), err
 		})
 

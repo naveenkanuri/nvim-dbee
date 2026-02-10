@@ -73,6 +73,10 @@
 ---@field type string
 ---@field url string
 
+---Query execution options.
+---@class QueryExecuteOpts
+---@field binds? table<string, string> named bind values (Oracle). Values are sent as strings; type inference is adapter-driven.
+
 ---@divider -
 ---@tag dbee.ref.types.structure
 ---@brief [[

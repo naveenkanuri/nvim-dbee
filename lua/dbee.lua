@@ -476,16 +476,16 @@ end
 ---@param on_done fun(call: CallDetails|nil, error_message: string|nil)
 local function execute_with_resolved_variables_async(conn, query, opts, on_done)
   opts = opts or {}
-  variables.resolve_async(query, {
+  variables.resolve_for_execute_async(query, {
     adapter_type = conn.type,
     values = opts.variables,
-  }, function(resolved, resolve_err)
+  }, function(resolved, exec_opts, resolve_err)
     if resolve_err then
       on_done(nil, resolve_err)
       return
     end
 
-    local ok, call_or_err = pcall(api.core.connection_execute, conn.id, resolved)
+    local ok, call_or_err = pcall(api.core.connection_execute, conn.id, resolved, exec_opts)
     if not ok then
       on_done(nil, tostring(call_or_err))
       return
@@ -560,9 +560,10 @@ function dbee.execute_script(opts)
     script = table.concat(lines, "\n")
   end
 
-  local resolved_script, resolve_err = variables.resolve(script, {
+  local resolved_script, script_exec_opts, resolve_err = variables.resolve_for_execute(script, {
     adapter_type = conn.type,
     values = opts.variables,
+    reject_script_delimiters = true,
   })
   if resolve_err then
     return {}, resolve_err
@@ -597,7 +598,11 @@ function dbee.execute_script(opts)
         break
       end
 
-      local call = api.core.connection_execute(conn.id, query)
+      local query_exec_opts = variables.bind_opts_for_query(query, {
+        adapter_type = conn.type,
+        binds = script_exec_opts and script_exec_opts.binds or nil,
+      })
+      local call = api.core.connection_execute(conn.id, query, query_exec_opts)
       run_state.current_call_id = call.id
       run_state.cancel_sent_call_id = nil
       api.ui.result_set_call(call)
@@ -777,7 +782,7 @@ function dbee.execute(query, opts)
     return nil, "no connection currently selected"
   end
 
-  local resolved, resolve_err = variables.resolve(query, {
+  local resolved, exec_opts, resolve_err = variables.resolve_for_execute(query, {
     adapter_type = conn.type,
     values = opts.variables,
   })
@@ -785,7 +790,7 @@ function dbee.execute(query, opts)
     return nil, resolve_err
   end
 
-  local call = api.core.connection_execute(conn.id, resolved)
+  local call = api.core.connection_execute(conn.id, resolved, exec_opts)
   api.ui.result_set_call(call)
 
   dbee.open()

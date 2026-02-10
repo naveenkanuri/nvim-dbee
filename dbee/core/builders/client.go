@@ -60,7 +60,13 @@ func (c *Client) ColumnsFromQuery(query string, args ...any) ([]*core.Column, er
 
 // Exec executes a query and returns a stream with single row (number of affected results).
 func (c *Client) Exec(ctx context.Context, query string) (*ResultStream, error) {
-	res, err := c.db.ExecContext(ctx, query)
+	return c.ExecWithArgs(ctx, query)
+}
+
+// ExecWithArgs executes a query with positional/named arguments and returns
+// a stream with a single row (number of affected rows).
+func (c *Client) ExecWithArgs(ctx context.Context, query string, args ...any) (*ResultStream, error) {
+	res, err := c.db.ExecContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +86,13 @@ func (c *Client) Exec(ctx context.Context, query string) (*ResultStream, error) 
 
 // Query executes a query on a connection and returns a result stream.
 func (c *Client) Query(ctx context.Context, query string) (*ResultStream, error) {
-	rows, err := c.db.QueryContext(ctx, query)
+	return c.QueryWithArgs(ctx, query)
+}
+
+// QueryWithArgs executes a query with positional/named arguments and returns
+// a result stream.
+func (c *Client) QueryWithArgs(ctx context.Context, query string, args ...any) (*ResultStream, error) {
+	rows, err := c.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -92,8 +104,18 @@ func (c *Client) Query(ctx context.Context, query string) (*ResultStream, error)
 // has a nonempty result.
 // Useful for specifying "fallback" queries like "ROWCOUNT()" when there are no results in query.
 func (c *Client) QueryUntilNotEmpty(ctx context.Context, queries ...string) (*ResultStream, error) {
+	return c.QueryUntilNotEmptyWithArgs(ctx, nil, queries...)
+}
+
+// QueryUntilNotEmptyWithArgs executes a single query with arguments and returns
+// when it has a non-empty result. Fallback mode (multiple queries) is intentionally
+// unsupported with args to avoid leaking binds into unrelated fallback queries.
+func (c *Client) QueryUntilNotEmptyWithArgs(ctx context.Context, queryArgs []any, queries ...string) (*ResultStream, error) {
 	if len(queries) < 1 {
 		return nil, errors.New("no queries provided")
+	}
+	if len(queryArgs) > 0 && len(queries) > 1 {
+		return nil, errors.New("query args are supported only for a single query")
 	}
 
 	conn, err := c.db.Conn(ctx)
@@ -102,7 +124,7 @@ func (c *Client) QueryUntilNotEmpty(ctx context.Context, queries ...string) (*Re
 	}
 
 	for _, query := range queries {
-		rows, err := conn.QueryContext(ctx, query)
+		rows, err := conn.QueryContext(ctx, query, queryArgs...)
 		if err != nil {
 			_ = conn.Close()
 			return nil, fmt.Errorf("conn.QueryContext: %w", err)

@@ -36,12 +36,22 @@ type (
 		Close()
 	}
 
+	// BindDriver is an optional interface for drivers that support
+	// parameterized query execution with named bind values.
+	BindDriver interface {
+		QueryWithBinds(ctx context.Context, query string, binds map[string]string) (ResultStream, error)
+	}
+
 	// DatabaseSwitcher is an optional interface for drivers that have database switching capabilities.
 	DatabaseSwitcher interface {
 		SelectDatabase(string) error
 		ListDatabases() (current string, available []string, err error)
 	}
 )
+
+type QueryExecuteOptions struct {
+	Binds map[string]string
+}
 
 type ConnectionID string
 
@@ -102,9 +112,27 @@ func (c *Connection) GetParams() *ConnectionParams {
 }
 
 func (c *Connection) Execute(query string, onEvent func(CallState, *Call)) *Call {
+	return c.ExecuteWithOptions(query, nil, onEvent)
+}
+
+func (c *Connection) ExecuteWithOptions(query string, opts *QueryExecuteOptions, onEvent func(CallState, *Call)) *Call {
+	var binds map[string]string
+	if opts != nil && len(opts.Binds) > 0 {
+		binds = make(map[string]string, len(opts.Binds))
+		for k, v := range opts.Binds {
+			binds[k] = v
+		}
+	}
+
 	exec := func(ctx context.Context) (ResultStream, error) {
 		if strings.TrimSpace(query) == "" {
 			return nil, errors.New("empty query")
+		}
+
+		if len(binds) > 0 {
+			if driverWithBinds, ok := c.driver.(BindDriver); ok {
+				return driverWithBinds.QueryWithBinds(ctx, query, binds)
+			}
 		}
 		return c.driver.Query(ctx, query)
 	}

@@ -148,6 +148,88 @@ if not assert_true(provided_resolved:find(":ignored_bind", 1, true) ~= nil, "res
   return
 end
 
+local exec_resolved, exec_opts, exec_err = variables.resolve_for_execute("SELECT :id FROM dual; SELECT '&name' FROM dual;", {
+  adapter_type = "oracle",
+  values = {
+    ["bind:id"] = "42",
+    ["substitution:name"] = "ALICE",
+  },
+})
+if exec_err then
+  fail("resolve_for_execute_err:" .. tostring(exec_err))
+  return
+end
+if not assert_eq(exec_resolved, "SELECT :id FROM dual; SELECT 'ALICE' FROM dual;", "resolve_for_execute_query") then
+  return
+end
+if not assert_true(exec_opts and exec_opts.binds and exec_opts.binds.id == "42", "resolve_for_execute_binds") then
+  return
+end
+
+local unsafe_script_resolved, unsafe_script_opts, unsafe_script_err = variables.resolve_for_execute(
+  "SELECT '&name' FROM dual;",
+  {
+    adapter_type = "oracle",
+    values = {
+      ["substitution:name"] = "foo; DROP TABLE bar",
+    },
+    reject_script_delimiters = true,
+  }
+)
+if unsafe_script_resolved ~= nil or unsafe_script_opts ~= nil then
+  fail("resolve_for_execute_unsafe_expected_nil")
+  return
+end
+if
+  not assert_true(
+    type(unsafe_script_err) == "string" and unsafe_script_err:find("unsafe substitution value", 1, true) ~= nil,
+    "resolve_for_execute_unsafe_error"
+  )
+then
+  return
+end
+
+local unsafe_newline_resolved, unsafe_newline_opts, unsafe_newline_err = variables.resolve_for_execute(
+  "SELECT '&name' FROM dual;",
+  {
+    adapter_type = "oracle",
+    values = {
+      ["substitution:name"] = "foo\nbar",
+    },
+    reject_script_delimiters = true,
+  }
+)
+if unsafe_newline_resolved ~= nil or unsafe_newline_opts ~= nil then
+  fail("resolve_for_execute_unsafe_newline_expected_nil")
+  return
+end
+if
+  not assert_true(
+    type(unsafe_newline_err) == "string" and unsafe_newline_err:find("newline", 1, true) ~= nil,
+    "resolve_for_execute_unsafe_newline_error"
+  )
+then
+  return
+end
+
+local bind_opts_filtered = variables.bind_opts_for_query("SELECT :id FROM dual;", {
+  adapter_type = "oracle",
+  binds = { id = "42", other = "11" },
+})
+if not assert_true(bind_opts_filtered and bind_opts_filtered.binds and bind_opts_filtered.binds.id == "42", "bind_opts_for_query_match") then
+  return
+end
+if not assert_true(bind_opts_filtered.binds.other == nil, "bind_opts_for_query_filter") then
+  return
+end
+local bind_opts_none = variables.bind_opts_for_query("SELECT 1 FROM dual;", {
+  adapter_type = "oracle",
+  binds = { id = "42" },
+})
+if not assert_eq(bind_opts_none, nil, "bind_opts_for_query_none") then
+  return
+end
+
 local postgres_tokens = variables.collect(base_query, { adapter_type = "postgres" })
 if not assert_eq(#postgres_tokens, 0, "non_oracle_collect_empty") then
   return
@@ -158,6 +240,19 @@ if postgres_err then
   return
 end
 if not assert_eq(postgres_resolved, base_query, "non_oracle_resolve_same") then
+  return
+end
+local postgres_exec_resolved, postgres_exec_opts, postgres_exec_err = variables.resolve_for_execute(base_query, {
+  adapter_type = "postgres",
+})
+if postgres_exec_err then
+  fail("non_oracle_resolve_for_execute_err:" .. tostring(postgres_exec_err))
+  return
+end
+if not assert_eq(postgres_exec_resolved, base_query, "non_oracle_resolve_for_execute_same") then
+  return
+end
+if not assert_eq(postgres_exec_opts, nil, "non_oracle_resolve_for_execute_opts_nil") then
   return
 end
 
@@ -378,6 +473,41 @@ if async_resolved ~= nil then
   return
 end
 if not assert_true(type(async_err) == "string" and async_err:find("empty", 1, true) ~= nil, "resolve_async_empty_err") then
+  return
+end
+
+local exec_async_done = false
+local exec_async_query, exec_async_opts, exec_async_err = nil, nil, nil
+variables.resolve_for_execute_async("SELECT :id FROM dual; SELECT '&name' FROM dual;", {
+  adapter_type = "oracle",
+  prompt_async_fn = function(token, cb)
+    if token.kind == "bind" then
+      cb("77", nil)
+    else
+      cb("BOB", nil)
+    end
+  end,
+}, function(resolved_query, opts, err)
+  exec_async_query = resolved_query
+  exec_async_opts = opts
+  exec_async_err = err
+  exec_async_done = true
+end)
+
+if not vim.wait(1000, function()
+  return exec_async_done
+end, 20) then
+  fail("resolve_for_execute_async_timeout")
+  return
+end
+if exec_async_err then
+  fail("resolve_for_execute_async_err:" .. tostring(exec_async_err))
+  return
+end
+if not assert_eq(exec_async_query, "SELECT :id FROM dual; SELECT 'BOB' FROM dual;", "resolve_for_execute_async_query") then
+  return
+end
+if not assert_true(exec_async_opts and exec_async_opts.binds and exec_async_opts.binds.id == "77", "resolve_for_execute_async_binds") then
   return
 end
 

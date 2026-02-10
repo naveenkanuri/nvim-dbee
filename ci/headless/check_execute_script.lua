@@ -37,7 +37,7 @@ local function make_fake_api(opts)
     return conn
   end
 
-  function core.connection_execute(_, query)
+  function core.connection_execute(_, query, opts)
     local idx = #calls + 1
     if execute_error_at_index and idx == execute_error_at_index then
       error("execute_boom_" .. tostring(idx))
@@ -45,6 +45,7 @@ local function make_fake_api(opts)
     local call = {
       id = "call_" .. tostring(idx),
       query = query,
+      opts = opts,
       state = "executing",
     }
     calls[idx] = call
@@ -376,8 +377,18 @@ local function run_variable_prompt_scenario()
     vim.cmd("cquit 1")
     return false
   end
-  if calls[1].query ~= "SELECT 42 FROM dual;" or calls[2].query ~= "SELECT 'ALICE' FROM dual;" then
+  if calls[1].query ~= "SELECT :id FROM dual;" or calls[2].query ~= "SELECT 'ALICE' FROM dual;" then
     print("EXEC_SCRIPT_FAIL=VARIABLE_PROMPT:query_values")
+    vim.cmd("cquit 1")
+    return false
+  end
+  if not (calls[1].opts and calls[1].opts.binds and calls[1].opts.binds.id == "42") then
+    print("EXEC_SCRIPT_FAIL=VARIABLE_PROMPT:bind_values")
+    vim.cmd("cquit 1")
+    return false
+  end
+  if calls[2].opts ~= nil and calls[2].opts.binds ~= nil then
+    print("EXEC_SCRIPT_FAIL=VARIABLE_PROMPT:unexpected_bind_values")
     vim.cmd("cquit 1")
     return false
   end
@@ -397,6 +408,55 @@ local function run_variable_prompt_scenario()
 end
 
 if not run_variable_prompt_scenario() then
+  return
+end
+
+local function run_variable_prompt_unsafe_scenario()
+  reset_dbee_modules()
+
+  local api, calls = make_fake_api({})
+  package.loaded["dbee.api"] = api
+  package.loaded["dbee.install"] = { exec = function() end }
+  package.loaded["dbee.config"] = {
+    merge_with_default = function(cfg)
+      return cfg or {}
+    end,
+    validate = function() end,
+  }
+
+  local dbee = require("dbee")
+  package.loaded["snacks.input"] = nil
+
+  local executed, err = with_ui_input(function(_, cb)
+    cb("foo; DROP TABLE bar")
+  end, function()
+    return dbee.execute_script({
+      query = "SELECT '&name' FROM dual;\nSELECT 2 FROM dual;",
+      timeout_ms = 500,
+    })
+  end)
+
+  if #executed ~= 0 then
+    print("EXEC_SCRIPT_FAIL=VARIABLE_PROMPT_UNSAFE:executed_count=" .. tostring(#executed))
+    vim.cmd("cquit 1")
+    return false
+  end
+  if #calls ~= 0 then
+    print("EXEC_SCRIPT_FAIL=VARIABLE_PROMPT_UNSAFE:calls_count=" .. tostring(#calls))
+    vim.cmd("cquit 1")
+    return false
+  end
+  if type(err) ~= "string" or not err:find("unsafe substitution value", 1, true) then
+    print("EXEC_SCRIPT_FAIL=VARIABLE_PROMPT_UNSAFE:error=" .. tostring(err))
+    vim.cmd("cquit 1")
+    return false
+  end
+
+  print("EXEC_SCRIPT_VARIABLE_PROMPT_UNSAFE_COUNT=0")
+  return true
+end
+
+if not run_variable_prompt_unsafe_scenario() then
   return
 end
 

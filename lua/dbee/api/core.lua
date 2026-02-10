@@ -116,9 +116,10 @@ end
 ---Execute a query on a connection.
 ---@param id connection_id
 ---@param query string
+---@param opts? QueryExecuteOpts
 ---@return CallDetails
-function core.connection_execute(id, query)
-  return state.handler():connection_execute(id, query)
+function core.connection_execute(id, query, opts)
+  return state.handler():connection_execute(id, query, opts)
 end
 
 ---Get database structure of a connection.

@@ -156,13 +156,13 @@ func (h *Handler) SetCurrentConnection(connID core.ConnectionID) error {
 	return nil
 }
 
-func (h *Handler) ConnectionExecute(connID core.ConnectionID, query string) (*core.Call, error) {
+func (h *Handler) ConnectionExecute(connID core.ConnectionID, query string, opts *core.QueryExecuteOptions) (*core.Call, error) {
 	c, ok := h.lookupConnection[connID]
 	if !ok {
 		return nil, fmt.Errorf("unknown connection with id: %q", connID)
 	}
 
-	call := c.Execute(query, func(state core.CallState, c *core.Call) {
+	call := c.ExecuteWithOptions(query, opts, func(state core.CallState, c *core.Call) {
 		if err := c.Err(); err != nil {
 			h.log.Errorf("cl.Err: %s", err)
 		}

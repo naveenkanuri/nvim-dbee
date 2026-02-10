@@ -1,8 +1,9 @@
 local M = {}
 
 -- NOTE:
--- Oracle variable support currently uses client-side text substitution.
--- It does not use driver-level bind parameter binding yet.
+-- Oracle variable support uses:
+--   - backend named binds for :bind variables
+--   - client-side text substitution for &substitution variables
 
 ---@class dbee.VariableToken
 ---@field key string
@@ -312,6 +313,77 @@ local function apply_values(query, values)
   return table.concat(out)
 end
 
+---@param provided table<string, any>
+---@param token dbee.VariableToken
+---@return string|nil
+local function get_provided_value(provided, token)
+  local value = provided[token.key]
+  if value == nil then
+    value = provided[token.token]
+  end
+  if value == nil then
+    value = provided[token.name]
+  end
+  if value == nil then
+    return nil
+  end
+  return tostring(value)
+end
+
+---@param tokens dbee.VariableToken[]
+---@param resolved_values table<string, string>
+---@return table<string, string> substitution_values
+---@return table<string, string> bind_values
+local function split_resolved_values(tokens, resolved_values)
+  local substitution_values = {}
+  local bind_values = {}
+  for _, token in ipairs(tokens) do
+    local value = resolved_values[token.key]
+    if value ~= nil then
+      if token.kind == "substitution" then
+        substitution_values[token.key] = value
+      elseif token.kind == "bind" then
+        bind_values[token.name] = value
+      end
+    end
+  end
+  return substitution_values, bind_values
+end
+
+---@param value string
+---@return string|nil
+local function unsafe_script_delimiter(value)
+  if value:find(";", 1, true) ~= nil then
+    return "semicolon"
+  end
+  if value:find("\n", 1, true) ~= nil or value:find("\r", 1, true) ~= nil then
+    return "newline"
+  end
+  return nil
+end
+
+---@param tokens dbee.VariableToken[]
+---@param resolved_values table<string, string>
+---@return string|nil
+local function validate_script_substitution_values(tokens, resolved_values)
+  for _, token in ipairs(tokens) do
+    if token.kind == "substitution" then
+      local value = resolved_values[token.key]
+      if value ~= nil then
+        local delimiter = unsafe_script_delimiter(value)
+        if delimiter ~= nil then
+          return string.format(
+            "unsafe substitution value for &%s: %s detected; use bind variables (:name) for script execution",
+            token.name,
+            delimiter
+          )
+        end
+      end
+    end
+  end
+  return nil
+end
+
 ---@param variable dbee.VariableToken
 ---@param on_done fun(value: string|nil, err: string|nil)
 local function prompt_variable_value_async(variable, on_done)
@@ -365,20 +437,6 @@ function M.resolve_async(query, opts, on_done)
   local resolved_values = {}
   local prompt_async_fn = opts.prompt_async_fn or prompt_variable_value_async
 
-  local function get_provided(token)
-    local value = provided[token.key]
-    if value == nil then
-      value = provided[token.token]
-    end
-    if value == nil then
-      value = provided[token.name]
-    end
-    if value == nil then
-      return nil
-    end
-    return tostring(value)
-  end
-
   local function step(index)
     if index > #tokens then
       on_done(apply_values(query, resolved_values), nil)
@@ -386,7 +444,7 @@ function M.resolve_async(query, opts, on_done)
     end
 
     local token = tokens[index]
-    local preset = get_provided(token)
+    local preset = get_provided_value(provided, token)
     if preset ~= nil then
       resolved_values[token.key] = preset
       step(index + 1)
@@ -404,6 +462,76 @@ function M.resolve_async(query, opts, on_done)
       end
       if value == "" then
         on_done(nil, "variable input empty")
+        return
+      end
+      resolved_values[token.key] = tostring(value)
+      step(index + 1)
+    end)
+  end
+
+  step(1)
+end
+
+---@param query string
+---@param opts? { adapter_type?: string, values?: table<string, string>, prompt_async_fn?: fun(variable: dbee.VariableToken, on_done: fun(value: string|nil, err: string|nil)), reject_script_delimiters?: boolean }
+---@param on_done fun(resolved_query: string|nil, exec_opts: QueryExecuteOpts|nil, err: string|nil)
+function M.resolve_for_execute_async(query, opts, on_done)
+  query = tostring(query or "")
+  opts = opts or {}
+
+  if not is_oracle(opts.adapter_type) then
+    on_done(query, nil, nil)
+    return
+  end
+
+  local tokens = M.collect(query, opts)
+  if #tokens == 0 then
+    on_done(query, nil, nil)
+    return
+  end
+
+  local provided = opts.values or {}
+  local resolved_values = {}
+  local prompt_async_fn = opts.prompt_async_fn or prompt_variable_value_async
+
+  local function step(index)
+    if index > #tokens then
+      if opts.reject_script_delimiters then
+        local validate_err = validate_script_substitution_values(tokens, resolved_values)
+        if validate_err then
+          on_done(nil, nil, validate_err)
+          return
+        end
+      end
+      local substitution_values, bind_values = split_resolved_values(tokens, resolved_values)
+      local resolved_query = apply_values(query, substitution_values)
+      if next(bind_values) ~= nil then
+        on_done(resolved_query, { binds = bind_values }, nil)
+      else
+        on_done(resolved_query, nil, nil)
+      end
+      return
+    end
+
+    local token = tokens[index]
+    local preset = get_provided_value(provided, token)
+    if preset ~= nil then
+      resolved_values[token.key] = preset
+      step(index + 1)
+      return
+    end
+
+    prompt_async_fn(token, function(value, err)
+      if err then
+        on_done(nil, nil, err)
+        return
+      end
+      if value == nil then
+        on_done(nil, nil, "variable input canceled")
+        return
+      end
+      if value == "" then
+        on_done(nil, nil, "variable input empty")
         return
       end
       resolved_values[token.key] = tostring(value)
@@ -438,13 +566,7 @@ function M.resolve(query, opts)
   end
 
   for _, token in ipairs(tokens) do
-    local value = provided[token.key]
-    if value == nil then
-      value = provided[token.token]
-    end
-    if value == nil then
-      value = provided[token.name]
-    end
+    local value = get_provided_value(provided, token)
     if value == nil then
       local prompted, prompt_err = prompt_fn(token)
       if prompt_err then
@@ -462,6 +584,92 @@ function M.resolve(query, opts)
   end
 
   return apply_values(query, resolved_values), nil
+end
+
+---@param query string
+---@param opts? { adapter_type?: string, values?: table<string, string>, prompt_fn?: fun(variable: dbee.VariableToken): (string|nil), (string|nil), timeout_ms?: integer, reject_script_delimiters?: boolean }
+---@return string|nil resolved_query
+---@return QueryExecuteOpts|nil exec_opts
+---@return string|nil err
+function M.resolve_for_execute(query, opts)
+  query = tostring(query or "")
+  opts = opts or {}
+
+  if not is_oracle(opts.adapter_type) then
+    return query, nil, nil
+  end
+
+  local tokens = M.collect(query, opts)
+  if #tokens == 0 then
+    return query, nil, nil
+  end
+
+  local provided = opts.values or {}
+  local resolved_values = {}
+  local prompt_fn = opts.prompt_fn or function(variable)
+    return prompt_variable_value(variable, tonumber(opts.timeout_ms) or (5 * 60 * 1000))
+  end
+
+  for _, token in ipairs(tokens) do
+    local value = get_provided_value(provided, token)
+    if value == nil then
+      local prompted, prompt_err = prompt_fn(token)
+      if prompt_err then
+        return nil, nil, prompt_err
+      end
+      if prompted == nil then
+        return nil, nil, "variable input canceled"
+      end
+      if prompted == "" then
+        return nil, nil, "variable input empty"
+      end
+      value = prompted
+    end
+    resolved_values[token.key] = tostring(value)
+  end
+
+  if opts.reject_script_delimiters then
+    local validate_err = validate_script_substitution_values(tokens, resolved_values)
+    if validate_err then
+      return nil, nil, validate_err
+    end
+  end
+
+  local substitution_values, bind_values = split_resolved_values(tokens, resolved_values)
+  local resolved_query = apply_values(query, substitution_values)
+  if next(bind_values) ~= nil then
+    return resolved_query, { binds = bind_values }, nil
+  end
+  return resolved_query, nil, nil
+end
+
+---@param query string
+---@param opts? { adapter_type?: string, binds?: table<string, string> }
+---@return QueryExecuteOpts|nil
+function M.bind_opts_for_query(query, opts)
+  query = tostring(query or "")
+  opts = opts or {}
+
+  if not is_oracle(opts.adapter_type) then
+    return nil
+  end
+  local all_binds = opts.binds or {}
+  if next(all_binds) == nil then
+    return nil
+  end
+
+  local tokens = M.collect(query, { adapter_type = opts.adapter_type })
+  local query_binds = {}
+  for _, token in ipairs(tokens) do
+    if token.kind == "bind" and all_binds[token.name] ~= nil then
+      query_binds[token.name] = tostring(all_binds[token.name])
+    end
+  end
+  if next(query_binds) == nil then
+    return nil
+  end
+
+  return { binds = query_binds }
 end
 
 return M

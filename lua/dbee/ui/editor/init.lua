@@ -236,9 +236,9 @@ end
 ---@return table<string, fun()>
 function EditorUI:get_actions()
   local function execute_query_with_variables_async(conn, query, on_done)
-    variables.resolve_async(query, {
+    variables.resolve_for_execute_async(query, {
       adapter_type = conn and conn.type or nil,
-    }, function(resolved, resolve_err)
+    }, function(resolved, exec_opts, resolve_err)
       if resolve_err then
         vim.notify(resolve_err, vim.log.levels.WARN)
         on_done(nil)
@@ -246,7 +246,7 @@ function EditorUI:get_actions()
       end
 
       local ok, call_or_err = pcall(function()
-        return self.handler:connection_execute(conn.id, resolved)
+        return self.handler:connection_execute(conn.id, resolved, exec_opts)
       end)
       if not ok then
         vim.notify(tostring(call_or_err), vim.log.levels.WARN)

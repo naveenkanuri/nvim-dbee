@@ -22,10 +22,11 @@ package.loaded["dbee.api"] = {
     get_current_connection = function()
       return conn
     end,
-    connection_execute = function(_, query)
+    connection_execute = function(_, query, opts)
       local call = {
         id = "call_" .. tostring(#calls + 1),
         query = query,
+        opts = opts,
         state = "executing",
       }
       calls[#calls + 1] = call
@@ -111,8 +112,12 @@ if #calls ~= 1 then
   fail("execute_count:" .. tostring(#calls))
   return
 end
-if calls[1].query ~= "select 1 from dual" then
+if calls[1].query ~= "select :id from dual" then
   fail("execute_query:" .. tostring(calls[1].query))
+  return
+end
+if not (calls[1].opts and calls[1].opts.binds and calls[1].opts.binds.id == "1") then
+  fail("execute_bind_opts")
   return
 end
 if ui_input_calls ~= 1 then
@@ -125,8 +130,12 @@ if #calls ~= 2 then
   fail("execute_script_count:" .. tostring(#calls))
   return
 end
-if calls[2].query ~= "select 1 from dual;" then
+if calls[2].query ~= "select :id from dual;" then
   fail("execute_script_query:" .. tostring(calls[2].query))
+  return
+end
+if not (calls[2].opts and calls[2].opts.binds and calls[2].opts.binds.id == "1") then
+  fail("execute_script_bind_opts")
   return
 end
 if ui_input_calls ~= 2 then
@@ -143,8 +152,12 @@ if #calls ~= 3 then
   fail("direct_execute_count:" .. tostring(#calls))
   return
 end
-if calls[3].query ~= "select 1 from dual;" then
+if calls[3].query ~= "select :id from dual;" then
   fail("direct_execute_query:" .. tostring(calls[3].query))
+  return
+end
+if not (calls[3].opts and calls[3].opts.binds and calls[3].opts.binds.id == "1") then
+  fail("direct_execute_bind_opts")
   return
 end
 if ui_input_calls ~= 3 then

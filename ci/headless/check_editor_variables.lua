@@ -29,10 +29,11 @@ local handler = {
   get_current_connection = function()
     return { id = "conn_test", type = "oracle" }
   end,
-  connection_execute = function(_, _, query)
+  connection_execute = function(_, _, query, opts)
     local call = {
       id = "call_" .. tostring(#calls + 1),
       query = query,
+      opts = opts,
       state = "archived",
       error = nil,
     }
@@ -105,8 +106,12 @@ if #calls ~= 1 then
   fail("run_under_cursor_call_count:" .. tostring(#calls))
   return
 end
-if calls[1].query ~= "select 42 from dual" then
+if calls[1].query ~= "select :id from dual" then
   fail("run_under_cursor_query:" .. tostring(calls[1].query))
+  return
+end
+if not (calls[1].opts and calls[1].opts.binds and calls[1].opts.binds.id == "42") then
+  fail("run_under_cursor_bind_opts")
   return
 end
 
@@ -135,6 +140,10 @@ if #calls ~= 2 then
 end
 if calls[2].query ~= "select 'ALICE' as v from dual;" then
   fail("run_file_query:" .. tostring(calls[2].query))
+  return
+end
+if calls[2].opts ~= nil and calls[2].opts.binds ~= nil then
+  fail("run_file_unexpected_bind_opts")
   return
 end
 

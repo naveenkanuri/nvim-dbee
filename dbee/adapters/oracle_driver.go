@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 const oracleQueryTimeout = 30 * time.Minute
 
 var _ core.Driver = (*oracleDriver)(nil)
+var _ core.BindDriver = (*oracleDriver)(nil)
 
 type oracleDriver struct {
 	c  *builders.Client
@@ -27,6 +29,28 @@ type oracleExecContexter interface {
 }
 
 func (d *oracleDriver) Query(ctx context.Context, query string) (core.ResultStream, error) {
+	return d.QueryWithBinds(ctx, query, nil)
+}
+
+func oracleNamedArgs(binds map[string]string) []any {
+	if len(binds) == 0 {
+		return nil
+	}
+
+	keys := make([]string, 0, len(binds))
+	for name := range binds {
+		keys = append(keys, name)
+	}
+	sort.Strings(keys)
+
+	args := make([]any, 0, len(keys))
+	for _, name := range keys {
+		args = append(args, sql.Named(name, binds[name]))
+	}
+	return args
+}
+
+func (d *oracleDriver) QueryWithBinds(ctx context.Context, query string, binds map[string]string) (core.ResultStream, error) {
 	// Create a context with longer timeout for Oracle queries.
 	// go-ora defaults to 30s which is too short for many queries.
 	// The parent context can still cancel early if user requests it.
@@ -38,16 +62,18 @@ func (d *oracleDriver) Query(ctx context.Context, query string) (core.ResultStre
 
 	// Check if this is a PL/SQL block
 	if isPLSQL(query) {
-		result, err := d.executePLSQL(queryCtx, query)
+		result, err := d.executePLSQL(queryCtx, query, binds)
 		cancel()
 		return result, err
 	}
+
+	bindArgs := oracleNamedArgs(binds)
 
 	// Use Exec or Query depending on the query
 	action := strings.ToLower(strings.Split(query, " ")[0])
 	hasReturnValues := strings.Contains(strings.ToLower(query), " returning ")
 	if (action == "update" || action == "delete" || action == "insert") && !hasReturnValues {
-		result, err := d.c.Exec(queryCtx, query)
+		result, err := d.c.ExecWithArgs(queryCtx, query, bindArgs...)
 		if err != nil {
 			cancel()
 			return nil, err
@@ -56,7 +82,7 @@ func (d *oracleDriver) Query(ctx context.Context, query string) (core.ResultStre
 		return result, nil
 	}
 
-	result, err := d.c.QueryUntilNotEmpty(queryCtx, query)
+	result, err := d.c.QueryUntilNotEmptyWithArgs(queryCtx, bindArgs, query)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -69,10 +95,10 @@ func (d *oracleDriver) Query(ctx context.Context, query string) (core.ResultStre
 // Uses a dedicated connection to ensure all operations happen in the same Oracle session,
 // since DBMS_OUTPUT is session-scoped.
 // If the query contains /*CURSOR*/ markers, returns cursor results as a grid.
-func (d *oracleDriver) executePLSQL(ctx context.Context, query string) (core.ResultStream, error) {
+func (d *oracleDriver) executePLSQL(ctx context.Context, query string, binds map[string]string) (core.ResultStream, error) {
 	// Check for cursor markers - if present, use cursor execution path
 	if hasCursorMarker(query) {
-		return d.executePLSQLWithCursor(ctx, query)
+		return d.executePLSQLWithCursor(ctx, query, binds)
 	}
 
 	// Get a dedicated connection from the pool - CRITICAL for DBMS_OUTPUT
@@ -97,7 +123,7 @@ func (d *oracleDriver) executePLSQL(ctx context.Context, query string) (core.Res
 	if !isCall && !strings.HasSuffix(strings.TrimSpace(plsqlQuery), ";") {
 		plsqlQuery += ";"
 	}
-	_, err = conn.ExecContext(ctx, plsqlQuery)
+	_, err = conn.ExecContext(ctx, plsqlQuery, oracleNamedArgs(binds)...)
 	if err != nil {
 		return nil, formatOracleError(err)
 	}
