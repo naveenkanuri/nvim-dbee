@@ -9,8 +9,19 @@ local commands = {
   open = require("dbee").open,
   close = require("dbee").close,
   toggle = require("dbee").toggle,
+  actions = function()
+    require("dbee").actions()
+  end,
   execute = function(args)
     require("dbee").execute(table.concat(args, " "))
+  end,
+  execute_script = function(args)
+    local query = table.concat(args, " ")
+    if query ~= "" then
+      require("dbee").execute_script({ query = query })
+      return
+    end
+    require("dbee").execute_script()
   end,
   store = function(args)
     -- args are "format", "output" and "extra_arg"

@@ -1,6 +1,8 @@
 local install = require("dbee.install")
 local api = require("dbee.api")
 local config = require("dbee.config")
+local utils = require("dbee.utils")
+local query_splitter = require("dbee.query_splitter")
 
 ---@toc dbee.ref.contents
 
@@ -15,6 +17,45 @@ local dbee = {
     ui = api.ui,
   },
 }
+
+local terminal_states = {
+  archived = true,
+  executing_failed = true,
+  retrieving_failed = true,
+  archive_failed = true,
+  canceled = true,
+}
+
+local function trim(s)
+  return (tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+---@param conn_id connection_id
+---@param call_id call_id
+---@return string|nil
+local function find_call_state(conn_id, call_id)
+  local calls = api.core.connection_get_calls(conn_id) or {}
+  for _, call in ipairs(calls) do
+    if call.id == call_id then
+      return call.state
+    end
+  end
+end
+
+---@param conn_id connection_id
+---@param call_id call_id
+---@param timeout_ms integer
+---@return boolean ok
+---@return string|nil state
+local function wait_for_call_terminal_state(conn_id, call_id, timeout_ms)
+  local state = nil
+  local ok = vim.wait(timeout_ms, function()
+    state = find_call_state(conn_id, call_id)
+    return state ~= nil and terminal_states[state] == true
+  end, 50)
+
+  return ok, state
+end
 
 ---Setup function.
 ---Needs to be called before calling any other function.
@@ -413,6 +454,176 @@ function dbee.pick_history()
 
       vim.keymap.set("n", "q", close_win, { buffer = buf })
       vim.keymap.set("n", "<Esc>", close_win, { buffer = buf })
+    end,
+  })
+end
+
+---Run SQL contextually from current buffer.
+---In visual mode runs the selection.
+---In normal mode runs the statement under cursor (SQL filetype only).
+---@param opts? { query?: string }
+function dbee.execute_context(opts)
+  opts = opts or {}
+
+  local query = trim(opts.query)
+  if query == "" then
+    local mode = vim.api.nvim_get_mode().mode
+    if mode:match("^[vV\22]") then
+      local srow, scol, erow, ecol = utils.visual_selection()
+      local selection = vim.api.nvim_buf_get_text(0, srow, scol, erow, ecol, {})
+      query = trim(table.concat(selection, "\n"))
+    else
+      local under_cursor = utils.query_under_cursor(vim.api.nvim_get_current_buf())
+      query = trim(under_cursor)
+    end
+  end
+
+  if query == "" then
+    vim.notify("No SQL statement to execute at cursor", vim.log.levels.WARN)
+    return
+  end
+
+  dbee.execute(query)
+end
+
+---Execute a script in deterministic statement order.
+---Oracle scripts are split with PL/SQL awareness and '/' block terminators.
+---@param opts? { query?: string, timeout_ms?: integer, stop_on_error?: boolean }
+---@return CallDetails[] calls
+function dbee.execute_script(opts)
+  opts = opts or {}
+
+  local conn = api.core.get_current_connection()
+  if not conn then
+    error("no connection currently selected")
+  end
+
+  local script = trim(opts.query)
+  if script == "" then
+    local bufnr = vim.api.nvim_get_current_buf()
+    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    script = table.concat(lines, "\n")
+  end
+
+  local queries = query_splitter.split(script, {
+    adapter_type = conn.type,
+  })
+  if #queries == 0 then
+    vim.notify("No executable statements found in script", vim.log.levels.WARN)
+    return {}
+  end
+
+  local timeout_ms = tonumber(opts.timeout_ms) or (30 * 60 * 1000)
+  local stop_on_error = opts.stop_on_error ~= false
+  local calls = {}
+
+  dbee.open()
+
+  for _, query in ipairs(queries) do
+    local call = api.core.connection_execute(conn.id, query)
+    api.ui.result_set_call(call)
+    calls[#calls + 1] = call
+
+    local ok, state = wait_for_call_terminal_state(conn.id, call.id, timeout_ms)
+    if not ok then
+      error("script execution timed out waiting for call " .. tostring(call.id))
+    end
+    if state ~= "archived" and stop_on_error then
+      break
+    end
+  end
+
+  return calls
+end
+
+---Open contextual action picker.
+---Supports non-interactive usage with opts.action.
+---@param opts? { action?: string }
+function dbee.actions(opts)
+  opts = opts or {}
+
+  local actions = {
+    {
+      id = "execute",
+      label = "Execute Context",
+      run = function()
+        dbee.execute_context()
+      end,
+    },
+    {
+      id = "execute_script",
+      label = "Execute Script",
+      run = function()
+        dbee.execute_script()
+      end,
+    },
+    {
+      id = "history",
+      label = "Open History",
+      run = function()
+        dbee.pick_history()
+      end,
+    },
+    {
+      id = "notes",
+      label = "Open Notes",
+      run = function()
+        dbee.pick_notes()
+      end,
+    },
+    {
+      id = "connections",
+      label = "Switch Connection",
+      run = function()
+        dbee.pick_connections()
+      end,
+    },
+    {
+      id = "drawer",
+      label = "Toggle Drawer",
+      run = function()
+        dbee.toggle_drawer()
+      end,
+    },
+  }
+
+  if opts.action then
+    for _, action in ipairs(actions) do
+      if action.id == opts.action then
+        action.run()
+        return
+      end
+    end
+    error("unknown dbee action: " .. tostring(opts.action))
+  end
+
+  local ok_snacks, snacks = pcall(require, "snacks")
+  if not ok_snacks then
+    dbee.execute_context()
+    return
+  end
+
+  local items = {}
+  for i, action in ipairs(actions) do
+    items[#items + 1] = {
+      idx = i,
+      score = i,
+      text = action.label,
+      action = action,
+    }
+  end
+
+  snacks.picker({
+    title = "Dbee Actions",
+    items = items,
+    format = function(item)
+      return {
+        { item.text, "SnacksPickerFile" },
+      }
+    end,
+    confirm = function(picker, item)
+      picker:close()
+      item.action.run()
     end,
   })
 end
