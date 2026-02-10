@@ -8,6 +8,7 @@ import (
 	"io"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/kndndrj/nvim-dbee/dbee/core/builders"
 	"github.com/stretchr/testify/require"
@@ -171,4 +172,75 @@ func TestOracleQueryWithBindsPassesNamedArgs(t *testing.T) {
 	require.Equal(t, "42", args[0].Value)
 	require.Equal(t, "name", args[1].Name)
 	require.Equal(t, "ALICE", args[1].Value)
+}
+
+func TestOracleNamedArgsTypedLiterals(t *testing.T) {
+	args := oracleNamedArgs(map[string]string{
+		"aliasBool":   "boolean:false",
+		"aliasFloat":  "number:2.5",
+		"aliasInt":    "integer:7",
+		"aliasString": "string:int:42",
+		"aliasTs":     "ts:2026-02-10T11:22:33Z",
+		"b":           "bool:true",
+		"bad":         "int:not-a-number",
+		"badBool":     "bool:yes",
+		"d":           "date:2026-02-10",
+		"f":           "float:3.5",
+		"i":           "int:42",
+		"inf":         "float:Inf",
+		"n":           "null",
+		"nan":         "float:NaN",
+		"negInf":      "number:-Inf",
+		"nUpper":      "NULL",
+		"nullPayload": "null:something",
+		"plain":       "keep-me",
+		"s":           "str:001",
+		"sSpace":      "str: hello ",
+		"t":           "timestamp:2026-02-10T11:22:33Z",
+		"tz":          "timestamp:2026-02-10 15:04:05+05:30",
+	})
+
+	require.Len(t, args, 22)
+
+	valuesByName := map[string]any{}
+	for _, argAny := range args {
+		arg, ok := argAny.(sql.NamedArg)
+		require.True(t, ok)
+		valuesByName[arg.Name] = arg.Value
+	}
+
+	require.Equal(t, int64(42), valuesByName["i"])
+	require.Equal(t, float64(3.5), valuesByName["f"])
+	require.Equal(t, true, valuesByName["b"])
+	require.Nil(t, valuesByName["n"])
+	require.Nil(t, valuesByName["nUpper"])
+	require.Equal(t, "001", valuesByName["s"])
+	require.Equal(t, "hello", valuesByName["sSpace"])
+	require.Equal(t, "keep-me", valuesByName["plain"])
+	require.Equal(t, "int:not-a-number", valuesByName["bad"])
+	require.Equal(t, "bool:yes", valuesByName["badBool"])
+	require.Equal(t, "null:something", valuesByName["nullPayload"])
+	require.Equal(t, "float:NaN", valuesByName["nan"])
+	require.Equal(t, "float:Inf", valuesByName["inf"])
+	require.Equal(t, "number:-Inf", valuesByName["negInf"])
+	require.Equal(t, int64(7), valuesByName["aliasInt"])
+	require.Equal(t, float64(2.5), valuesByName["aliasFloat"])
+	require.Equal(t, false, valuesByName["aliasBool"])
+	require.Equal(t, "int:42", valuesByName["aliasString"])
+
+	dateVal, ok := valuesByName["d"].(time.Time)
+	require.True(t, ok)
+	require.Equal(t, "2026-02-10T00:00:00Z", dateVal.UTC().Format(time.RFC3339))
+
+	tsVal, ok := valuesByName["t"].(time.Time)
+	require.True(t, ok)
+	require.Equal(t, "2026-02-10T11:22:33Z", tsVal.UTC().Format(time.RFC3339))
+
+	aliasTsVal, ok := valuesByName["aliasTs"].(time.Time)
+	require.True(t, ok)
+	require.Equal(t, "2026-02-10T11:22:33Z", aliasTsVal.UTC().Format(time.RFC3339))
+
+	tzVal, ok := valuesByName["tz"].(time.Time)
+	require.True(t, ok)
+	require.Equal(t, "2026-02-10T15:04:05+05:30", tzVal.Format(time.RFC3339))
 }

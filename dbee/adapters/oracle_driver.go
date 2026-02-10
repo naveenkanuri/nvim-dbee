@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,6 +34,82 @@ func (d *oracleDriver) Query(ctx context.Context, query string) (core.ResultStre
 	return d.QueryWithBinds(ctx, query, nil)
 }
 
+func parseOracleTimestamp(value string) (time.Time, error) {
+	layouts := []string{
+		time.RFC3339Nano,
+		"2006-01-02 15:04:05",
+		"2006-01-02 15:04:05.999999999",
+		"2006-01-02 15:04:05Z07:00",
+		"2006-01-02 15:04:05.999999999Z07:00",
+		"2006-01-02T15:04:05",
+		"2006-01-02T15:04:05.999999999",
+	}
+	trimmed := strings.TrimSpace(value)
+	for _, layout := range layouts {
+		ts, err := time.Parse(layout, trimmed)
+		if err == nil {
+			return ts, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("invalid timestamp literal: %q", value)
+}
+
+// coerceOracleBindValue converts explicit typed bind literals into Go values.
+// Unrecognized literals remain strings for backward compatibility.
+func coerceOracleBindValue(raw string) any {
+	trimmed := strings.TrimSpace(raw)
+	if strings.EqualFold(trimmed, "null") {
+		return nil
+	}
+
+	parts := strings.SplitN(trimmed, ":", 2)
+	if len(parts) != 2 {
+		return raw
+	}
+
+	kind := strings.ToLower(strings.TrimSpace(parts[0]))
+	payload := parts[1]
+	switch kind {
+	case "str", "string":
+		return strings.TrimSpace(payload)
+	case "int", "integer":
+		n, err := strconv.ParseInt(strings.TrimSpace(payload), 10, 64)
+		if err != nil {
+			return raw
+		}
+		return n
+	case "float", "number":
+		n, err := strconv.ParseFloat(strings.TrimSpace(payload), 64)
+		if err != nil {
+			return raw
+		}
+		if math.IsNaN(n) || math.IsInf(n, 0) {
+			return raw
+		}
+		return n
+	case "bool", "boolean":
+		b, err := strconv.ParseBool(strings.TrimSpace(payload))
+		if err != nil {
+			return raw
+		}
+		return b
+	case "date":
+		date, err := time.Parse("2006-01-02", strings.TrimSpace(payload))
+		if err != nil {
+			return raw
+		}
+		return date
+	case "timestamp", "ts":
+		ts, err := parseOracleTimestamp(strings.TrimSpace(payload))
+		if err != nil {
+			return raw
+		}
+		return ts
+	default:
+		return raw
+	}
+}
+
 func oracleNamedArgs(binds map[string]string) []any {
 	if len(binds) == 0 {
 		return nil
@@ -45,7 +123,7 @@ func oracleNamedArgs(binds map[string]string) []any {
 
 	args := make([]any, 0, len(keys))
 	for _, name := range keys {
-		args = append(args, sql.Named(name, binds[name]))
+		args = append(args, sql.Named(name, coerceOracleBindValue(binds[name])))
 	}
 	return args
 }

@@ -75,7 +75,7 @@
 
 ---Query execution options.
 ---@class QueryExecuteOpts
----@field binds? table<string, string> named bind values (Oracle). Values are sent as strings; type inference is adapter-driven.
+---@field binds? table<string, string> named bind values (Oracle). Supports typed literal prefixes: int:, float:, bool:, null, date:, timestamp:, str:. Use str: to force a literal string (e.g. str:int:42).
 
 ---@divider -
 ---@tag dbee.ref.types.structure

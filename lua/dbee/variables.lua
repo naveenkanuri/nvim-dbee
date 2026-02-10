@@ -3,6 +3,7 @@ local M = {}
 -- NOTE:
 -- Oracle variable support uses:
 --   - backend named binds for :bind variables
+--   - optional typed bind literals (int:, float:, bool:, null, date:, timestamp:, str:)
 --   - client-side text substitution for &substitution variables
 
 ---@class dbee.VariableToken
