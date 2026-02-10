@@ -341,14 +341,26 @@ end
 function ResultUI:restore_call(call)
   self:set_call(call)
 
+  local function elapsed_since_call_start_us(ts_us)
+    local timestamp_us = tonumber(ts_us) or 0
+    if timestamp_us <= 0 then
+      return 0
+    end
+    local now_us = vim.fn.localtime() * 1000000
+    if now_us <= timestamp_us then
+      return 0
+    end
+    return (now_us - timestamp_us) / 1000000
+  end
+
   if call.state == "executing" then
     self:set_default_result_window()
     -- Calculate elapsed time so the timer doesn't restart from 0
-    local elapsed = (vim.fn.localtime() * 1000000 - call.timestamp_us) / 1000000
+    local elapsed = elapsed_since_call_start_us(call.timestamp_us)
     self:display_progress(elapsed)
   elseif call.state == "retrieving" then
     self:set_default_result_window()
-    local elapsed = (vim.fn.localtime() * 1000000 - call.timestamp_us) / 1000000
+    local elapsed = elapsed_since_call_start_us(call.timestamp_us)
     self:display_progress(elapsed)
   elseif call.state == "archived" then
     self:page_current()

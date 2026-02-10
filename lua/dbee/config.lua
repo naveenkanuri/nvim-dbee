@@ -244,6 +244,16 @@ config.default = {
       spinner = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" },
       -- prefix to display before the timer
       text_prefix = "Executing...",
+      -- after this duration, a slow-query hint is shown
+      slow_threshold_s = 8,
+      -- after this duration, a stronger stuck hint is shown
+      stuck_threshold_s = 20,
+      -- message displayed once slow_threshold_s is reached
+      slow_hint = "Slow query",
+      -- message displayed once stuck_threshold_s is reached
+      stuck_hint = "Possibly stuck",
+      -- cancel guidance displayed with slow/stuck hints
+      cancel_hint = "cancel with <C-c> (default)",
     },
 
     -- mappings for the buffer
