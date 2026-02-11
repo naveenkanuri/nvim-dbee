@@ -49,15 +49,37 @@ local last_result_call = nil
 local lookup_disabled = false
 local core_loaded = true
 local reload_mode = "default"
+local notifications = {}
 
 local saved_input = vim.ui.input
+local saved_notify = vim.notify
 
 local function restore_input()
   vim.ui.input = saved_input
 end
 
+local function restore_notify()
+  vim.notify = saved_notify
+end
+
+local function clear_notifications()
+  for i = #notifications, 1, -1 do
+    notifications[i] = nil
+  end
+end
+
+local function has_notification(msg, level)
+  for _, note in ipairs(notifications) do
+    if note.msg == msg and (level == nil or note.level == level) then
+      return true
+    end
+  end
+  return false
+end
+
 local function fail(msg)
   restore_input()
+  restore_notify()
   print("ACTIONS_RECOVERY_FAIL=" .. msg)
   vim.cmd("cquit 1")
 end
@@ -178,6 +200,12 @@ vim.ui.input = function(_, cb)
   ui_input_calls = ui_input_calls + 1
   cb("7")
 end
+vim.notify = function(msg, level)
+  notifications[#notifications + 1] = {
+    msg = tostring(msg),
+    level = level,
+  }
+end
 
 dbee.actions({ action = "recover_disconnected" })
 
@@ -270,13 +298,14 @@ calls[1] = {
   time_taken_us = 1000,
   error = "",
 }
+clear_notifications()
 local ok_absent, absent_err = pcall(dbee.actions, { action = "recover_disconnected" })
-if ok_absent then
-  fail("recover_action_should_be_absent")
+if not ok_absent then
+  fail("recover_action_error:" .. tostring(absent_err))
   return
 end
-if not tostring(absent_err):find("unknown dbee action", 1, true) then
-  fail("recover_absent_error:" .. tostring(absent_err))
+if not has_notification("unknown or unavailable dbee action: recover_disconnected", vim.log.levels.WARN) then
+  fail("recover_absent_notification_missing")
   return
 end
 
@@ -289,14 +318,43 @@ end
 lookup_disabled = false
 
 core_loaded = false
-local ok_guard, guard_err = pcall(dbee.actions, { action = "drawer" })
+clear_notifications()
+local ok_guard, guard_err = pcall(dbee.actions, { action = "execute" })
 if not ok_guard then
   fail("actions_core_guard:" .. tostring(guard_err))
   return
 end
+if not has_notification("dbee core not loaded", vim.log.levels.WARN) then
+  fail("actions_core_guard_notification_missing")
+  return
+end
+
+clear_notifications()
+local ok_reconnect_absent_unloaded, reconnect_absent_unloaded_err = pcall(dbee.actions, { action = "reconnect_current" })
+if not ok_reconnect_absent_unloaded then
+  fail("reconnect_action_unloaded_error:" .. tostring(reconnect_absent_unloaded_err))
+  return
+end
+if not has_notification("unknown or unavailable dbee action: reconnect_current", vim.log.levels.WARN) then
+  fail("reconnect_absent_unloaded_notification_missing")
+  return
+end
+
 core_loaded = true
+current_conn = nil
+clear_notifications()
+local ok_reconnect_absent_nil_conn, reconnect_absent_nil_conn_err = pcall(dbee.actions, { action = "reconnect_current" })
+if not ok_reconnect_absent_nil_conn then
+  fail("reconnect_action_nil_conn_error:" .. tostring(reconnect_absent_nil_conn_err))
+  return
+end
+if not has_notification("unknown or unavailable dbee action: reconnect_current", vim.log.levels.WARN) then
+  fail("reconnect_absent_nil_conn_notification_missing")
+  return
+end
 
 restore_input()
+restore_notify()
 
 print("ACTIONS_RECOVERY_RETRY_OK=true")
 print("ACTIONS_RECOVERY_RECONNECT_OK=true")

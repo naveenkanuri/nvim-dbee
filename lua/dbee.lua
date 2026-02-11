@@ -1003,16 +1003,6 @@ function dbee.actions(opts)
       end,
     },
     {
-      id = "reconnect_current",
-      label = "Reconnect Current Connection",
-      run = function()
-        local _, err = dbee.reconnect_current_connection()
-        if err then
-          vim.notify(err, vim.log.levels.WARN)
-        end
-      end,
-    },
-    {
       id = "connections",
       label = "Switch Connection",
       run = function()
@@ -1027,6 +1017,30 @@ function dbee.actions(opts)
       end,
     },
   }
+
+  if current_conn then
+    local reconnect_action = {
+      id = "reconnect_current",
+      label = "Reconnect Current Connection",
+      run = function()
+        local _, err = dbee.reconnect_current_connection()
+        if err then
+          vim.notify(err, vim.log.levels.WARN)
+        end
+      end,
+    }
+    local inserted = false
+    for idx, action in ipairs(actions) do
+      if action.id == "connections" then
+        table.insert(actions, idx, reconnect_action)
+        inserted = true
+        break
+      end
+    end
+    if not inserted then
+      actions[#actions + 1] = reconnect_action
+    end
+  end
 
   if disconnected_call then
     table.insert(actions, 1, {
@@ -1048,7 +1062,8 @@ function dbee.actions(opts)
         return
       end
     end
-    error("unknown dbee action: " .. tostring(opts.action))
+    vim.notify("unknown or unavailable dbee action: " .. tostring(opts.action), vim.log.levels.WARN)
+    return
   end
 
   local ok_snacks, snacks = pcall(require, "snacks")
