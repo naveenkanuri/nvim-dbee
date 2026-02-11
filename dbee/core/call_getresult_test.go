@@ -27,6 +27,9 @@ func (s *staticResultStream) Header() Header {
 }
 
 func (s *staticResultStream) Next() (Row, error) {
+	if !s.HasNext() {
+		return nil, fmt.Errorf("no next row")
+	}
 	row := s.rows[s.index]
 	s.index++
 	return row, nil
@@ -50,6 +53,7 @@ func TestCallGetResult_ConcurrentArchiveLoadIsSingleflight(t *testing.T) {
 	call := &Call{
 		result:  new(Result),
 		archive: &archive{},
+		done:    make(chan struct{}),
 		archiveResultLoader: func(_ *archive) (ResultStream, error) {
 			archiveLoads.Add(1)
 			// Keep archive load in-flight so concurrent callers contend on GetResult.
