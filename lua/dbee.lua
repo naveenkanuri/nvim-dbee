@@ -1123,8 +1123,19 @@ function dbee.execute(query, opts)
     return nil, resolve_err
   end
 
-  local call = api.core.connection_execute(conn.id, resolved, exec_opts)
-  api.ui.result_set_call(call)
+  local ok_exec, call_or_err = pcall(api.core.connection_execute, conn.id, resolved, exec_opts)
+  if not ok_exec then
+    return nil, "failed to execute query: " .. tostring(call_or_err)
+  end
+  local call = call_or_err
+  if not call or not call.id then
+    return nil, "query execution returned no call details"
+  end
+
+  local ok_set, set_err = pcall(api.ui.result_set_call, call)
+  if not ok_set then
+    return nil, "failed to set result call: " .. tostring(set_err)
+  end
 
   dbee.open()
   return call, nil

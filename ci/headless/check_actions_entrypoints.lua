@@ -214,6 +214,40 @@ if unloaded_notice_count < 2 then
   return
 end
 
+core_loaded = true
+local saved_exec = package.loaded["dbee.api"].core.connection_execute
+local saved_result_set = package.loaded["dbee.api"].ui.result_set_call
+
+package.loaded["dbee.api"].core.connection_execute = function()
+  error("boom_execute")
+end
+local _, exec_fail_err = dbee.execute("select 1;")
+if type(exec_fail_err) ~= "string" or not exec_fail_err:find("failed to execute query", 1, true) then
+  fail("direct_execute_error_path:" .. tostring(exec_fail_err))
+  return
+end
+
+package.loaded["dbee.api"].core.connection_execute = function()
+  return nil
+end
+local _, nil_call_err = dbee.execute("select 1;")
+if nil_call_err ~= "query execution returned no call details" then
+  fail("direct_execute_nil_call_path:" .. tostring(nil_call_err))
+  return
+end
+
+package.loaded["dbee.api"].core.connection_execute = saved_exec
+package.loaded["dbee.api"].ui.result_set_call = function()
+  error("boom_result_set")
+end
+local _, result_set_err = dbee.execute("select 1;")
+if type(result_set_err) ~= "string" or not result_set_err:find("failed to set result call", 1, true) then
+  fail("direct_execute_result_set_path:" .. tostring(result_set_err))
+  return
+end
+
+package.loaded["dbee.api"].ui.result_set_call = saved_result_set
+
 vim.ui.select = saved_select
 vim.ui.input = saved_input
 vim.notify = saved_notify
