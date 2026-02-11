@@ -31,10 +31,11 @@ type (
 		errorKind string
 		done      chan struct{}
 
-		mu         sync.RWMutex
-		cancelOnce sync.Once
-		doneOnce   sync.Once
-		doneClosed atomic.Bool
+		mu          sync.RWMutex
+		getResultMu sync.Mutex
+		cancelOnce  sync.Once
+		doneOnce    sync.Once
+		doneClosed  atomic.Bool
 	}
 )
 
@@ -47,6 +48,10 @@ type callPersistent struct {
 	Timestamp int64  `json:"timestamp_us"`
 	Error     string `json:"error,omitempty"`
 	ErrorKind string `json:"error_kind,omitempty"`
+}
+
+var getArchiveResult = func(a *archive) (ResultStream, error) {
+	return a.getResult()
 }
 
 func (c *Call) toPersistent() *callPersistent {
@@ -337,10 +342,13 @@ func (c *Call) Cancel() {
 }
 
 func (c *Call) GetResult() (*Result, error) {
+	c.getResultMu.Lock()
+	defer c.getResultMu.Unlock()
+
 	if c.result.IsEmpty() {
-		iter, err := c.archive.getResult()
+		iter, err := getArchiveResult(c.archive)
 		if err != nil {
-			return nil, fmt.Errorf("c.archive.getResult: %w", err)
+			return nil, fmt.Errorf("getArchiveResult: %w", err)
 		}
 		err = c.result.SetIter(iter, nil)
 		if err != nil {
