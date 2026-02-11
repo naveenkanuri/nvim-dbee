@@ -15,6 +15,27 @@ import (
 	"github.com/kndndrj/nvim-dbee/dbee/core/mock"
 )
 
+type retrievalFailDriver struct{}
+
+func (*retrievalFailDriver) Query(_ context.Context, _ string) (core.ResultStream, error) {
+	return &failingResultStream{
+		header:    core.Header{"id", "name"},
+		meta:      &core.Meta{},
+		rows:      mock.NewRows(0, 3),
+		failAfter: 1,
+	}, nil
+}
+
+func (*retrievalFailDriver) Structure() ([]*core.Structure, error) {
+	return nil, nil
+}
+
+func (*retrievalFailDriver) Columns(_ *core.TableOptions) ([]*core.Column, error) {
+	return []*core.Column{{Name: "id", Type: "NUMBER"}}, nil
+}
+
+func (*retrievalFailDriver) Close() {}
+
 func TestCall_Success(t *testing.T) {
 	r := require.New(t)
 
@@ -308,6 +329,35 @@ func TestCall_FailedQuery_DisconnectedKind(t *testing.T) {
 
 	r.Error(call.Err())
 	r.Equal("disconnected", call.ErrorKind())
+}
+
+func TestCall_GetResult_OnRetrievingFailure_DoesNotFallbackToArchive(t *testing.T) {
+	r := require.New(t)
+
+	conn, err := core.NewConnection(&core.ConnectionParams{
+		ID:   "retr-fail",
+		Type: "oracle",
+		URL:  "mock://retr-fail",
+	}, &singleDriverAdapter{driver: &retrievalFailDriver{}})
+	r.NoError(err)
+	defer conn.Close()
+
+	call := conn.Execute("SELECT 1 FROM dual", nil)
+	<-call.Done()
+
+	r.Error(call.Err())
+	r.Eventually(func() bool {
+		return call.GetState() == core.CallStateRetrievingFailed
+	}, 2*time.Second, 10*time.Millisecond)
+
+	result, getErr := call.GetResult()
+	r.NoError(getErr)
+	r.NotNil(result)
+
+	rows, rowsErr := result.Rows(0, -1)
+	r.Nil(rows)
+	r.ErrorContains(rowsErr, "result fill failed")
+	r.ErrorContains(rowsErr, "stream read failed")
 }
 
 func TestCall_Archive(t *testing.T) {

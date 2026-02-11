@@ -97,14 +97,18 @@ func (a *archive) setResult(result *Result) error {
 	defer file.Close()
 
 	encoder = gob.NewEncoder(file)
-	err = encoder.Encode(*result.Meta())
+	meta := result.Meta()
+	if meta == nil {
+		meta = &Meta{}
+	}
+	err = encoder.Encode(*meta)
 	if err != nil {
 		return err
 	}
 
 	// rows
 	chunkSize := 500
-	length := len(result.rows)
+	length := result.Len()
 
 	// write chunks concurrently
 	g := &errgroup.Group{}
