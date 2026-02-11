@@ -16,10 +16,18 @@ local calls = {}
 local poll_count = {}
 local ui_select_called = false
 local ui_input_calls = 0
+local core_loaded = true
+local notifications = {}
 
 package.loaded["dbee.api"] = {
   core = {
+    is_loaded = function()
+      return core_loaded
+    end,
     get_current_connection = function()
+      if not core_loaded then
+        error("core not loaded")
+      end
       return conn
     end,
     connection_execute = function(_, query, opts)
@@ -101,6 +109,13 @@ vim.ui.input = function(_, cb)
   ui_input_calls = ui_input_calls + 1
   cb("1")
 end
+local saved_notify = vim.notify
+vim.notify = function(msg, level)
+  notifications[#notifications + 1] = {
+    msg = tostring(msg),
+    level = level,
+  }
+end
 
 dbee.actions({ action = "execute" })
 if not wait_until("execute_call", function()
@@ -174,8 +189,34 @@ end
 package.loaded["snacks"] = nil
 dbee.actions()
 
+local calls_before_unloaded = #calls
+core_loaded = false
+dbee.actions({ action = "execute" })
+dbee.actions({ action = "execute_script" })
+local _, unloaded_exec_err = dbee.execute("select 1;")
+if unloaded_exec_err ~= "dbee core not loaded" then
+  fail("unloaded_execute_err:" .. tostring(unloaded_exec_err))
+  return
+end
+if #calls ~= calls_before_unloaded then
+  fail("unloaded_execute_dispatched")
+  return
+end
+
+local unloaded_notice_count = 0
+for _, note in ipairs(notifications) do
+  if note.msg:find("dbee core not loaded", 1, true) then
+    unloaded_notice_count = unloaded_notice_count + 1
+  end
+end
+if unloaded_notice_count < 2 then
+  fail("unloaded_notice_count:" .. tostring(unloaded_notice_count))
+  return
+end
+
 vim.ui.select = saved_select
 vim.ui.input = saved_input
+vim.notify = saved_notify
 
 if not ui_select_called then
   fail("ui_select_not_called")

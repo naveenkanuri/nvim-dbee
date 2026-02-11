@@ -47,6 +47,26 @@ local function is_core_loaded()
   return true
 end
 
+---@param opts? { bootstrap?: boolean }
+---@return boolean
+---@return string|nil
+local function ensure_core_available(opts)
+  opts = opts or {}
+  if is_core_loaded() then
+    return true, nil
+  end
+
+  if opts.bootstrap == false then
+    return false, "dbee core not loaded"
+  end
+
+  local ok_boot = pcall(api.core.get_current_connection)
+  if ok_boot then
+    return true, nil
+  end
+  return false, "dbee core not loaded"
+end
+
 ---@param conn_id connection_id
 ---@param call_id call_id
 ---@return string|nil
@@ -660,6 +680,12 @@ end
 function dbee.execute_context(opts)
   opts = opts or {}
 
+  local core_ready, core_err = ensure_core_available()
+  if not core_ready then
+    vim.notify(core_err or "dbee core not loaded", vim.log.levels.WARN)
+    return
+  end
+
   local query = utils.trim(opts.query)
   if query == "" then
     local mode = vim.api.nvim_get_mode().mode
@@ -698,6 +724,11 @@ end
 ---@return string? error_message
 function dbee.execute_script(opts)
   opts = opts or {}
+
+  local core_ready, core_err = ensure_core_available()
+  if not core_ready then
+    return {}, core_err
+  end
 
   if active_script_run then
     return {}, "script execution already in progress"
@@ -813,7 +844,13 @@ function dbee.cancel_script()
     return
   end
 
+  if active_script_run.canceled then
+    vim.notify("Script cancellation already requested", vim.log.levels.INFO)
+    return
+  end
+
   active_script_run.canceled = true
+  vim.notify("Script cancellation requested", vim.log.levels.INFO)
   if
     active_script_run.current_call_id
     and active_script_run.cancel_sent_call_id ~= active_script_run.current_call_id
@@ -916,9 +953,10 @@ end
 function dbee.actions(opts)
   opts = opts or {}
 
+  local core_ready = ensure_core_available({ bootstrap = false })
   local current_conn = nil
   local disconnected_call = nil
-  if is_core_loaded() then
+  if core_ready then
     current_conn = api.core.get_current_connection()
   end
   if current_conn then
@@ -1066,6 +1104,12 @@ end
 ---@return string|nil error_message
 function dbee.execute(query, opts)
   opts = opts or {}
+
+  local core_ready, core_err = ensure_core_available()
+  if not core_ready then
+    return nil, core_err
+  end
+
   local conn = api.core.get_current_connection()
   if not conn then
     return nil, "no connection currently selected"

@@ -23,6 +23,7 @@ local function make_fake_api(opts)
   local execute_error_at_index = opts.execute_error_at_index
   local no_connection = opts.no_connection
   local cancel_applies_state = opts.cancel_applies_state ~= false
+  local core_loaded = opts.core_loaded ~= false
   local execute_attempt = 0
   local execute_error_fired = false
 
@@ -35,7 +36,13 @@ local function make_fake_api(opts)
   local canceled_ids = {}
 
   local core = {}
+  function core.is_loaded()
+    return core_loaded
+  end
   function core.get_current_connection()
+    if not core_loaded then
+      error("core not loaded")
+    end
     return conn
   end
 
@@ -147,11 +154,22 @@ local function run_scenario(name, opts)
     opts.before_run(dbee)
   end
 
+  local notices = {}
+  local saved_notify = vim.notify
+  vim.notify = function(msg, level)
+    notices[#notices + 1] = {
+      msg = tostring(msg),
+      level = level,
+    }
+  end
+
   local executed, err = dbee.execute_script({
     query = opts.script,
     timeout_ms = opts.timeout_ms or 500,
     stop_on_error = opts.stop_on_error ~= false,
   })
+
+  vim.notify = saved_notify
 
   if #executed ~= opts.expected_count then
     print("EXEC_SCRIPT_FAIL=" .. name .. ":count=" .. tostring(#executed))
@@ -184,6 +202,20 @@ local function run_scenario(name, opts)
     vim.cmd("cquit 1")
     return false
   end
+  if opts.expect_notify_contains then
+    local found = false
+    for _, notice in ipairs(notices) do
+      if notice.msg:find(opts.expect_notify_contains, 1, true) then
+        found = true
+        break
+      end
+    end
+    if not found then
+      print("EXEC_SCRIPT_FAIL=" .. name .. ":missing_notify:" .. tostring(opts.expect_notify_contains))
+      vim.cmd("cquit 1")
+      return false
+    end
+  end
 
   print("EXEC_SCRIPT_" .. name .. "_COUNT=" .. tostring(#executed))
   if err then
@@ -213,6 +245,19 @@ local ok0 = run_scenario(
   }
 )
 if not ok0 then
+  return
+end
+
+local ok0b = run_scenario(
+  "CORE_UNLOADED",
+  {
+    script = "SELECT 1 FROM dual;",
+    api = { core_loaded = false },
+    expected_count = 0,
+    expect_error_contains = "dbee core not loaded",
+  }
+)
+if not ok0b then
   return
 end
 
@@ -351,6 +396,7 @@ local ok5 = run_scenario(
     expected_count = 1,
     expect_error_contains = "canceled",
     expected_canceled_count = 1,
+    expect_notify_contains = "Script cancellation requested",
   }
 )
 if not ok5 then
@@ -378,6 +424,32 @@ local ok6 = run_scenario(
   }
 )
 if not ok6 then
+  return
+end
+
+local ok6b = run_scenario(
+  "CANCEL_REPEAT_NOTIFY",
+  {
+    script = "SELECT 1 FROM dual;",
+    api = {
+      hang_at_index = 1,
+      cancel_applies_state = false,
+      on_poll = function(ctx)
+        if ctx.poll_count == 1 then
+          local inner = require("dbee")
+          inner.cancel_script()
+          inner.cancel_script()
+        end
+      end,
+    },
+    timeout_ms = 250,
+    expected_count = 1,
+    expect_error_contains = "canceled",
+    expected_canceled_count = 1,
+    expect_notify_contains = "Script cancellation already requested",
+  }
+)
+if not ok6b then
   return
 end
 
