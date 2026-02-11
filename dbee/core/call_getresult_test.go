@@ -41,29 +41,25 @@ func (s *staticResultStream) Close() {}
 func TestCallGetResult_ConcurrentArchiveLoadIsSingleflight(t *testing.T) {
 	r := require.New(t)
 
-	prevGetArchiveResult := getArchiveResult
-	defer func() { getArchiveResult = prevGetArchiveResult }()
-
 	var archiveLoads atomic.Int32
 	expectedRows := []Row{
 		{int64(1), "row_1"},
 		{int64(2), "row_2"},
 	}
 
-	getArchiveResult = func(_ *archive) (ResultStream, error) {
-		archiveLoads.Add(1)
-		// Keep archive load in-flight so concurrent callers contend on GetResult.
-		time.Sleep(50 * time.Millisecond)
-		return &staticResultStream{
-			header: Header{"id", "name"},
-			meta:   &Meta{},
-			rows:   expectedRows,
-		}, nil
-	}
-
 	call := &Call{
 		result:  new(Result),
 		archive: &archive{},
+		archiveResultLoader: func(_ *archive) (ResultStream, error) {
+			archiveLoads.Add(1)
+			// Keep archive load in-flight so concurrent callers contend on GetResult.
+			time.Sleep(50 * time.Millisecond)
+			return &staticResultStream{
+				header: Header{"id", "name"},
+				meta:   &Meta{},
+				rows:   expectedRows,
+			}, nil
+		},
 	}
 
 	var wg sync.WaitGroup

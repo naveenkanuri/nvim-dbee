@@ -25,6 +25,9 @@ type (
 		result     *Result
 		archive    *archive
 		cancelFunc func()
+		// archiveResultLoader allows tests to inject deterministic archive streams
+		// without mutating package-level state.
+		archiveResultLoader func(*archive) (ResultStream, error)
 
 		// any error that might occur during execution
 		err       error
@@ -48,10 +51,6 @@ type callPersistent struct {
 	Timestamp int64  `json:"timestamp_us"`
 	Error     string `json:"error,omitempty"`
 	ErrorKind string `json:"error_kind,omitempty"`
-}
-
-var getArchiveResult = func(a *archive) (ResultStream, error) {
-	return a.getResult()
 }
 
 func (c *Call) toPersistent() *callPersistent {
@@ -346,9 +345,9 @@ func (c *Call) GetResult() (*Result, error) {
 	defer c.getResultMu.Unlock()
 
 	if c.result.IsEmpty() {
-		iter, err := getArchiveResult(c.archive)
+		iter, err := c.loadArchiveResult()
 		if err != nil {
-			return nil, fmt.Errorf("getArchiveResult: %w", err)
+			return nil, fmt.Errorf("c.loadArchiveResult: %w", err)
 		}
 		err = c.result.SetIter(iter, nil)
 		if err != nil {
@@ -357,4 +356,11 @@ func (c *Call) GetResult() (*Result, error) {
 	}
 
 	return c.result, nil
+}
+
+func (c *Call) loadArchiveResult() (ResultStream, error) {
+	if c.archiveResultLoader != nil {
+		return c.archiveResultLoader(c.archive)
+	}
+	return c.archive.getResult()
 }
