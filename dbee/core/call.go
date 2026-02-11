@@ -344,15 +344,29 @@ func (c *Call) GetResult() (*Result, error) {
 	c.getResultMu.Lock()
 	defer c.getResultMu.Unlock()
 
-	if c.result.IsEmpty() {
-		iter, err := c.loadArchiveResult()
-		if err != nil {
-			return nil, fmt.Errorf("c.loadArchiveResult: %w", err)
+	if !c.result.IsEmpty() {
+		return c.result, nil
+	}
+
+	c.mu.RLock()
+	state := c.state
+	callErr := c.err
+	c.mu.RUnlock()
+
+	if state != CallStateArchived {
+		if callErr != nil {
+			return nil, fmt.Errorf("call has no result in state %s: %w", state.String(), callErr)
 		}
-		err = c.result.SetIter(iter, nil)
-		if err != nil {
-			return nil, fmt.Errorf("c.result.setIter: %w", err)
-		}
+		return nil, fmt.Errorf("call has no result in state %s", state.String())
+	}
+
+	iter, err := c.loadArchiveResult()
+	if err != nil {
+		return nil, fmt.Errorf("c.loadArchiveResult: %w", err)
+	}
+	err = c.result.SetIter(iter, nil)
+	if err != nil {
+		return nil, fmt.Errorf("c.result.setIter: %w", err)
 	}
 
 	return c.result, nil

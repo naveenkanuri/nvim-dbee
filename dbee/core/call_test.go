@@ -331,6 +331,74 @@ func TestCall_FailedQuery_DisconnectedKind(t *testing.T) {
 	r.Equal("disconnected", call.ErrorKind())
 }
 
+func TestCall_GetResult_OnExecutingFailure_ReturnsCallError(t *testing.T) {
+	r := require.New(t)
+
+	rows := mock.NewRows(0, 10)
+	adapter := mock.NewAdapter(rows,
+		mock.AdapterWithQuerySideEffect("fail", func(ctx context.Context) error {
+			return errors.New("query failed")
+		}),
+	)
+
+	connection, err := core.NewConnection(&core.ConnectionParams{}, adapter)
+	r.NoError(err)
+
+	call := connection.Execute("fail", nil)
+	select {
+	case <-call.Done():
+	case <-time.After(5 * time.Second):
+		t.Error("call did not finish in expected time")
+	}
+	r.Eventually(func() bool {
+		return call.GetState() == core.CallStateExecutingFailed
+	}, 2*time.Second, 10*time.Millisecond)
+
+	_, getErr := call.GetResult()
+	r.Error(getErr)
+	r.ErrorContains(getErr, "call has no result in state executing_failed")
+	if call.Err() != nil {
+		r.ErrorContains(getErr, call.Err().Error())
+	}
+}
+
+func TestCall_GetResult_OnCanceledCall_ReturnsStateError(t *testing.T) {
+	r := require.New(t)
+
+	rows := mock.NewRows(0, 10)
+	adapter := mock.NewAdapter(rows,
+		mock.AdapterWithQuerySideEffect("wait_cancel", func(ctx context.Context) error {
+			<-ctx.Done()
+			return ctx.Err()
+		}),
+	)
+
+	connection, err := core.NewConnection(&core.ConnectionParams{}, adapter)
+	r.NoError(err)
+
+	call := connection.Execute("wait_cancel", func(state core.CallState, c *core.Call) {
+		if state == core.CallStateExecuting {
+			c.Cancel()
+		}
+	})
+
+	select {
+	case <-call.Done():
+	case <-time.After(5 * time.Second):
+		t.Error("call did not finish in expected time")
+	}
+	r.Eventually(func() bool {
+		return call.GetState() == core.CallStateCanceled
+	}, 2*time.Second, 10*time.Millisecond)
+
+	_, getErr := call.GetResult()
+	r.Error(getErr)
+	r.ErrorContains(getErr, "call has no result in state canceled")
+	if call.Err() != nil {
+		r.ErrorContains(getErr, call.Err().Error())
+	}
+}
+
 func TestCall_GetResult_OnRetrievingFailure_DoesNotFallbackToArchive(t *testing.T) {
 	r := require.New(t)
 

@@ -51,6 +51,7 @@ func TestCallGetResult_ConcurrentArchiveLoadIsSingleflight(t *testing.T) {
 	}
 
 	call := &Call{
+		state:   CallStateArchived,
 		result:  new(Result),
 		archive: &archive{},
 		done:    make(chan struct{}),
