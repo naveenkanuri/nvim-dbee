@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -28,6 +30,11 @@ type (
 		err       error
 		errorKind string
 		done      chan struct{}
+
+		mu         sync.RWMutex
+		cancelOnce sync.Once
+		doneOnce   sync.Once
+		doneClosed atomic.Bool
 	}
 )
 
@@ -43,19 +50,29 @@ type callPersistent struct {
 }
 
 func (c *Call) toPersistent() *callPersistent {
+	c.mu.RLock()
+	id := c.id
+	query := c.query
+	state := c.state
+	timeTaken := c.timeTaken
+	timestamp := c.timestamp
+	callErr := c.err
+	errorKind := c.errorKind
+	c.mu.RUnlock()
+
 	errMsg := ""
-	if c.err != nil {
-		errMsg = c.err.Error()
+	if callErr != nil {
+		errMsg = callErr.Error()
 	}
 
 	return &callPersistent{
-		ID:        string(c.id),
-		Query:     c.query,
-		State:     c.state.String(),
-		TimeTaken: c.timeTaken.Microseconds(),
-		Timestamp: c.timestamp.UnixMicro(),
+		ID:        string(id),
+		Query:     query,
+		State:     state.String(),
+		TimeTaken: timeTaken.Microseconds(),
+		Timestamp: timestamp.UnixMicro(),
 		Error:     errMsg,
-		ErrorKind: c.errorKind,
+		ErrorKind: errorKind,
 	}
 }
 
@@ -120,74 +137,146 @@ func newCallFromExecutor(executor func(context.Context) (ResultStream, error), q
 	}
 
 	eventsCh := make(chan CallState, 10)
+	emitEvent := func(state CallState) bool {
+		if c.doneClosed.Load() {
+			return false
+		}
+		if state == CallStateRetrieving {
+			// Retrieving can fire often; if the event queue is saturated
+			// we drop duplicate retrieving ticks instead of blocking callers.
+			select {
+			case eventsCh <- state:
+				return true
+			default:
+				return false
+			}
+		}
+		select {
+		case eventsCh <- state:
+			return true
+		case <-c.done:
+			return false
+		}
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	c.timestamp = time.Now()
 	c.cancelFunc = func() {
-		cancel()
-		c.timeTaken = time.Since(c.timestamp)
-		eventsCh <- CallStateCanceled
+		c.cancelOnce.Do(func() {
+			cancel()
+			c.setTimeTaken(time.Since(c.timestamp))
+			emitEvent(CallStateCanceled)
+		})
 	}
 
 	// event function handler
 	go func() {
-		for state := range eventsCh {
-			if c.state == CallStateExecutingFailed ||
-				c.state == CallStateRetrievingFailed ||
-				c.state == CallStateCanceled {
+		processState := func(state CallState) {
+			currentState := c.GetState()
+			if currentState == CallStateExecutingFailed ||
+				currentState == CallStateRetrievingFailed ||
+				currentState == CallStateArchived ||
+				currentState == CallStateCanceled ||
+				currentState == CallStateArchiveFailed {
 				return
 			}
-			c.state = state
+			c.setState(state)
 
 			// trigger event callback
 			if onEvent != nil {
 				onEvent(state, c)
 			}
 		}
+
+		for {
+			select {
+			case state := <-eventsCh:
+				processState(state)
+			case <-c.done:
+				for {
+					select {
+					case state := <-eventsCh:
+						processState(state)
+					default:
+						return
+					}
+				}
+			}
+		}
 	}()
 
 	go func() {
-		defer close(eventsCh)
+		defer c.markDone()
 
 		// execute the function
-		eventsCh <- CallStateExecuting
+		emitEvent(CallStateExecuting)
 		iter, err := executor(ctx)
-		// Capture timing immediately after executor returns, before SetIter/archive
-		// so it's available when CallStateRetrieving event fires
-		c.timeTaken = time.Since(c.timestamp)
+		// Preserve cancel timing captured in Cancel(); only write here for non-canceled paths.
+		if ctx.Err() == nil {
+			c.setTimeTaken(time.Since(c.timestamp))
+		}
 		if err != nil {
-			c.err = err
-			c.errorKind = classifyCallError(err)
-			eventsCh <- CallStateExecutingFailed
-			close(c.done)
+			c.setError(err)
+			c.setErrorKind(classifyCallError(err))
+			emitEvent(CallStateExecutingFailed)
 			return
 		}
 
 		// set iterator to result
-		err = c.result.SetIter(iter, func() { eventsCh <- CallStateRetrieving })
+		err = c.result.SetIter(iter, func() {
+			emitEvent(CallStateRetrieving)
+		})
 		if err != nil {
-			c.err = err
-			c.errorKind = classifyCallError(err)
-			eventsCh <- CallStateRetrievingFailed
-			close(c.done)
+			c.setError(err)
+			c.setErrorKind(classifyCallError(err))
+			emitEvent(CallStateRetrievingFailed)
 			return
 		}
 
 		// archive the result
 		err = c.archive.setResult(c.result)
 		if err != nil {
-			c.err = err
-			c.errorKind = classifyCallError(err)
-			eventsCh <- CallStateArchiveFailed
-			close(c.done)
+			c.setError(err)
+			c.setErrorKind(classifyCallError(err))
+			emitEvent(CallStateArchiveFailed)
 			return
 		}
 
-		eventsCh <- CallStateArchived
-		close(c.done)
+		emitEvent(CallStateArchived)
 	}()
 
 	return c
+}
+
+func (c *Call) setState(state CallState) {
+	c.mu.Lock()
+	c.state = state
+	c.mu.Unlock()
+}
+
+func (c *Call) setTimeTaken(t time.Duration) {
+	c.mu.Lock()
+	c.timeTaken = t
+	c.mu.Unlock()
+}
+
+func (c *Call) setError(err error) {
+	c.mu.Lock()
+	c.err = err
+	c.mu.Unlock()
+}
+
+func (c *Call) setErrorKind(kind string) {
+	c.mu.Lock()
+	c.errorKind = kind
+	c.mu.Unlock()
+}
+
+func (c *Call) markDone() {
+	c.doneOnce.Do(func() {
+		c.doneClosed.Store(true)
+		close(c.done)
+	})
 }
 
 func (c *Call) GetID() CallID {
@@ -199,10 +288,14 @@ func (c *Call) GetQuery() string {
 }
 
 func (c *Call) GetState() CallState {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.state
 }
 
 func (c *Call) GetTimeTaken() time.Duration {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.timeTaken
 }
 
@@ -211,10 +304,14 @@ func (c *Call) GetTimestamp() time.Time {
 }
 
 func (c *Call) Err() error {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.err
 }
 
 func (c *Call) ErrorKind() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.errorKind
 }
 
@@ -225,7 +322,13 @@ func (c *Call) Done() chan struct{} {
 }
 
 func (c *Call) Cancel() {
-	if c.state > CallStateExecuting {
+	select {
+	case <-c.done:
+		return
+	default:
+	}
+
+	if c.GetState() > CallStateExecuting {
 		return
 	}
 	if c.cancelFunc != nil {
