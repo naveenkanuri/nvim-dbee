@@ -119,7 +119,7 @@ func (c *Call) UnmarshalJSON(data []byte) error {
 		errorKind: errorKind,
 
 		result:  new(Result),
-		archive: newArchive(CallID(alias.ID)),
+		archive: archive,
 
 		done: done,
 	}
