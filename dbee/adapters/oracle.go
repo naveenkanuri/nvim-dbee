@@ -213,6 +213,13 @@ GROUP BY object_name`,
 			opts.Schema,
 			opts.Table,
 		)
+
+		helpers["Compile"] = fmt.Sprintf(
+			`ALTER %s "%s"."%s" COMPILE`,
+			objectType,
+			opts.Schema,
+			opts.Table,
+		)
 	}
 
 	var ddlObjectType string

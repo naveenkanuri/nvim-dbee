@@ -140,16 +140,78 @@ if ui_input_calls ~= 1 then
   return
 end
 
+vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, {
+  "BEGIN NULL; END;",
+})
+vim.api.nvim_win_set_cursor(0, { 1, 8 })
+
+dbee.actions({ action = "compile_object" })
+if not wait_until("compile_action_call", function()
+  return #calls == 2
+end) then
+  return
+end
+if not calls[2].query:match("^BEGIN%s+NULL;%s+END;?$") then
+  fail("compile_action_query:" .. tostring(calls[2].query))
+  return
+end
+if calls[2].opts ~= nil then
+  fail("compile_action_unexpected_opts")
+  return
+end
+if ui_input_calls ~= 1 then
+  fail("compile_action_prompt_count:" .. tostring(ui_input_calls))
+  return
+end
+
+conn.type = "postgres"
+local calls_before_non_oracle_compile = #calls
+local notices_before_non_oracle_compile = #notifications
+
+dbee.actions({ action = "compile_object" })
+if #calls ~= calls_before_non_oracle_compile then
+  fail("compile_non_oracle_dispatched")
+  return
+end
+
+local _, non_oracle_compile_err = dbee.compile_object({ query = "BEGIN NULL; END;" })
+if non_oracle_compile_err ~= "compile_object is only supported for oracle connections" then
+  fail("compile_non_oracle_error:" .. tostring(non_oracle_compile_err))
+  return
+end
+if #calls ~= calls_before_non_oracle_compile then
+  fail("compile_non_oracle_direct_dispatched")
+  return
+end
+
+local non_oracle_notice_found = false
+for i = notices_before_non_oracle_compile + 1, #notifications do
+  if notifications[i].msg:find("unknown or unavailable dbee action: compile_object", 1, true) then
+    non_oracle_notice_found = true
+    break
+  end
+end
+if not non_oracle_notice_found then
+  fail("compile_non_oracle_notice_missing")
+  return
+end
+conn.type = "oracle"
+
+vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, {
+  "select :id from dual;",
+})
+vim.api.nvim_win_set_cursor(0, { 1, 18 })
+
 dbee.actions({ action = "execute_script" })
-if #calls ~= 2 then
+if #calls ~= 3 then
   fail("execute_script_count:" .. tostring(#calls))
   return
 end
-if calls[2].query ~= "select :id from dual;" then
-  fail("execute_script_query:" .. tostring(calls[2].query))
+if calls[3].query ~= "select :id from dual;" then
+  fail("execute_script_query:" .. tostring(calls[3].query))
   return
 end
-if not (calls[2].opts and calls[2].opts.binds and calls[2].opts.binds.id == "1") then
+if not (calls[3].opts and calls[3].opts.binds and calls[3].opts.binds.id == "1") then
   fail("execute_script_bind_opts")
   return
 end
@@ -163,20 +225,42 @@ if direct_err ~= nil then
   fail("direct_execute_err:" .. tostring(direct_err))
   return
 end
-if #calls ~= 3 then
+if #calls ~= 4 then
   fail("direct_execute_count:" .. tostring(#calls))
   return
 end
-if calls[3].query ~= "select :id from dual;" then
-  fail("direct_execute_query:" .. tostring(calls[3].query))
+if calls[4].query ~= "select :id from dual;" then
+  fail("direct_execute_query:" .. tostring(calls[4].query))
   return
 end
-if not (calls[3].opts and calls[3].opts.binds and calls[3].opts.binds.id == "1") then
+if not (calls[4].opts and calls[4].opts.binds and calls[4].opts.binds.id == "1") then
   fail("direct_execute_bind_opts")
   return
 end
 if ui_input_calls ~= 3 then
   fail("direct_execute_prompt_count:" .. tostring(ui_input_calls))
+  return
+end
+
+local _, direct_compile_err = dbee.compile_object({ query = "BEGIN NULL; END;" })
+if direct_compile_err ~= nil then
+  fail("direct_compile_err:" .. tostring(direct_compile_err))
+  return
+end
+if #calls ~= 5 then
+  fail("direct_compile_count:" .. tostring(#calls))
+  return
+end
+if calls[5].query ~= "BEGIN NULL; END;" then
+  fail("direct_compile_query:" .. tostring(calls[5].query))
+  return
+end
+if calls[5].opts ~= nil then
+  fail("direct_compile_unexpected_opts")
+  return
+end
+if ui_input_calls ~= 3 then
+  fail("direct_compile_prompt_count:" .. tostring(ui_input_calls))
   return
 end
 
@@ -192,10 +276,16 @@ dbee.actions()
 local calls_before_unloaded = #calls
 core_loaded = false
 dbee.actions({ action = "execute" })
+dbee.actions({ action = "compile_object" })
 dbee.actions({ action = "execute_script" })
 local _, unloaded_exec_err = dbee.execute("select 1;")
 if unloaded_exec_err ~= "dbee core not loaded" then
   fail("unloaded_execute_err:" .. tostring(unloaded_exec_err))
+  return
+end
+local _, unloaded_compile_err = dbee.compile_object({ query = "select 1;" })
+if unloaded_compile_err ~= "dbee core not loaded" then
+  fail("unloaded_compile_err:" .. tostring(unloaded_compile_err))
   return
 end
 if #calls ~= calls_before_unloaded then
@@ -236,6 +326,12 @@ if nil_call_err ~= "query execution returned no call details" then
   return
 end
 
+local _, compile_nil_call_err = dbee.compile_object({ query = "select 1;" })
+if compile_nil_call_err ~= "compile execution returned no call details" then
+  fail("direct_compile_nil_call_path:" .. tostring(compile_nil_call_err))
+  return
+end
+
 package.loaded["dbee.api"].core.connection_execute = saved_exec
 package.loaded["dbee.api"].ui.result_set_call = function()
   error("boom_result_set")
@@ -246,7 +342,22 @@ if type(result_set_err) ~= "string" or not result_set_err:find("failed to set re
   return
 end
 
+local _, compile_result_set_err = dbee.compile_object({ query = "select 1;" })
+if type(compile_result_set_err) ~= "string" or not compile_result_set_err:find("failed to set result call", 1, true) then
+  fail("direct_compile_result_set_path:" .. tostring(compile_result_set_err))
+  return
+end
+
 package.loaded["dbee.api"].ui.result_set_call = saved_result_set
+package.loaded["dbee.api"].core.connection_execute = function()
+  error("boom_compile_execute")
+end
+local _, compile_exec_err = dbee.compile_object({ query = "select 1;" })
+if type(compile_exec_err) ~= "string" or not compile_exec_err:find("failed to compile object", 1, true) then
+  fail("direct_compile_error_path:" .. tostring(compile_exec_err))
+  return
+end
+package.loaded["dbee.api"].core.connection_execute = saved_exec
 
 vim.ui.select = saved_select
 vim.ui.input = saved_input

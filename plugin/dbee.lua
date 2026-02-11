@@ -18,6 +18,19 @@ local commands = {
       vim.notify(err, vim.log.levels.WARN)
     end
   end,
+  compile_object = function(args)
+    local query = table.concat(args, " ")
+    local call, err
+    if query ~= "" then
+      call, err = require("dbee").compile_object({ query = query })
+    else
+      call, err = require("dbee").compile_object()
+    end
+    if err then
+      vim.notify(err, vim.log.levels.WARN)
+    end
+    return call
+  end,
   execute_script = function(args)
     local query = table.concat(args, " ")
     local calls, err

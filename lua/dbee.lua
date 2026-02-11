@@ -36,6 +36,15 @@ local disconnected_error_states = {
   archive_failed = true,
 }
 
+---@param conn ConnectionParams|nil
+---@return boolean
+local function is_oracle_connection(conn)
+  if not conn or type(conn.type) ~= "string" then
+    return false
+  end
+  return conn.type:lower() == "oracle"
+end
+
 ---@return boolean
 local function is_core_loaded()
   if not api.core then
@@ -717,6 +726,56 @@ function dbee.execute_context(opts)
   end)
 end
 
+---Compile object/query contextually from current buffer.
+---In normal mode compiles the statement under cursor (SQL filetype only).
+---If opts.query is provided, that query is compiled directly.
+---@param opts? { query?: string }
+---@return CallDetails|nil call
+---@return string|nil error_message
+function dbee.compile_object(opts)
+  opts = opts or {}
+
+  local core_ready, core_err = ensure_core_available()
+  if not core_ready then
+    return nil, core_err
+  end
+
+  local conn = api.core.get_current_connection()
+  if not conn then
+    return nil, "no connection currently selected"
+  end
+  if not is_oracle_connection(conn) then
+    return nil, "compile_object is only supported for oracle connections"
+  end
+
+  local query = utils.trim(opts.query)
+  if query == "" then
+    local under_cursor = utils.query_under_cursor(vim.api.nvim_get_current_buf())
+    query = utils.trim(under_cursor)
+  end
+  if query == "" then
+    return nil, "No SQL statement to compile at cursor"
+  end
+
+  local ok_exec, call_or_err = pcall(api.core.connection_execute, conn.id, query)
+  if not ok_exec then
+    return nil, "failed to compile object: " .. tostring(call_or_err)
+  end
+
+  local call = call_or_err
+  if not call or not call.id then
+    return nil, "compile execution returned no call details"
+  end
+
+  local ok_set, set_err = pcall(api.ui.result_set_call, call)
+  if not ok_set then
+    return nil, "failed to set result call: " .. tostring(set_err)
+  end
+
+  dbee.open()
+  return call, nil
+end
+
 ---Execute a script in deterministic statement order.
 ---Oracle scripts are split with PL/SQL awareness and '/' block terminators.
 ---@param opts? { query?: string, timeout_ms?: integer, stop_on_error?: boolean, variables?: table<string, string> }
@@ -1017,6 +1076,19 @@ function dbee.actions(opts)
       end,
     },
   }
+
+  if is_oracle_connection(current_conn) then
+    table.insert(actions, 2, {
+      id = "compile_object",
+      label = "Compile Object",
+      run = function()
+        local _, err = dbee.compile_object()
+        if err then
+          vim.notify(err, vim.log.levels.WARN)
+        end
+      end,
+    })
+  end
 
   if current_conn then
     local reconnect_action = {

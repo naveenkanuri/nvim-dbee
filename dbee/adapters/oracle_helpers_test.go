@@ -44,11 +44,13 @@ func TestOracleGetHelpers_AddsRoutineCoverageHelpers(t *testing.T) {
 			assert.Contains(t, helpers, "Generate Call")
 			assert.Contains(t, helpers, "Source")
 			assert.Contains(t, helpers, "Arguments")
+			assert.Contains(t, helpers, "Compile")
 			assert.Contains(t, helpers, "DDL")
 
 			assert.Contains(t, helpers["Source"], "AND type = '"+tt.expectedType+"'")
 			assert.Contains(t, helpers["Source"], "AND name = '"+tt.expectedTable+"'")
 			assert.Contains(t, helpers["Arguments"], "FROM all_arguments")
+			assert.Contains(t, helpers["Compile"], "ALTER "+tt.expectedType)
 			assert.Contains(t, helpers["DDL"], "DBMS_METADATA.GET_DDL('"+tt.expectedType+"'")
 		})
 	}

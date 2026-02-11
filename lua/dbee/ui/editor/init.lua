@@ -17,6 +17,16 @@ local function parse_oracle_error_location(err_msg)
   if line and col then
     return tonumber(line), tonumber(col)
   end
+  -- Some Oracle errors only include line info (e.g. ORA-06512: at line 4).
+  line = err_msg:match("[Aa][Tt]%s+[Ll][Ii][Nn][Ee]%s+(%d+)")
+  if line then
+    return tonumber(line), 1
+  end
+  -- Fallback for "line N" without explicit column.
+  line = err_msg:match("[Ll][Ii][Nn][Ee]%s+(%d+)")
+  if line then
+    return tonumber(line), 1
+  end
   return nil, nil
 end
 
@@ -40,7 +50,7 @@ end
 ---@field private last_exec_offset integer? line offset of last executed query in buffer
 ---@field private last_exec_bufnr integer? buffer of last executed query
 ---@field private note_calls table<note_id, CallDetails> last call per note
----@field private note_exec_meta table<note_id, { bufnr: integer, offset: integer }> execution metadata per note
+---@field private note_exec_meta table<note_id, { bufnr: integer, offset: integer, conn_type: string? }> execution metadata per note
 ---@field private state_file string path to persist last-active note state
 ---@field private pending_cursor_line? integer one-shot cursor line to restore on first display
 local EditorUI = {}
@@ -258,7 +268,7 @@ function EditorUI:get_actions()
     end)
   end
 
-  local function set_result_for_note(note_id, call, bufnr, offset)
+  local function set_result_for_note(note_id, call, bufnr, offset, conn_type)
     if not call then
       return
     end
@@ -268,6 +278,7 @@ function EditorUI:get_actions()
       self.note_exec_meta[note_id] = {
         bufnr = bufnr,
         offset = offset,
+        conn_type = conn_type,
       }
       if self.current_note_id == note_id then
         self:save_last_note()
@@ -296,7 +307,7 @@ function EditorUI:get_actions()
       local exec_bufnr = self.last_exec_bufnr
       local exec_offset = self.last_exec_offset
       execute_query_with_variables_async(conn, query, function(call)
-        set_result_for_note(note_id, call, exec_bufnr, exec_offset)
+        set_result_for_note(note_id, call, exec_bufnr, exec_offset, conn.type)
       end)
     end,
     run_selection = function()
@@ -317,7 +328,7 @@ function EditorUI:get_actions()
       local exec_bufnr = self.last_exec_bufnr
       local exec_offset = self.last_exec_offset
       execute_query_with_variables_async(conn, query, function(call)
-        set_result_for_note(note_id, call, exec_bufnr, exec_offset)
+        set_result_for_note(note_id, call, exec_bufnr, exec_offset, conn.type)
       end)
     end,
     run_under_cursor = function()
@@ -346,7 +357,7 @@ function EditorUI:get_actions()
           local exec_bufnr = self.last_exec_bufnr
           local exec_offset = self.last_exec_offset
           execute_query_with_variables_async(conn, query, function(call)
-            set_result_for_note(note_id, call, exec_bufnr, exec_offset)
+            set_result_for_note(note_id, call, exec_bufnr, exec_offset, conn.type)
           end)
         end
 
@@ -739,6 +750,26 @@ function EditorUI:on_call_state_changed(data)
     return
   end
 
+  -- Find the note that owns this call to get the correct buffer, offset and connection type.
+  local exec_bufnr = self.last_exec_bufnr
+  local exec_offset = self.last_exec_offset or 0
+  local exec_conn_type = nil
+  for note_id, stored_call in pairs(self.note_calls) do
+    if stored_call.id == data.call.id then
+      local meta = self.note_exec_meta[note_id]
+      if meta then
+        exec_bufnr = meta.bufnr
+        exec_offset = meta.offset
+        exec_conn_type = meta.conn_type
+      end
+      break
+    end
+  end
+
+  if not exec_bufnr or not vim.api.nvim_buf_is_valid(exec_bufnr) then
+    return
+  end
+
   -- Update stored note_calls with latest call state
   for note_id, stored_call in pairs(self.note_calls) do
     if stored_call.id == data.call.id then
@@ -747,7 +778,19 @@ function EditorUI:on_call_state_changed(data)
     end
   end
 
+  if data.call.state == "archived" then
+    vim.diagnostic.reset(self.diag_ns, exec_bufnr)
+    return
+  end
+
   if data.call.state ~= "executing_failed" then
+    return
+  end
+
+  -- Always clear stale diagnostics for this note/call first.
+  vim.diagnostic.reset(self.diag_ns, exec_bufnr)
+
+  if not exec_conn_type or exec_conn_type:lower() ~= "oracle" then
     return
   end
 
@@ -761,41 +804,45 @@ function EditorUI:on_call_state_changed(data)
     return
   end
 
-  -- Find the note that owns this call to get the correct buffer and offset
-  local exec_bufnr = self.last_exec_bufnr
-  local exec_offset = self.last_exec_offset or 0
-  for note_id, stored_call in pairs(self.note_calls) do
-    if stored_call.id == data.call.id then
-      local meta = self.note_exec_meta[note_id]
-      if meta then
-        exec_bufnr = meta.bufnr
-        exec_offset = meta.offset
-      end
-      break
-    end
-  end
-
-  if not exec_bufnr or not vim.api.nvim_buf_is_valid(exec_bufnr) then
-    return
-  end
-
   local buf_line = exec_offset + err_line - 1
-  local buf_col = (err_col or 1) - 1
+  local buf_col = math.max((err_col or 1) - 1, 0)
 
   local line_count = vim.api.nvim_buf_line_count(exec_bufnr)
+  if line_count < 1 then
+    return
+  end
+  if buf_line < 0 then
+    buf_line = 0
+  end
   if buf_line >= line_count then
     buf_line = line_count - 1
+  end
+  local line_text = vim.api.nvim_buf_get_lines(exec_bufnr, buf_line, buf_line + 1, false)[1] or ""
+  local max_col = #line_text
+  local clamped_col = math.min(buf_col, max_col)
+  local cursor_col = clamped_col
+  if max_col > 0 and cursor_col >= max_col then
+    cursor_col = max_col - 1
   end
 
   vim.diagnostic.set(self.diag_ns, exec_bufnr, {
     {
       lnum = buf_line,
-      col = buf_col,
+      col = clamped_col,
       severity = vim.diagnostic.severity.ERROR,
       message = err_msg,
       source = "dbee",
     },
   })
+
+  -- Jump cursor to first compile/runtime error location when note buffer is visible.
+  for _, win in ipairs(vim.api.nvim_list_wins()) do
+    if vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_buf(win) == exec_bufnr then
+      vim.api.nvim_set_current_win(win)
+      vim.api.nvim_win_set_cursor(win, { buf_line + 1, cursor_col })
+      break
+    end
+  end
 end
 
 return EditorUI
