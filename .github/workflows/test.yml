@@ -47,6 +47,7 @@ jobs:
           - check_execute_script.lua
           - check_editor_variables.lua
           - check_actions_entrypoints.lua
+          - check_actions_recovery.lua
           - check_result_progress_hints.lua
           - check_result_restore_elapsed.lua
           - check_result_error_kinds.lua

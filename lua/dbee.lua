@@ -30,6 +30,23 @@ local terminal_states = {
 ---@type { canceled: boolean, current_call_id: string?, cancel_sent_call_id: string? }|nil
 local active_script_run = nil
 
+local disconnected_error_states = {
+  executing_failed = true,
+  retrieving_failed = true,
+  archive_failed = true,
+}
+
+---@return boolean
+local function is_core_loaded()
+  if not api.core then
+    return false
+  end
+  if type(api.core.is_loaded) == "function" then
+    return api.core.is_loaded()
+  end
+  return true
+end
+
 ---@param conn_id connection_id
 ---@param call_id call_id
 ---@return string|nil
@@ -64,6 +81,144 @@ local function wait_for_call_terminal_state(conn_id, call_id, timeout_ms, run_st
   end, 50)
 
   return ok, state
+end
+
+---@param call? CallDetails
+---@return boolean
+local function is_disconnected_failed_call(call)
+  return call ~= nil
+    and call.error_kind == "disconnected"
+    and disconnected_error_states[call.state] == true
+end
+
+---@param conn_id connection_id
+---@return CallDetails|nil
+local function find_latest_disconnected_call(conn_id)
+  local calls = api.core.connection_get_calls(conn_id) or {}
+  local latest = nil
+  local latest_ts = -1
+  for _, call in ipairs(calls) do
+    if is_disconnected_failed_call(call) then
+      local ts = tonumber(call.timestamp_us) or 0
+      if latest == nil or ts >= latest_ts then
+        latest = call
+        latest_ts = ts
+      end
+    end
+  end
+  if latest then
+    return latest
+  end
+  return nil
+end
+
+---@param conn_id connection_id
+---@return source_id|nil
+local function find_source_id_for_connection(conn_id)
+  if type(api.core.get_sources) ~= "function" or type(api.core.source_get_connections) ~= "function" then
+    return nil
+  end
+
+  local ok_sources, sources = pcall(api.core.get_sources)
+  if not ok_sources or type(sources) ~= "table" then
+    return nil
+  end
+
+  for _, source in ipairs(sources) do
+    if source and type(source.name) == "function" then
+      local ok_name, source_id = pcall(source.name, source)
+      if ok_name and source_id and source_id ~= "" then
+        local ok_conns, source_conns = pcall(api.core.source_get_connections, source_id)
+        if ok_conns and type(source_conns) == "table" then
+          for _, conn in ipairs(source_conns) do
+            if conn and conn.id == conn_id then
+              return source_id
+            end
+          end
+        end
+      end
+    end
+  end
+
+  return nil
+end
+
+---@param source_id source_id
+---@param previous ConnectionParams
+---@return ConnectionParams|nil
+---@return string|nil
+local function resolve_reloaded_connection(source_id, previous)
+  local ok_conns, source_conns = pcall(api.core.source_get_connections, source_id)
+  if not ok_conns then
+    return nil, "failed reading reloaded source connections"
+  end
+  if type(source_conns) ~= "table" or #source_conns == 0 then
+    return nil, "source reload produced no connections"
+  end
+
+  local prev_id = tostring(previous.id or "")
+  local prev_type = tostring(previous.type or "")
+  local prev_url = tostring(previous.url or "")
+  local prev_name = tostring(previous.name or "")
+
+  local function find_unique_match(predicate)
+    local match = nil
+    for _, candidate in ipairs(source_conns) do
+      if candidate and candidate.id and candidate.id ~= "" and predicate(candidate) then
+        if match ~= nil then
+          return nil, true
+        end
+        match = candidate
+      end
+    end
+    return match, false
+  end
+
+  if prev_id ~= "" then
+    local match, ambiguous = find_unique_match(function(candidate)
+      return tostring(candidate.id or "") == prev_id
+        and (prev_type == "" or tostring(candidate.type or "") == prev_type)
+    end)
+    if match then
+      return match, nil
+    end
+    if ambiguous then
+      return nil, "reloaded connection id mapping is ambiguous"
+    end
+  end
+
+  if prev_type ~= "" and prev_url ~= "" then
+    local match, ambiguous = find_unique_match(function(candidate)
+      return tostring(candidate.type or "") == prev_type and tostring(candidate.url or "") == prev_url
+    end)
+    if match then
+      return match, nil
+    end
+    if ambiguous then
+      return nil, "reloaded connection URL mapping is ambiguous"
+    end
+  end
+
+  if prev_type ~= "" and prev_name ~= "" then
+    local match, ambiguous = find_unique_match(function(candidate)
+      return tostring(candidate.type or "") == prev_type and tostring(candidate.name or "") == prev_name
+    end)
+    if match then
+      return match, nil
+    end
+    if ambiguous then
+      return nil, "reloaded connection name mapping is ambiguous"
+    end
+  end
+
+  if #source_conns == 1 and source_conns[1] and source_conns[1].id and source_conns[1].id ~= "" then
+    if prev_type ~= "" and tostring(source_conns[1].type or "") ~= prev_type then
+      return nil, "reloaded connection type changed unexpectedly"
+    end
+    return source_conns[1], nil
+  end
+
+  return nil, "unable to map reloaded connection; reconnect manually from connection picker"
 end
 
 ---Setup function.
@@ -668,11 +823,107 @@ function dbee.cancel_script()
   end
 end
 
+---Reconnect current connection by reloading its source and selecting it again.
+---@param opts? { notify?: boolean }
+---@return ConnectionParams|nil reconnected_connection
+---@return string|nil error_message
+function dbee.reconnect_current_connection(opts)
+  opts = opts or {}
+
+  if not is_core_loaded() then
+    return nil, "dbee core not loaded"
+  end
+
+  local conn = api.core.get_current_connection()
+  if not conn then
+    return nil, "no connection currently selected"
+  end
+
+  local source_id = find_source_id_for_connection(conn.id)
+  if not source_id then
+    return nil, "could not locate source for current connection"
+  end
+  if type(api.core.source_reload) ~= "function" then
+    return nil, "source reload is not supported by current core API"
+  end
+
+  local ok_reload, reload_err = pcall(api.core.source_reload, source_id)
+  if not ok_reload then
+    return nil, "failed reloading connection source: " .. tostring(reload_err)
+  end
+
+  local reloaded_conn, resolve_err = resolve_reloaded_connection(source_id, conn)
+  if not reloaded_conn then
+    return nil, resolve_err
+  end
+
+  local ok_set, set_err = pcall(api.core.set_current_connection, reloaded_conn.id)
+  if not ok_set then
+    return nil, "failed selecting reloaded connection: " .. tostring(set_err)
+  end
+
+  if opts.notify ~= false then
+    vim.notify("Reconnected " .. (reloaded_conn.name or reloaded_conn.id), vim.log.levels.INFO)
+  end
+  return reloaded_conn, nil
+end
+
+---Reconnect and retry the latest disconnected failed call for current connection.
+---@param opts? { variables?: table<string, string> }
+---@return boolean retry_started
+---@return string|nil error_message
+function dbee.retry_last_disconnected(opts)
+  opts = opts or {}
+
+  if not is_core_loaded() then
+    return false, "dbee core not loaded"
+  end
+
+  local conn = api.core.get_current_connection()
+  if not conn then
+    return false, "no connection currently selected"
+  end
+
+  local call = find_latest_disconnected_call(conn.id)
+  if not call then
+    return false, "no disconnected call available to retry"
+  end
+
+  local query = utils.trim(call.query)
+  if query == "" then
+    return false, "last disconnected call has empty query"
+  end
+
+  local reconnected_conn, reconnect_err = dbee.reconnect_current_connection({ notify = false })
+  if not reconnected_conn then
+    return false, reconnect_err
+  end
+
+  execute_with_resolved_variables_async(reconnected_conn, query, opts, function(_, exec_err)
+    if exec_err then
+      vim.notify(exec_err, vim.log.levels.WARN)
+      return
+    end
+    vim.notify("Retried last disconnected query", vim.log.levels.INFO)
+  end)
+
+  return true, nil
+end
+
 ---Open contextual action picker.
 ---Supports non-interactive usage with opts.action.
 ---@param opts? { action?: string }
 function dbee.actions(opts)
   opts = opts or {}
+
+  local current_conn = nil
+  local disconnected_call = nil
+  if is_core_loaded() then
+    current_conn = api.core.get_current_connection()
+  end
+  if current_conn then
+    disconnected_call = find_latest_disconnected_call(current_conn.id)
+  end
 
   local actions = {
     {
@@ -714,6 +965,16 @@ function dbee.actions(opts)
       end,
     },
     {
+      id = "reconnect_current",
+      label = "Reconnect Current Connection",
+      run = function()
+        local _, err = dbee.reconnect_current_connection()
+        if err then
+          vim.notify(err, vim.log.levels.WARN)
+        end
+      end,
+    },
+    {
       id = "connections",
       label = "Switch Connection",
       run = function()
@@ -728,6 +989,19 @@ function dbee.actions(opts)
       end,
     },
   }
+
+  if disconnected_call then
+    table.insert(actions, 1, {
+      id = "recover_disconnected",
+      label = "Reconnect + Retry Last Query",
+      run = function()
+        local _, err = dbee.retry_last_disconnected()
+        if err then
+          vim.notify(err, vim.log.levels.WARN)
+        end
+      end,
+    })
+  end
 
   if opts.action then
     for _, action in ipairs(actions) do

@@ -21,7 +21,7 @@ local fake_handler = {
 
 local result = ResultUI:new(fake_handler, {})
 
-local function assert_status(name, call, expected_prefix)
+local function assert_status(name, call, expected_prefix, expected_hint)
   result.current_call = vim.tbl_extend("force", {
     id = name,
     query = "SELECT 1",
@@ -32,10 +32,24 @@ local function assert_status(name, call, expected_prefix)
   }, call)
 
   result:display_status()
-  local line = vim.api.nvim_buf_get_lines(result.bufnr, 0, 1, false)[1] or ""
+  local lines = vim.api.nvim_buf_get_lines(result.bufnr, 0, -1, false)
+  local line = lines[1] or ""
   if not line:find(expected_prefix, 1, true) then
     fail(name .. ":line=" .. line)
     return false
+  end
+  if expected_hint ~= nil then
+    local has_hint = false
+    for _, status_line in ipairs(lines) do
+      if status_line:find(expected_hint, 1, true) then
+        has_hint = true
+        break
+      end
+    end
+    if not has_hint then
+      fail(name .. ":missing_hint")
+      return false
+    end
   end
   return true
 end
@@ -44,7 +58,7 @@ if not assert_status("EXEC_DISC", {
   state = "executing_failed",
   error_kind = "disconnected",
   error = "dial tcp: lookup db.internal: no such host",
-}, "Call failed: connection lost after ") then
+}, "Call failed: connection lost after ", "Reconnect + Retry Last Query") then
   return
 end
 
@@ -60,7 +74,7 @@ if not assert_status("RETR_DISC", {
   state = "retrieving_failed",
   error_kind = "disconnected",
   error = "driver: bad connection",
-}, "Result retrieval failed: connection lost after ") then
+}, "Result retrieval failed: connection lost after ", "Reconnect + Retry Last Query") then
   return
 end
 

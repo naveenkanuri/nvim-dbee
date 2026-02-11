@@ -197,11 +197,15 @@ function ResultUI:display_status()
     msg = "Call canceled"
   end
 
-  local seconds = self.current_call.time_taken_us / 1000000
+  local seconds = (tonumber(self.current_call.time_taken_us) or 0) / 1000000
 
   local lines = {
     string.format("%s after %.3f seconds", msg, seconds),
   }
+
+  if error_kind == "disconnected" then
+    table.insert(lines, "Hint: open dbee actions and choose Reconnect + Retry Last Query")
+  end
 
   if self.current_call.error and self.current_call.error ~= "" then
     table.insert(lines, "Reason:")
