@@ -3,11 +3,14 @@ package adapters
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kndndrj/nvim-dbee/dbee/core"
@@ -22,8 +25,10 @@ var _ core.Driver = (*oracleDriver)(nil)
 var _ core.BindDriver = (*oracleDriver)(nil)
 
 type oracleDriver struct {
-	c  *builders.Client
-	db *sql.DB
+	c        *builders.Client
+	db       *sql.DB
+	mu       sync.Mutex // execution gate + sessConn pointer protection
+	sessConn *sql.Conn  // pinned session connection, lazily created
 }
 
 type oracleExecContexter interface {
@@ -128,74 +133,172 @@ func oracleNamedArgs(binds map[string]string) []any {
 	return args
 }
 
+// getSessionConnLocked returns the pinned session connection, creating it
+// lazily if needed. Caller MUST hold d.mu.
+func (d *oracleDriver) getSessionConnLocked(ctx context.Context) (*sql.Conn, error) {
+	if d.sessConn != nil {
+		return d.sessConn, nil
+	}
+	conn, err := d.db.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	d.sessConn = conn
+	return conn, nil
+}
+
+// resetSessionConnLocked closes the pinned session connection and sets it to
+// nil so the next call creates a fresh one. Caller MUST hold d.mu.
+func (d *oracleDriver) resetSessionConnLocked() {
+	if d.sessConn != nil {
+		_ = d.sessConn.Close()
+		d.sessConn = nil
+	}
+}
+
+// isSessionConnError returns true for errors that indicate the underlying
+// Oracle session is dead and should be replaced. Transient timeouts do NOT
+// trigger a reset — only hard disconnect signatures.
+func isSessionConnError(err error) bool {
+	if errors.Is(err, driver.ErrBadConn) || errors.Is(err, sql.ErrConnDone) {
+		return true
+	}
+	upper := strings.ToUpper(err.Error())
+	for _, code := range []string{
+		"ORA-03113", // end-of-file on communication channel
+		"ORA-03114", // not connected to ORACLE
+		"ORA-03135", // connection lost contact
+		"ORA-01012", // not logged on
+		"ORA-02396", // exceeded maximum idle time
+		"ORA-00028", // your session has been killed
+	} {
+		if strings.Contains(upper, code) {
+			return true
+		}
+	}
+	return strings.Contains(upper, "BROKEN PIPE") ||
+		strings.Contains(upper, "CONNECTION RESET")
+}
+
+// isExecStatement returns true for SQL statements that don't return result
+// sets. These use conn.ExecContext instead of conn.QueryContext.
+// Strips leading SQL comments before classifying.
+func isExecStatement(query string) bool {
+	stripped := stripLeadingSQLComments(query)
+	fields := strings.Fields(stripped)
+	if len(fields) == 0 {
+		return false
+	}
+	switch strings.ToLower(fields[0]) {
+	case "insert", "update", "delete", "merge", "alter", "create", "drop",
+		"grant", "revoke", "truncate":
+		return true
+	}
+	return false
+}
+
 func (d *oracleDriver) QueryWithBinds(ctx context.Context, query string, binds map[string]string) (core.ResultStream, error) {
-	// Create a context with longer timeout for Oracle queries.
-	// go-ora defaults to 30s which is too short for many queries.
-	// The parent context can still cancel early if user requests it.
+	// Timeout starts before d.mu.Lock(), so it includes wait time behind
+	// a running query. This bounds total wall-clock time including queuing.
 	queryCtx, cancel := context.WithTimeout(ctx, oracleQueryTimeout)
 
-	// Remove the trailing semicolon from the query - for some reason it isn't supported in go_ora
+	// Remove the trailing semicolon — go-ora doesn't support it for plain SQL
 	query = strings.TrimSpace(query)
 	query = strings.TrimSuffix(query, ";")
 
-	// Check if this is a PL/SQL block
+	if len(strings.TrimSpace(query)) == 0 {
+		cancel()
+		return nil, errors.New("empty query")
+	}
+
+	d.mu.Lock()
+
+	// Fast-fail if context expired while waiting for the mutex
+	if queryCtx.Err() != nil {
+		d.mu.Unlock()
+		cancel()
+		return nil, queryCtx.Err()
+	}
+
+	conn, err := d.getSessionConnLocked(queryCtx)
+	if err != nil {
+		d.mu.Unlock()
+		cancel()
+		return nil, err
+	}
+
+	// PL/SQL path — executePLSQLLocked owns d.mu via defer
 	if isPLSQL(query) {
-		result, err := d.executePLSQL(queryCtx, query, binds)
+		result, err := d.executePLSQLLocked(queryCtx, conn, query, binds)
 		cancel()
 		return result, err
 	}
 
 	bindArgs := oracleNamedArgs(binds)
+	hasReturning := strings.Contains(strings.ToLower(query), " returning ")
 
-	// Use Exec or Query depending on the query
-	action := strings.ToLower(strings.Split(query, " ")[0])
-	hasReturnValues := strings.Contains(strings.ToLower(query), " returning ")
-	if (action == "update" || action == "delete" || action == "insert") && !hasReturnValues {
-		result, err := d.c.ExecWithArgs(queryCtx, query, bindArgs...)
+	// Exec path: statements that don't return result sets
+	if isExecStatement(query) && !hasReturning {
+		res, err := conn.ExecContext(queryCtx, query, bindArgs...)
 		if err != nil {
+			if isSessionConnError(err) {
+				d.resetSessionConnLocked()
+			}
+			d.mu.Unlock()
 			cancel()
 			return nil, err
 		}
+		// Read metadata BEFORE unlock — driver may reference conn internally
+		affected, err := res.RowsAffected()
+		d.mu.Unlock()
+		if err != nil {
+			cancel()
+			return nil, fmt.Errorf("RowsAffected: %w", err)
+		}
+		result := builders.NewResultStreamBuilder().
+			WithNextFunc(builders.NextSingle(affected)).
+			WithHeader(core.Header{"Rows Affected"}).
+			Build()
 		result.AddCallback(cancel)
 		return result, nil
 	}
 
-	result, err := d.c.QueryUntilNotEmptyWithArgs(queryCtx, bindArgs, query)
+	// Query path: SELECT / RETURNING / unknown
+	result, err := d.c.QueryOnConn(queryCtx, conn, query, bindArgs...)
 	if err != nil {
+		if isSessionConnError(err) {
+			d.resetSessionConnLocked()
+		}
+		d.mu.Unlock()
 		cancel()
 		return nil, err
 	}
+	result.AddCallback(func() { d.mu.Unlock() }) // release gate when rows drained
 	result.AddCallback(cancel)
 	return result, nil
 }
 
-// executePLSQL handles PL/SQL block execution with DBMS_OUTPUT capture.
-// Uses a dedicated connection to ensure all operations happen in the same Oracle session,
-// since DBMS_OUTPUT is session-scoped.
-// If the query contains /*CURSOR*/ markers, returns cursor results as a grid.
-func (d *oracleDriver) executePLSQL(ctx context.Context, query string, binds map[string]string) (core.ResultStream, error) {
-	// Check for cursor markers - if present, use cursor execution path
+// executePLSQLLocked handles PL/SQL block execution with DBMS_OUTPUT capture.
+// Uses the session-pinned connection for all operations.
+// Caller MUST hold d.mu. This method releases it via defer.
+func (d *oracleDriver) executePLSQLLocked(ctx context.Context, conn *sql.Conn, query string, binds map[string]string) (core.ResultStream, error) {
+	defer d.mu.Unlock()
+
+	// Cursor path — worker does NOT touch the mutex
 	if hasCursorMarker(query) {
-		return d.executePLSQLWithCursor(ctx, query, binds)
+		return d.executePLSQLWithCursor(ctx, conn, query, binds)
 	}
 
-	// Get a dedicated connection from the pool - CRITICAL for DBMS_OUTPUT
-	// which is session-scoped. All operations must happen on the same connection.
-	conn, err := d.db.Conn(ctx)
+	// Enable DBMS_OUTPUT with unlimited buffer (session-scoped)
+	_, err := conn.ExecContext(ctx, "BEGIN DBMS_OUTPUT.ENABLE(NULL); END;")
 	if err != nil {
-		return nil, fmt.Errorf("failed to get connection: %w", err)
-	}
-	defer conn.Close()
-
-	// Step 1: Enable DBMS_OUTPUT with unlimited buffer (uses session memory)
-	_, err = conn.ExecContext(ctx, "BEGIN DBMS_OUTPUT.ENABLE(NULL); END;")
-	if err != nil {
+		if isSessionConnError(err) {
+			d.resetSessionConnLocked()
+		}
 		return nil, fmt.Errorf("failed to enable DBMS_OUTPUT: %w", err)
 	}
 
-	// Step 2: Execute the PL/SQL block
-	// Note: Query() strips trailing semicolons, but PL/SQL blocks need them.
-	// Exception: CALL statements don't use semicolons in Oracle.
+	// Execute the PL/SQL block
 	plsqlQuery := stripTrailingSQLPlusSlashTerminator(query)
 	isCall := strings.HasPrefix(strings.ToUpper(stripLeadingSQLComments(plsqlQuery)), "CALL ")
 	if !isCall && !strings.HasSuffix(strings.TrimSpace(plsqlQuery), ";") {
@@ -203,16 +306,21 @@ func (d *oracleDriver) executePLSQL(ctx context.Context, query string, binds map
 	}
 	_, err = conn.ExecContext(ctx, plsqlQuery, oracleNamedArgs(binds)...)
 	if err != nil {
+		if isSessionConnError(err) {
+			d.resetSessionConnLocked()
+		}
 		return nil, formatOracleError(err)
 	}
 
-	// Step 3: Fetch DBMS_OUTPUT lines (using same connection)
+	// Fetch DBMS_OUTPUT lines (same session connection)
 	output, err := d.fetchDBMSOutputFromConn(ctx, conn)
 	if err != nil {
+		if isSessionConnError(err) {
+			d.resetSessionConnLocked()
+		}
 		return nil, fmt.Errorf("failed to fetch DBMS_OUTPUT: %w", err)
 	}
 
-	// Step 4: Return output as result stream
 	lines := parseDBMSOutputLines(output)
 	return buildDBMSOutputResultStream(lines), nil
 }
@@ -292,10 +400,17 @@ func (d *oracleDriver) Structure() ([]*core.Structure, error) {
 		ORDER BY owner, object_name
 	`
 
-	rows, err := d.Query(context.TODO(), query)
+	// Use pool connection, not session conn. Structure queries are fully
+	// schema-qualified and don't need session state. Using pool avoids
+	// blocking drawer refresh behind a running query.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	rows, err := d.c.QueryWithArgs(ctx, query)
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 
 	decodeStructureType := func(s string) core.StructureType {
 		switch s {
@@ -410,4 +525,12 @@ func oracleGroupedStructure(rows core.ResultStream, structTypeFn func(string) co
 	return structure, nil
 }
 
-func (d *oracleDriver) Close() { d.c.Close() }
+func (d *oracleDriver) Close() {
+	d.mu.Lock()
+	if d.sessConn != nil {
+		_ = d.sessConn.Close()
+		d.sessConn = nil
+	}
+	d.mu.Unlock()
+	d.c.Close()
+}

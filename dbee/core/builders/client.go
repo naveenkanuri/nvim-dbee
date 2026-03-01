@@ -100,6 +100,22 @@ func (c *Client) QueryWithArgs(ctx context.Context, query string, args ...any) (
 	return c.parseRows(rows)
 }
 
+// QueryOnConn executes a query on the provided connection and returns a
+// result stream. The connection is NOT closed by this method; the caller
+// retains ownership.
+func (c *Client) QueryOnConn(ctx context.Context, conn *sql.Conn, query string, args ...any) (*ResultStream, error) {
+	rows, err := conn.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	result, err := c.parseRows(rows)
+	if err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	return result, nil
+}
+
 // QueryUntilNotEmpty executes given queries on a single connection and returns when one of them
 // has a nonempty result.
 // Useful for specifying "fallback" queries like "ROWCOUNT()" when there are no results in query.
