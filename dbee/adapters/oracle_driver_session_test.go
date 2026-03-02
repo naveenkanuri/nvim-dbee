@@ -40,6 +40,8 @@ type sessTestState struct {
 	failConnID int
 	// if > 0, Next blocks until signaled (to simulate slow row drain)
 	blockNext chan struct{}
+	// lastQueryCtx captures the context passed to the most recent QueryContext call
+	lastQueryCtx context.Context
 }
 
 func newSessTestState() *sessTestState {
@@ -93,8 +95,13 @@ func (c *sessTestConn) Begin() (driver.Tx, error)          { return nil, errors.
 func (c *sessTestConn) ResetSession(context.Context) error { return nil }
 
 func (c *sessTestConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	// Real drivers (go-ora, etc.) check context before executing.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	c.state.recordQuery(c.id)
 	c.state.mu.Lock()
+	c.state.lastQueryCtx = ctx
 	failErr := c.state.failErr
 	failConnID := c.state.failConnID
 	blockNext := c.state.blockNext
@@ -107,6 +114,9 @@ func (c *sessTestConn) QueryContext(ctx context.Context, query string, args []dr
 }
 
 func (c *sessTestConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	c.state.recordQuery(c.id)
 	c.state.mu.Lock()
 	failErr := c.state.failErr
@@ -604,7 +614,7 @@ func TestContextExpiredDuringMutexWait(t *testing.T) {
 
 	// Start a second query with a short timeout — the parent context will
 	// expire while the goroutine is blocked on d.mu.Lock(). Once the first
-	// query finishes, the post-lock fast-fail check should fire.
+	// query finishes, QueryContext sees the dead context and returns immediately.
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
@@ -623,4 +633,56 @@ func TestContextExpiredDuringMutexWait(t *testing.T) {
 	require.Eventually(t, func() bool { return queryDone.Load() }, 2*time.Second, 10*time.Millisecond)
 	require.Error(t, queryErr, "second query should fail after context expiry")
 	assert.ErrorIs(t, queryErr, context.DeadlineExceeded)
+}
+
+func TestDefaultDeadlineInjectedWhenParentHasNone(t *testing.T) {
+	state := newSessTestState()
+	d := newSessTestDriver(t, state)
+
+	// Parent context with no deadline — adapter should inject 24h default
+	r, err := d.Query(context.Background(), "SELECT 1 FROM dual")
+	require.NoError(t, err)
+	for r.HasNext() {
+		_, _ = r.Next()
+	}
+	r.Close()
+
+	state.mu.Lock()
+	capturedCtx := state.lastQueryCtx
+	state.mu.Unlock()
+
+	require.NotNil(t, capturedCtx, "lastQueryCtx should have been captured")
+	deadline, hasDeadline := capturedCtx.Deadline()
+	assert.True(t, hasDeadline, "adapter should inject a 24h deadline when parent has none")
+	remaining := time.Until(deadline)
+	assert.Greater(t, remaining, 23*time.Hour+59*time.Minute, "deadline should be ~24h away")
+	assert.Less(t, remaining, 24*time.Hour+time.Minute, "deadline should not exceed 24h")
+}
+
+func TestParentDeadlinePreserved(t *testing.T) {
+	state := newSessTestState()
+	d := newSessTestDriver(t, state)
+
+	// Parent context with a 5-minute deadline — adapter should preserve it
+	parentDeadline := 5 * time.Minute
+	ctx, parentCancel := context.WithTimeout(context.Background(), parentDeadline)
+	defer parentCancel()
+
+	r, err := d.Query(ctx, "SELECT 1 FROM dual")
+	require.NoError(t, err)
+	for r.HasNext() {
+		_, _ = r.Next()
+	}
+	r.Close()
+
+	state.mu.Lock()
+	capturedCtx := state.lastQueryCtx
+	state.mu.Unlock()
+
+	require.NotNil(t, capturedCtx, "lastQueryCtx should have been captured")
+	deadline, hasDeadline := capturedCtx.Deadline()
+	assert.True(t, hasDeadline, "parent deadline should be preserved")
+	remaining := time.Until(deadline)
+	assert.Greater(t, remaining, 4*time.Minute, "should preserve parent's ~5m deadline")
+	assert.Less(t, remaining, 5*time.Minute+time.Second, "should use parent deadline, not 24h default")
 }

@@ -17,9 +17,12 @@ import (
 	"github.com/kndndrj/nvim-dbee/dbee/core/builders"
 )
 
-// oracleQueryTimeout is the default timeout for Oracle query execution.
-// go-ora defaults to 30s which is too short for many queries.
-const oracleQueryTimeout = 30 * time.Minute
+// oracleDefaultQueryTimeout is the fallback timeout when the caller's context
+// has no deadline. go-ora's internal default (~30s) is too short for many
+// queries; this provides a practical "no limit" that still gives go-ora a
+// deadline to work with. Starts after mutex acquisition so queue wait time
+// is excluded.
+const oracleDefaultQueryTimeout = 24 * time.Hour
 
 var _ core.Driver = (*oracleDriver)(nil)
 var _ core.BindDriver = (*oracleDriver)(nil)
@@ -198,26 +201,25 @@ func isExecStatement(query string) bool {
 }
 
 func (d *oracleDriver) QueryWithBinds(ctx context.Context, query string, binds map[string]string) (core.ResultStream, error) {
-	// Timeout starts before d.mu.Lock(), so it includes wait time behind
-	// a running query. This bounds total wall-clock time including queuing.
-	queryCtx, cancel := context.WithTimeout(ctx, oracleQueryTimeout)
-
 	// Remove the trailing semicolon — go-ora doesn't support it for plain SQL
 	query = strings.TrimSpace(query)
 	query = strings.TrimSuffix(query, ";")
 
 	if len(strings.TrimSpace(query)) == 0 {
-		cancel()
 		return nil, errors.New("empty query")
 	}
 
 	d.mu.Lock()
 
-	// Fast-fail if context expired while waiting for the mutex
-	if queryCtx.Err() != nil {
-		d.mu.Unlock()
-		cancel()
-		return nil, queryCtx.Err()
+	// Create query context AFTER acquiring mutex so queue wait time is excluded.
+	// If the parent already has a deadline, preserve it. Otherwise apply a 24h
+	// default so go-ora doesn't fall back to its own short timeout (~30s).
+	var queryCtx context.Context
+	var cancel context.CancelFunc
+	if _, hasDeadline := ctx.Deadline(); hasDeadline {
+		queryCtx, cancel = context.WithCancel(ctx)
+	} else {
+		queryCtx, cancel = context.WithTimeout(ctx, oracleDefaultQueryTimeout)
 	}
 
 	conn, err := d.getSessionConnLocked(queryCtx)
