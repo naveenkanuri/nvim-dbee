@@ -15,27 +15,14 @@ type eventBus struct {
 	log *plugin.Logger
 }
 
-func shortID(raw string) string {
-	if len(raw) <= 8 {
-		return raw
-	}
-	return raw[:8]
-}
-
 func (eb *eventBus) callLua(event string, data string) {
-	luaCode := fmt.Sprintf(`require("dbee.handler.__events").trigger(%q, %s)`, event, data)
-	eb.log.Infof("[TRACE] callLua: event=%s, lua_len=%d", event, len(luaCode))
-	err := eb.vim.ExecLua(luaCode, nil)
+	err := eb.vim.ExecLua(fmt.Sprintf(`require("dbee.handler.__events").trigger(%q, %s)`, event, data), nil)
 	if err != nil {
-		eb.log.Infof("[TRACE] callLua FAILED: event=%s, err=%s", event, err)
+		eb.log.Infof("eb.vim.ExecLua: %s", err)
 	}
 }
 
 func (eb *eventBus) CallStateChanged(call *core.Call) {
-	state := call.GetState().String()
-	callID := string(call.GetID())
-	eb.log.Infof("[TRACE] CallStateChanged: id=%s state=%s", shortID(callID), state)
-
 	errMsg := "nil"
 	if err := call.Err(); err != nil {
 		errMsg = fmt.Sprintf("[[%s]]", err.Error())
@@ -52,7 +39,7 @@ func (eb *eventBus) CallStateChanged(call *core.Call) {
 		},
 	}`, call.GetID(),
 		call.GetQuery(),
-		state,
+		call.GetState().String(),
 		call.GetTimeTaken().Microseconds(),
 		call.GetTimestamp().UnixMicro(),
 		errMsg)

@@ -77,11 +77,6 @@ end
 function ResultUI:on_call_state_changed(data)
   local call = data.call
 
-  print(string.format("[TRACE] ResultUI:on_call_state_changed: state=%s id=%s current=%s match=%s",
-    tostring(call.state), tostring(call.id):sub(1, 8),
-    self.current_call and tostring(self.current_call.id):sub(1, 8) or "nil",
-    tostring(self.current_call and call.id == self.current_call.id)))
-
   -- we only care about the current call
   if not self.current_call or call.id ~= self.current_call.id then
     return
