@@ -57,6 +57,7 @@ jobs:
           - check_result_restore_elapsed.lua
           - check_result_error_kinds.lua
           - check_lsp_alias_completion.lua
+          - check_lsp_schema_alias_completion.lua
           - check_lsp_alias_rebinding.lua
           - check_run_note_queries_opts.lua
     steps:

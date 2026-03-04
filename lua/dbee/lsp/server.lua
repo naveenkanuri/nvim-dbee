@@ -19,6 +19,42 @@ local CompletionItemKind = {
   Struct = 22,
 }
 
+---@param cache SchemaCache
+---@param schema_hint string
+---@param table_name string
+---@return string? actual_name, string? actual_schema
+local function find_table_in_schema(cache, schema_hint, table_name)
+  if not schema_hint or schema_hint == "" then
+    return nil, nil
+  end
+
+  local hint_upper = schema_hint:upper()
+  local matched_schema = nil
+  for _, schema_name in ipairs(cache:get_schemas()) do
+    if schema_name:upper() == hint_upper then
+      matched_schema = schema_name
+      break
+    end
+  end
+  if not matched_schema then
+    return nil, nil
+  end
+
+  local tables = cache:get_tables(matched_schema)
+  if tables[table_name] then
+    return table_name, matched_schema
+  end
+
+  local upper = table_name:upper()
+  for name, _ in pairs(tables) do
+    if name:upper() == upper then
+      return name, matched_schema
+    end
+  end
+
+  return nil, matched_schema
+end
+
 --- Build completion items for table names.
 ---@param cache SchemaCache
 ---@param schema string? specific schema to filter by
@@ -69,21 +105,39 @@ end
 local function column_completions(cache, table_ref, alias_info)
   local items = {}
   local tbl_name = table_ref
-  local schema = nil
 
   if alias_info then
     tbl_name = alias_info.table
-    schema = alias_info.schema
   end
 
-  -- find actual table and schema
-  local actual_name, actual_schema = cache:find_table(tbl_name)
-  if not actual_name then
+  local cols = nil
+  local actual_name, actual_schema = nil, nil
+
+  if alias_info and alias_info.schema then
+    -- Explicit schema-qualified aliases should stay in that schema. Resolve
+    -- schema/table case-insensitively against cache, then probe on-demand if
+    -- metadata cache doesn't contain that schema/table yet.
+    actual_name, actual_schema = find_table_in_schema(cache, alias_info.schema, tbl_name)
+    if actual_name then
+      cols = cache:get_columns(actual_schema, actual_name)
+    else
+      cols = cache:get_columns(alias_info.schema, tbl_name, {
+        probe_if_missing = true,
+        materializations = { "table", "view" },
+      })
+    end
+  else
+    -- Unqualified table or alias: use global table resolution.
+    actual_name, actual_schema = cache:find_table(tbl_name)
+    if actual_name then
+      cols = cache:get_columns(actual_schema, actual_name)
+    end
+  end
+
+  if not cols or #cols == 0 then
     return items
   end
-  schema = schema or actual_schema
 
-  local cols = cache:get_columns(schema, actual_name)
   for _, col in ipairs(cols) do
     items[#items + 1] = {
       label = col.name,

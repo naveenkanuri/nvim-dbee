@@ -296,8 +296,22 @@ end
 --- Results are cached to disk for subsequent sessions.
 ---@param schema string
 ---@param table_name string
+---@param opts? { probe_if_missing?: boolean, materializations?: string[] }
 ---@return Column[]
-function SchemaCache:get_columns(schema, table_name)
+function SchemaCache:get_columns(schema, table_name, opts)
+  opts = opts or {}
+  schema = schema or "_default"
+
+  -- Normalize schema casing against known cache entries.
+  if not self.schemas[schema] then
+    for _, known_schema in ipairs(self:get_schemas()) do
+      if known_schema:upper() == schema:upper() then
+        schema = known_schema
+        break
+      end
+    end
+  end
+
   local key = schema .. "." .. table_name
   if self.columns[key] then
     return self.columns[key]
@@ -316,31 +330,127 @@ function SchemaCache:get_columns(schema, table_name)
   end
 
   if not tbl_info then
-    return {}
+    -- Normalize table casing against known entries in this schema.
+    local upper = table_name:upper()
+    for known_name, info in pairs(self.tables[schema] or {}) do
+      if known_name:upper() == upper then
+        table_name = known_name
+        tbl_info = info
+        key = schema .. "." .. table_name
+        if self.columns[key] then
+          return self.columns[key]
+        end
+        break
+      end
+    end
   end
 
-  local query_schema = (schema == "_default") and "" or schema
-
-  local ok, cols = pcall(self.handler.connection_get_columns, self.handler, self.conn_id, {
-    table = table_name,
-    schema = query_schema,
-    materialization = tbl_info.type,
-  })
-
-  -- Fallback: Oracle can have both lowercase (quoted) and uppercase entries.
-  -- If lowercase returns no columns, try uppercase.
-  if (not ok or not cols or #cols == 0) and table_name:upper() ~= table_name then
-    ok, cols = pcall(self.handler.connection_get_columns, self.handler, self.conn_id, {
-      table = table_name:upper(),
+  local function fetch_columns(fetch_schema, fetch_table, materialization)
+    local query_schema = (fetch_schema == "_default") and "" or fetch_schema
+    local ok, cols = pcall(self.handler.connection_get_columns, self.handler, self.conn_id, {
+      table = fetch_table,
       schema = query_schema,
-      materialization = tbl_info.type,
+      materialization = materialization,
     })
+    if not ok or not cols or #cols == 0 then
+      return nil
+    end
+    return cols
   end
 
-  if not ok or not cols or #cols == 0 then
+  local cols = nil
+  local resolved_schema = schema
+  local resolved_table = table_name
+  local resolved_type = tbl_info and tbl_info.type or "table"
+
+  if tbl_info then
+    cols = fetch_columns(schema, table_name, tbl_info.type)
+    -- Fallback: Oracle can have both lowercase (quoted) and uppercase entries.
+    -- If lowercase returns no columns, try uppercase.
+    if not cols and table_name:upper() ~= table_name then
+      resolved_table = table_name:upper()
+      cols = fetch_columns(schema, resolved_table, tbl_info.type)
+    end
+  elseif opts.probe_if_missing then
+    local schema_candidates, table_candidates = {}, {}
+    local schema_seen, table_seen = {}, {}
+
+    local function add_schema_candidate(name)
+      if not name or name == "" then
+        return
+      end
+      if schema_seen[name] then
+        return
+      end
+      schema_seen[name] = true
+      schema_candidates[#schema_candidates + 1] = name
+    end
+
+    local function add_table_candidate(name)
+      if not name or name == "" then
+        return
+      end
+      if table_seen[name] then
+        return
+      end
+      table_seen[name] = true
+      table_candidates[#table_candidates + 1] = name
+    end
+
+    -- Prefer an existing schema with matching case-insensitive name.
+    local matched_schema = nil
+    for _, s in ipairs(self:get_schemas()) do
+      if s:upper() == schema:upper() then
+        matched_schema = s
+        break
+      end
+    end
+
+    add_schema_candidate(matched_schema)
+    add_schema_candidate(schema)
+    if schema ~= "_default" and schema:upper() ~= schema then
+      add_schema_candidate(schema:upper())
+    end
+
+    add_table_candidate(table_name)
+    if table_name:upper() ~= table_name then
+      add_table_candidate(table_name:upper())
+    end
+
+    local materializations = opts.materializations or { "table", "view" }
+    for _, candidate_schema in ipairs(schema_candidates) do
+      for _, candidate_table in ipairs(table_candidates) do
+        for _, materialization in ipairs(materializations) do
+          cols = fetch_columns(candidate_schema, candidate_table, materialization)
+          if cols then
+            resolved_schema = candidate_schema
+            resolved_table = candidate_table
+            resolved_type = materialization
+            break
+          end
+        end
+        if cols then
+          break
+        end
+      end
+      if cols then
+        break
+      end
+    end
+  end
+
+  if not cols or #cols == 0 then
     return {}
   end
 
+  if not self.tables[resolved_schema] then
+    self.tables[resolved_schema] = {}
+  end
+  self.schemas[resolved_schema] = true
+  self.tables[resolved_schema][resolved_table] = { type = resolved_type }
+  self:_build_name_list()
+
+  key = resolved_schema .. "." .. resolved_table
   self.columns[key] = cols
   self:_save_columns_to_disk(key, cols)
   return cols
