@@ -197,7 +197,10 @@ function CallLogUI:get_actions()
         return
       end
 
-      self.handler:call_cancel(call.id)
+      local ok, err = self.handler:call_cancel(call.id)
+      if ok == false and err then
+        vim.notify(err, vim.log.levels.WARN)
+      end
     end,
   }
 end

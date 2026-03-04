@@ -202,6 +202,106 @@ local function query_block_at_cursor(lines, cursor_row)
   return query, start_row, end_row
 end
 
+---@param line string
+---@return string
+local function trim_trailing_semicolon(line)
+  return tostring(line or ""):gsub(";%s*$", "")
+end
+
+---@param line string
+---@return string
+local function trim_leading_whitespace(line)
+  return tostring(line or ""):gsub("^%s+", "")
+end
+
+---Find statement line range in fallback mode using the selected query text.
+---Returns nil when a stable range cannot be derived.
+---@param block_lines string[]
+---@param block_start integer
+---@param cursor_row integer
+---@param query string
+---@return integer?, integer?
+local function find_fallback_statement_range(block_lines, block_start, cursor_row, query)
+  local function lines_match(block_line, query_line, idx, total)
+    local b = tostring(block_line or "")
+    local q = tostring(query_line or "")
+    if idx == 1 then
+      b = trim_leading_whitespace(b)
+      q = trim_leading_whitespace(q)
+    end
+    if idx == total then
+      b = trim_trailing_semicolon(b)
+      q = trim_trailing_semicolon(q)
+    end
+    return b == q
+  end
+
+  local qlines = vim.split(query, "\n", { plain = true })
+  if #qlines == 0 then
+    return nil, nil
+  end
+
+  -- Single-line statements can share a line with other statements.
+  if #qlines == 1 then
+    local q = trim_leading_whitespace(qlines[1])
+    for i, line in ipairs(block_lines) do
+      local row = block_start + i - 1
+      local normalized = trim_leading_whitespace(line)
+      if normalized:find(q, 1, true) then
+        if row == cursor_row then
+          return row, row
+        end
+      end
+    end
+    for i, line in ipairs(block_lines) do
+      local row = block_start + i - 1
+      local normalized = trim_leading_whitespace(line)
+      if normalized:find(q, 1, true) then
+        return row, row
+      end
+    end
+    return nil, nil
+  end
+
+  local max_start = #block_lines - #qlines + 1
+  for s = 1, max_start do
+    local matched = true
+    for j = 1, #qlines do
+      local b = block_lines[s + j - 1]
+      local q = qlines[j]
+      if not lines_match(b, q, j, #qlines) then
+        matched = false
+        break
+      end
+    end
+    if matched then
+      local start_row = block_start + s - 1
+      local end_row = start_row + #qlines - 1
+      if cursor_row >= start_row and cursor_row <= end_row then
+        return start_row, end_row
+      end
+    end
+  end
+
+  for s = 1, max_start do
+    local matched = true
+    for j = 1, #qlines do
+      local b = block_lines[s + j - 1]
+      local q = qlines[j]
+      if not lines_match(b, q, j, #qlines) then
+        matched = false
+        break
+      end
+    end
+    if matched then
+      local start_row = block_start + s - 1
+      return start_row, start_row + #qlines - 1
+    end
+  end
+
+  return nil, nil
+end
+
 -- Keywords that cannot be the last word of a syntactically complete SQL statement.
 -- When a tree-sitter statement node ends with one of these, the parser has
 -- incorrectly split the statement and the next sibling should be merged back.
@@ -226,16 +326,21 @@ local SQL_INCOMPLETE_CLAUSE_ENDINGS = {
 --- Get the SQL statement under the cursor and its range (using treesitter).
 --- Potential returns are 1. the SQL query, 2. empty string, 3. nil if filetype isn't SQL.
 ---@param bufnr integer buffer containing the SQL queries.
+---@param opts? { adapter_type?: string }
 ---@return nil|string query, nil|integer start_row, nil|integer end_row
-function M.query_under_cursor(bufnr)
+function M.query_under_cursor(bufnr, opts)
+  opts = opts or {}
   bufnr = bufnr or vim.api.nvim_get_current_buf()
   local ft = vim.bo[bufnr].filetype
   if ft ~= "sql" then
     return
   end
+  local adapter_type = tostring(opts.adapter_type or ""):lower()
 
   local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-  local cursor_row = vim.api.nvim_win_get_cursor(0)[1] - 1
+  local cursor = vim.api.nvim_win_get_cursor(0)
+  local cursor_row = cursor[1] - 1
+  local cursor_col = cursor[2]
 
   -- Step 1: Find the blank-line-delimited block around cursor.
   -- This is the maximum extent of the query — tree-sitter can only narrow it down.
@@ -258,7 +363,11 @@ function M.query_under_cursor(bufnr)
   local query = ""
   local start_row, end_row = block_start, block_end
 
-  local ok, parser = pcall(vim.treesitter.get_parser, tmp_buf, "sql", {})
+  local should_use_treesitter = adapter_type ~= "oracle"
+  local ok, parser = false, nil
+  if should_use_treesitter then
+    ok, parser = pcall(vim.treesitter.get_parser, tmp_buf, "sql", {})
+  end
   if ok and parser then
     local root = parser:parse()[1]:root()
     local cursor_in_block = cursor_row - block_start
@@ -295,10 +404,51 @@ function M.query_under_cursor(bufnr)
 
   vim.api.nvim_buf_delete(tmp_buf, { force = true })
 
-  -- Step 4: If tree-sitter couldn't narrow down, use the full block.
+  -- Step 4: If tree-sitter couldn't narrow down, pick the statement at cursor
+  -- using the splitter fallback. This avoids executing multiple statements
+  -- from a single non-empty block when parser support is unavailable.
   if query == "" then
-    query = block_query
-    start_row, end_row = block_start, block_end
+    local ok_splitter, splitter = pcall(require, "dbee.query_splitter")
+    if ok_splitter and splitter and type(splitter.split) == "function" then
+      local all_queries = splitter.split(block_query, { adapter_type = adapter_type })
+      if #all_queries > 0 then
+        local prefix_lines = {}
+        for i = block_start, cursor_row do
+          if i == cursor_row then
+            local line = lines[i + 1] or ""
+            local effective_col = cursor_col
+            local first_non_space = line:find("%S")
+            if first_non_space and effective_col < (first_non_space - 1) then
+              effective_col = first_non_space - 1
+            end
+            table.insert(prefix_lines, line:sub(1, effective_col + 1))
+          else
+            table.insert(prefix_lines, lines[i + 1] or "")
+          end
+        end
+
+        local prefix_query = table.concat(prefix_lines, "\n")
+        local prefix_queries = splitter.split(prefix_query, { adapter_type = adapter_type })
+        local idx = #prefix_queries
+        if idx < 1 then
+          idx = 1
+        end
+        if idx > #all_queries then
+          idx = #all_queries
+        end
+        query = all_queries[idx] or ""
+      end
+    end
+
+    if query == "" then
+      query = block_query
+    end
+    local fallback_start, fallback_end = find_fallback_statement_range(block_lines, block_start, cursor_row, query)
+    if fallback_start ~= nil and fallback_end ~= nil then
+      start_row, end_row = fallback_start, fallback_end
+    else
+      start_row, end_row = block_start, block_end
+    end
   end
 
   return query:gsub(";%s*$", ""), start_row, end_row

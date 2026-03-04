@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -41,6 +42,14 @@ type (
 		doneClosed  atomic.Bool
 	}
 )
+
+func shortCallID(id CallID) string {
+	raw := string(id)
+	if len(raw) <= 8 {
+		return raw
+	}
+	return raw[:8]
+}
 
 // callPersistent is used for marshaling and unmarshaling the call
 type callPersistent struct {
@@ -143,6 +152,7 @@ func newCallFromExecutor(executor func(context.Context) (ResultStream, error), q
 	eventsCh := make(chan CallState, 10)
 	emitEvent := func(state CallState) bool {
 		if c.doneClosed.Load() {
+			fmt.Fprintf(os.Stderr, "[TRACE] emitEvent(%s): doneClosed, dropping id=%s\n", state.String(), shortCallID(id))
 			return false
 		}
 		if state == CallStateRetrieving {
@@ -155,10 +165,13 @@ func newCallFromExecutor(executor func(context.Context) (ResultStream, error), q
 				return false
 			}
 		}
+		fmt.Fprintf(os.Stderr, "[TRACE] emitEvent(%s): sending to channel id=%s\n", state.String(), shortCallID(id))
 		select {
 		case eventsCh <- state:
+			fmt.Fprintf(os.Stderr, "[TRACE] emitEvent(%s): sent ok id=%s\n", state.String(), shortCallID(id))
 			return true
 		case <-c.done:
+			fmt.Fprintf(os.Stderr, "[TRACE] emitEvent(%s): c.done closed, dropping id=%s\n", state.String(), shortCallID(id))
 			return false
 		}
 	}
@@ -328,15 +341,21 @@ func (c *Call) Done() chan struct{} {
 func (c *Call) Cancel() {
 	select {
 	case <-c.done:
+		fmt.Fprintf(os.Stderr, "[TRACE] Cancel: c.done already closed id=%s\n", shortCallID(c.id))
 		return
 	default:
 	}
 
-	if c.GetState() > CallStateExecuting {
+	state := c.GetState()
+	fmt.Fprintf(os.Stderr, "[TRACE] Cancel: state=%s id=%s\n", state.String(), shortCallID(c.id))
+	if state != CallStateExecuting && state != CallStateRetrieving {
+		fmt.Fprintf(os.Stderr, "[TRACE] Cancel: rejected (state not executing/retrieving) id=%s\n", shortCallID(c.id))
 		return
 	}
 	if c.cancelFunc != nil {
+		fmt.Fprintf(os.Stderr, "[TRACE] Cancel: calling cancelFunc id=%s\n", shortCallID(c.id))
 		c.cancelFunc()
+		fmt.Fprintf(os.Stderr, "[TRACE] Cancel: cancelFunc returned id=%s\n", shortCallID(c.id))
 	}
 }
 

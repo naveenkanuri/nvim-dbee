@@ -180,6 +180,55 @@ func TestCall_Cancel_Idempotent(t *testing.T) {
 	r.Equal(core.CallStateCanceled, call.GetState())
 }
 
+func TestCall_Cancel_DuringRetrieving(t *testing.T) {
+	r := require.New(t)
+
+	rows := mock.NewRows(0, 32)
+	connection, err := core.NewConnection(&core.ConnectionParams{}, mock.NewAdapter(rows,
+		mock.AdapterWithResultStreamOpts(mock.ResultStreamWithNextSleep(10*time.Millisecond)),
+	))
+	r.NoError(err)
+
+	expectedEvents := []core.CallState{
+		core.CallStateExecuting,
+		core.CallStateRetrieving,
+		core.CallStateCanceled,
+	}
+
+	var (
+		eventIndex      atomic.Int32
+		retrievingCount atomic.Int32
+		canceledCount   atomic.Int32
+	)
+	call := connection.Execute("_", func(state core.CallState, c *core.Call) {
+		if state == core.CallStateRetrieving {
+			retrievingCount.Add(1)
+			c.Cancel()
+		}
+		if state == core.CallStateCanceled {
+			canceledCount.Add(1)
+		}
+
+		idx := int(eventIndex.Load())
+		r.Less(idx, len(expectedEvents))
+		r.Equal(expectedEvents[idx], state)
+		eventIndex.Add(1)
+	})
+
+	select {
+	case <-call.Done():
+	case <-time.After(5 * time.Second):
+		t.Error("call did not finish in expected time")
+	}
+
+	r.Eventually(func() bool {
+		return eventIndex.Load() == int32(len(expectedEvents))
+	}, 2*time.Second, 10*time.Millisecond)
+	r.Equal(int32(1), retrievingCount.Load())
+	r.Equal(int32(1), canceledCount.Load())
+	r.Equal(core.CallStateCanceled, call.GetState())
+}
+
 func TestCall_Cancel_AfterDone_NoPanic(t *testing.T) {
 	r := require.New(t)
 

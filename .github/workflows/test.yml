@@ -43,10 +43,14 @@ jobs:
       matrix:
         script:
           - check_query_splitter.lua
+          - check_query_under_cursor.lua
           - check_variables.lua
           - check_execute_script.lua
           - check_editor_variables.lua
           - check_editor_error_jump.lua
+          - check_call_cancel_retry.lua
+          - check_editor_call_routing.lua
+          - check_events_dispatch_resilience.lua
           - check_actions_entrypoints.lua
           - check_actions_recovery.lua
           - check_result_progress_hints.lua

@@ -15,10 +15,24 @@ end
 ---@param event core_event_name
 ---@param data any
 function M.trigger(event, data)
+  if event == "call_state_changed" and data and data.call then
+    print(string.format("[TRACE] __events.trigger: event=%s state=%s id=%s",
+      event, tostring(data.call.state), tostring(data.call.id):sub(1, 8)))
+  end
   vim.schedule(function()
+    if event == "call_state_changed" and data and data.call then
+      print(string.format("[TRACE] __events.scheduled: state=%s id=%s cbs=%d",
+        tostring(data.call.state), tostring(data.call.id):sub(1, 8), #(callbacks[event] or {})))
+    end
     local cbs = callbacks[event] or {}
     for _, cb in ipairs(cbs) do
-      cb(data)
+      local ok, err = pcall(cb, data)
+      if not ok then
+        vim.notify(
+          string.format("dbee event listener error (%s): %s", tostring(event), tostring(err)),
+          vim.log.levels.ERROR
+        )
+      end
     end
   end)
 end

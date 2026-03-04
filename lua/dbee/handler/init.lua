@@ -1,5 +1,13 @@
 local event_bus = require("dbee.handler.__events")
 local utils = require("dbee.utils")
+local register_remote_plugin = require("dbee.api.__register")
+
+---@param err any
+---@return boolean
+local function is_invalid_channel_error(err)
+  local msg = tostring(err or ""):lower()
+  return msg:find("invalid channel", 1, true) ~= nil
+end
 
 -- Handler is an aggregator of connections
 ---@class Handler
@@ -288,7 +296,32 @@ end
 
 ---@param id call_id
 function Handler:call_cancel(id)
-  vim.fn.DbeeCallCancel(id)
+  local ok, err = pcall(vim.fn.DbeeCallCancel, id)
+  if ok then
+    return true
+  end
+
+  if is_invalid_channel_error(err) then
+    local reg_ok, reg_err = pcall(register_remote_plugin)
+    if not reg_ok then
+      local msg = "failed re-registering dbee RPC host: " .. tostring(reg_err)
+      utils.log("warn", msg, "core")
+      return false, msg
+    end
+
+    local retry_ok, retry_err = pcall(vim.fn.DbeeCallCancel, id)
+    if retry_ok then
+      return true
+    end
+
+    local msg = "failed cancelling call after host re-register: " .. tostring(retry_err)
+    utils.log("warn", msg, "core")
+    return false, msg
+  end
+
+  local msg = "failed cancelling call: " .. tostring(err)
+  utils.log("warn", msg, "core")
+  return false, msg
 end
 
 ---@param id call_id

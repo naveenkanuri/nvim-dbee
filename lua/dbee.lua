@@ -695,6 +695,12 @@ function dbee.execute_context(opts)
     return
   end
 
+  local conn = api.core.get_current_connection()
+  if not conn then
+    vim.notify("no connection currently selected", vim.log.levels.WARN)
+    return
+  end
+
   local query = utils.trim(opts.query)
   if query == "" then
     local mode = vim.api.nvim_get_mode().mode
@@ -703,19 +709,15 @@ function dbee.execute_context(opts)
       local selection = vim.api.nvim_buf_get_text(0, srow, scol, erow, ecol, {})
       query = utils.trim(table.concat(selection, "\n"))
     else
-      local under_cursor = utils.query_under_cursor(vim.api.nvim_get_current_buf())
+      local under_cursor = utils.query_under_cursor(vim.api.nvim_get_current_buf(), {
+        adapter_type = conn.type,
+      })
       query = utils.trim(under_cursor)
     end
   end
 
   if query == "" then
     vim.notify("No SQL statement to execute at cursor", vim.log.levels.WARN)
-    return
-  end
-
-  local conn = api.core.get_current_connection()
-  if not conn then
-    vim.notify("no connection currently selected", vim.log.levels.WARN)
     return
   end
 
@@ -750,7 +752,9 @@ function dbee.compile_object(opts)
 
   local query = utils.trim(opts.query)
   if query == "" then
-    local under_cursor = utils.query_under_cursor(vim.api.nvim_get_current_buf())
+    local under_cursor = utils.query_under_cursor(vim.api.nvim_get_current_buf(), {
+      adapter_type = conn.type,
+    })
     query = utils.trim(under_cursor)
   end
   if query == "" then

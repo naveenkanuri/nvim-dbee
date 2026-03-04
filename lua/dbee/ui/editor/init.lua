@@ -51,6 +51,7 @@ end
 ---@field private last_exec_bufnr integer? buffer of last executed query
 ---@field private note_calls table<note_id, CallDetails> last call per note
 ---@field private note_exec_meta table<note_id, { bufnr: integer, offset: integer, conn_type: string? }> execution metadata per note
+---@field private call_note_ids table<string, note_id> call id to note ownership mapping for active note calls
 ---@field private state_file string path to persist last-active note state
 ---@field private pending_cursor_line? integer one-shot cursor line to restore on first display
 local EditorUI = {}
@@ -89,6 +90,7 @@ function EditorUI:new(handler, result, opts)
     last_exec_bufnr = nil,
     note_calls = {},
     note_exec_meta = {},
+    call_note_ids = {},
     state_file = vim.fn.stdpath("state") .. "/dbee/last_note.json",
     pending_cursor_line = nil,
   }
@@ -274,7 +276,12 @@ function EditorUI:get_actions()
     end
     self.result:set_call(call)
     if note_id then
+      local previous_call = self.note_calls[note_id]
+      if previous_call and previous_call.id and previous_call.id ~= call.id then
+        self.call_note_ids[previous_call.id] = nil
+      end
       self.note_calls[note_id] = call
+      self.call_note_ids[call.id] = note_id
       self.note_exec_meta[note_id] = {
         bufnr = bufnr,
         offset = offset,
@@ -333,7 +340,13 @@ function EditorUI:get_actions()
     end,
     run_under_cursor = function()
       local bufnr = vim.api.nvim_get_current_buf()
-      local query, srow, erow = utils.query_under_cursor(bufnr)
+      local conn = self.handler:get_current_connection()
+      if not conn then
+        return
+      end
+      local query, srow, erow = utils.query_under_cursor(bufnr, {
+        adapter_type = conn.type,
+      })
 
       if query ~= "" then
         self.last_exec_offset = srow
@@ -351,15 +364,12 @@ function EditorUI:get_actions()
         })
 
         -- run the query
-        local conn = self.handler:get_current_connection()
-        if conn then
-          local note_id = self.current_note_id
-          local exec_bufnr = self.last_exec_bufnr
-          local exec_offset = self.last_exec_offset
-          execute_query_with_variables_async(conn, query, function(call)
-            set_result_for_note(note_id, call, exec_bufnr, exec_offset, conn.type)
-          end)
-        end
+        local note_id = self.current_note_id
+        local exec_bufnr = self.last_exec_bufnr
+        local exec_offset = self.last_exec_offset
+        execute_query_with_variables_async(conn, query, function(call)
+          set_result_for_note(note_id, call, exec_bufnr, exec_offset, conn.type)
+        end)
 
         -- remove highlighting after delay
         vim.defer_fn(function()
@@ -564,6 +574,10 @@ function EditorUI:namespace_remove_note(id, note_id)
   self.notes[namespace][note_id] = nil
 
   -- Clean up associated call tracking
+  local old_call = self.note_calls[note_id]
+  if old_call and old_call.id then
+    self.call_note_ids[old_call.id] = nil
+  end
   self.note_calls[note_id] = nil
   self.note_exec_meta[note_id] = nil
 
@@ -637,12 +651,7 @@ end
 ---@param call_id string
 ---@return note_id|nil
 function EditorUI:find_note_for_call(call_id)
-  for note_id, stored_call in pairs(self.note_calls) do
-    if stored_call.id == call_id then
-      return note_id
-    end
-  end
-  return nil
+  return self.call_note_ids[call_id]
 end
 
 -- Sets note with id as the current note
@@ -750,33 +759,25 @@ function EditorUI:on_call_state_changed(data)
     return
   end
 
-  -- Find the note that owns this call to get the correct buffer, offset and connection type.
-  local exec_bufnr = self.last_exec_bufnr
-  local exec_offset = self.last_exec_offset or 0
-  local exec_conn_type = nil
-  for note_id, stored_call in pairs(self.note_calls) do
-    if stored_call.id == data.call.id then
-      local meta = self.note_exec_meta[note_id]
-      if meta then
-        exec_bufnr = meta.bufnr
-        exec_offset = meta.offset
-        exec_conn_type = meta.conn_type
-      end
-      break
-    end
-  end
-
-  if not exec_bufnr or not vim.api.nvim_buf_is_valid(exec_bufnr) then
+  local note_id = self.call_note_ids[data.call.id]
+  if not note_id then
     return
   end
 
-  -- Update stored note_calls with latest call state
-  for note_id, stored_call in pairs(self.note_calls) do
-    if stored_call.id == data.call.id then
-      self.note_calls[note_id] = data.call
-      break
-    end
+  local stored_call = self.note_calls[note_id]
+  if not stored_call or stored_call.id ~= data.call.id then
+    return
   end
+  self.note_calls[note_id] = data.call
+
+  local meta = self.note_exec_meta[note_id]
+  if not meta or not meta.bufnr or not vim.api.nvim_buf_is_valid(meta.bufnr) then
+    return
+  end
+
+  local exec_bufnr = meta.bufnr
+  local exec_offset = meta.offset or 0
+  local exec_conn_type = meta.conn_type
 
   if data.call.state == "archived" then
     vim.diagnostic.reset(self.diag_ns, exec_bufnr)
