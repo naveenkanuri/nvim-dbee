@@ -54,6 +54,10 @@ end
 ---@field private call_note_ids table<string, note_id> call id to note ownership mapping for active note calls
 ---@field private state_file string path to persist last-active note state
 ---@field private pending_cursor_line? integer one-shot cursor line to restore on first display
+---@field private _confirm_pending boolean true while a cancel-confirm prompt is open
+---@field private _confirm_conn_id? string connection ID being monitored for auto-dismiss
+---@field private _confirm_resolve? fun() function to call when auto-dismiss fires
+---@field private _confirm_picker? table picker handle from vim.ui.select (if provider returns one)
 local EditorUI = {}
 
 ---@param handler Handler
