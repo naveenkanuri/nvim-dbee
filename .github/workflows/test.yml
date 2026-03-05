@@ -60,6 +60,7 @@ jobs:
           - check_lsp_schema_alias_completion.lua
           - check_lsp_alias_rebinding.lua
           - check_run_note_queries_opts.lua
+          - check_cancel_confirm_prompt.lua
     steps:
       - uses: actions/checkout@v4
       - name: Install Neovim

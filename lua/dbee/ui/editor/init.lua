@@ -348,10 +348,10 @@ function EditorUI:get_actions()
   -- state.  The picker window is closed programmatically if the provider
   -- supports it (hybrid: checks for .close() method).
   local function confirm_and_execute(action_fn)
-    -- Pending check MUST come before has_active_call().  Events arrive via
+    -- Pending check MUST come before active_call_count().  Events arrive via
     -- vim.schedule, so there is a window where the Go side has moved calls
     -- to terminal but the Lua event hasn't fired yet.  Without this guard,
-    -- has_active_call() returns false → immediate execute, then the queued
+    -- active_call_count() returns 0 → immediate execute, then the queued
     -- auto-dismiss fires resolve() → double execution.
     if self._confirm_pending then
       return
