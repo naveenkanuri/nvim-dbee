@@ -115,9 +115,15 @@ function EditorUI:new(handler, result, opts)
     if not o._confirm_conn_id then
       return
     end
-    -- On any state change, re-check if the monitored connection still
-    -- has active calls.  This handles non-serialized adapters where
-    -- multiple calls can be active concurrently.
+    -- Fast-return: if the event's call is still active, the connection
+    -- definitely has at least one active call.  Skips the RPC entirely.
+    local s = data and data.call and data.call.state
+    if s == "executing" or s == "retrieving" or s == "unknown" then
+      return
+    end
+    -- The event's call reached a terminal state.  Re-check if the monitored
+    -- connection still has OTHER active calls (non-serialized adapters can
+    -- have multiple concurrent calls).
     local ok, calls = pcall(o.handler.connection_get_calls, o.handler, o._confirm_conn_id)
     if not ok or not calls then
       return
@@ -313,25 +319,26 @@ function EditorUI:get_actions()
     end)
   end
 
-  -- Returns true if the current connection has any active call, false otherwise.
+  -- Returns the count of active calls on the current connection (0 = none).
   -- Includes "unknown" state: calls start there before the Go goroutine
   -- transitions them to "executing" (async, nanosecond window).
   -- Uses pcall so test stubs that omit connection_get_calls still work.
-  local function has_active_call()
+  local function active_call_count()
     local conn = self.handler:get_current_connection()
     if not conn then
-      return false
+      return 0
     end
     local ok, calls = pcall(self.handler.connection_get_calls, self.handler, conn.id)
     if not ok or not calls or #calls == 0 then
-      return false
+      return 0
     end
+    local count = 0
     for _, c in ipairs(calls) do
       if c.state == "executing" or c.state == "retrieving" or c.state == "unknown" then
-        return true
+        count = count + 1
       end
     end
-    return false
+    return count
   end
 
   -- Guard that wraps an action body with a cancel-confirm prompt when any
@@ -350,7 +357,8 @@ function EditorUI:get_actions()
       return
     end
 
-    if not has_active_call() then
+    local num_active = active_call_count()
+    if num_active == 0 then
       action_fn()
       return
     end
@@ -378,20 +386,8 @@ function EditorUI:get_actions()
     self._confirm_conn_id = captured_conn_id
     self._confirm_resolve = do_resolve
 
-    -- Count active calls for accurate prompt text.
-    local active_count = 0
-    do
-      local ok, calls = pcall(self.handler.connection_get_calls, self.handler, captured_conn_id)
-      if ok and calls then
-        for _, c in ipairs(calls) do
-          if c.state == "executing" or c.state == "retrieving" or c.state == "unknown" then
-            active_count = active_count + 1
-          end
-        end
-      end
-    end
-    local prompt_text = active_count > 1
-      and (active_count .. " queries running. Cancel all and run new?")
+    local prompt_text = num_active > 1
+      and (num_active .. " queries running. Cancel all and run new?")
       or "A query is running. Cancel and run new?"
 
     local select_ok, picker_or_err = pcall(vim.ui.select, { "No", "Yes" }, {
