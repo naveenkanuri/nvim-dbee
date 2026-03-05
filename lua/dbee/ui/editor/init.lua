@@ -309,6 +309,143 @@ function EditorUI:get_actions()
     end)
   end
 
+  -- Returns true if the current connection has any active call, false otherwise.
+  -- Includes "unknown" state: calls start there before the Go goroutine
+  -- transitions them to "executing" (async, nanosecond window).
+  -- Uses pcall so test stubs that omit connection_get_calls still work.
+  local function has_active_call()
+    local conn = self.handler:get_current_connection()
+    if not conn then
+      return false
+    end
+    local ok, calls = pcall(self.handler.connection_get_calls, self.handler, conn.id)
+    if not ok or not calls or #calls == 0 then
+      return false
+    end
+    for _, c in ipairs(calls) do
+      if c.state == "executing" or c.state == "retrieving" or c.state == "unknown" then
+        return true
+      end
+    end
+    return false
+  end
+
+  -- Guard that wraps an action body with a cancel-confirm prompt when any
+  -- query is running on the current connection.  If nothing is running,
+  -- calls action_fn immediately.  The prompt auto-dismisses (and fires
+  -- action_fn) when ALL running queries on the connection reach terminal
+  -- state.  The picker window is closed programmatically if the provider
+  -- supports it (hybrid: checks for .close() method).
+  local function confirm_and_execute(action_fn)
+    -- Pending check MUST come before has_active_call().  Events arrive via
+    -- vim.schedule, so there is a window where the Go side has moved calls
+    -- to terminal but the Lua event hasn't fired yet.  Without this guard,
+    -- has_active_call() returns false → immediate execute, then the queued
+    -- auto-dismiss fires resolve() → double execution.
+    if self._confirm_pending then
+      return
+    end
+
+    if not has_active_call() then
+      action_fn()
+      return
+    end
+    self._confirm_pending = true
+
+    -- Capture connection ID for the auto-dismiss listener and "Yes" cancel.
+    local conn = self.handler:get_current_connection()
+    local captured_conn_id = conn and conn.id or nil
+
+    -- Wire auto-dismiss: the listener registered in EditorUI:new() will
+    -- check all calls for _confirm_conn_id on every state change event.
+    local resolved = false
+    local function do_resolve()
+      if resolved then
+        return
+      end
+      resolved = true
+      self._confirm_pending = false
+      self._confirm_conn_id = nil
+      self._confirm_resolve = nil
+      self._confirm_picker = nil
+      action_fn()
+    end
+
+    self._confirm_conn_id = captured_conn_id
+    self._confirm_resolve = do_resolve
+
+    -- Count active calls for accurate prompt text.
+    local active_count = 0
+    do
+      local ok, calls = pcall(self.handler.connection_get_calls, self.handler, captured_conn_id)
+      if ok and calls then
+        for _, c in ipairs(calls) do
+          if c.state == "executing" or c.state == "retrieving" or c.state == "unknown" then
+            active_count = active_count + 1
+          end
+        end
+      end
+    end
+    local prompt_text = active_count > 1
+      and (active_count .. " queries running. Cancel all and run new?")
+      or "A query is running. Cancel and run new?"
+
+    local select_ok, picker_or_err = pcall(vim.ui.select, { "No", "Yes" }, {
+      prompt = prompt_text,
+    }, function(choice)
+      -- Clear confirm state regardless of choice.
+      self._confirm_pending = false
+      self._confirm_conn_id = nil
+      self._confirm_resolve = nil
+      self._confirm_picker = nil
+
+      if resolved then
+        return -- auto-dismiss already fired action_fn
+      end
+      resolved = true
+
+      if choice ~= "Yes" then
+        return
+      end
+
+      -- Cancel ALL active calls for the captured connection.
+      -- Includes "unknown" — Cancel() is a no-op on unknown-state calls
+      -- (Go side guards to executing/retrieving only), but by the time the
+      -- user picks "Yes" (human speed) the call is in executing.
+      if captured_conn_id then
+        local ok, calls = pcall(self.handler.connection_get_calls, self.handler, captured_conn_id)
+        if ok and calls then
+          for _, c in ipairs(calls) do
+            if c.state == "executing" or c.state == "retrieving" or c.state == "unknown" then
+              local cancel_ok, cancel_err = self.handler:call_cancel(c.id)
+              if cancel_ok == false and cancel_err then
+                vim.notify(cancel_err, vim.log.levels.WARN)
+              end
+            end
+          end
+        end
+      end
+      action_fn()
+    end)
+
+    if select_ok then
+      -- Hybrid picker close: if vim.ui.select returns an object with a
+      -- .close() method (e.g. snacks.nvim picker), store it so the
+      -- auto-dismiss listener can close the picker window.
+      if type(picker_or_err) == "table" and type(picker_or_err.close) == "function" then
+        self._confirm_picker = picker_or_err
+      end
+    else
+      -- vim.ui.select threw synchronously — unlatch and fall through.
+      self._confirm_pending = false
+      self._confirm_conn_id = nil
+      self._confirm_resolve = nil
+      self._confirm_picker = nil
+      vim.notify("Confirm prompt failed: " .. tostring(picker_or_err), vim.log.levels.WARN)
+      action_fn()
+    end
+  end
+
   local function set_result_for_note(note_id, call, bufnr, offset, conn_type)
     if not call then
       return
