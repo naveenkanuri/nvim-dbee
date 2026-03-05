@@ -93,12 +93,51 @@ function EditorUI:new(handler, result, opts)
     call_note_ids = {},
     state_file = vim.fn.stdpath("state") .. "/dbee/last_note.json",
     pending_cursor_line = nil,
+    _confirm_pending = false,      -- true while a cancel-confirm prompt is open
+    _confirm_conn_id = nil,        -- connection ID being monitored for auto-dismiss
+    _confirm_resolve = nil,        -- function to call when auto-dismiss fires
+    _confirm_picker = nil,         -- picker handle from vim.ui.select (if provider returns one)
   }
   setmetatable(o, self)
   self.__index = self
 
   handler:register_event_listener("call_state_changed", function(data)
     o:on_call_state_changed(data)
+  end)
+
+  -- Auto-dismiss cancel-confirm prompt when ALL calls on the monitored
+  -- connection reach terminal state.
+  handler:register_event_listener("call_state_changed", function(data)
+    if not o._confirm_conn_id then
+      return
+    end
+    -- On any state change, re-check if the monitored connection still
+    -- has active calls.  This handles non-serialized adapters where
+    -- multiple calls can be active concurrently.
+    local ok, calls = pcall(o.handler.connection_get_calls, o.handler, o._confirm_conn_id)
+    if not ok or not calls then
+      return
+    end
+    for _, c in ipairs(calls) do
+      if c.state == "executing" or c.state == "retrieving" or c.state == "unknown" then
+        return -- still has active calls, keep waiting
+      end
+    end
+    -- No active calls remain — resolve BEFORE closing picker.
+    -- If picker.close synchronously triggers the choice callback (with nil),
+    -- the choice callback will see resolved=true and return early.
+    local picker = o._confirm_picker
+    local resolve = o._confirm_resolve
+    o._confirm_conn_id = nil
+    o._confirm_resolve = nil
+    o._confirm_pending = false
+    o._confirm_picker = nil
+    if resolve then
+      resolve()
+    end
+    if picker and type(picker.close) == "function" then
+      pcall(picker.close, picker)
+    end
   end)
 
   -- restore last-active note from previous session, or fall back to first global note
