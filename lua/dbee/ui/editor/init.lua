@@ -474,44 +474,48 @@ function EditorUI:get_actions()
       if not self.winid or not vim.api.nvim_win_is_valid(self.winid) then
         return
       end
+      local conn = self.handler:get_current_connection()
+      if not conn then
+        return
+      end
       local bufnr = vim.api.nvim_win_get_buf(self.winid)
       local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
       local query = table.concat(lines, "\n")
 
-      self.last_exec_offset = 0
-      self.last_exec_bufnr = bufnr
-      vim.diagnostic.reset(self.diag_ns, bufnr)
+      confirm_and_execute(function()
+        self.last_exec_offset = 0
+        self.last_exec_bufnr = bufnr
+        vim.diagnostic.reset(self.diag_ns, bufnr)
 
-      local conn = self.handler:get_current_connection()
-      if not conn then
-        return
-      end
-      local note_id = self.current_note_id
-      local exec_bufnr = self.last_exec_bufnr
-      local exec_offset = self.last_exec_offset
-      execute_query_with_variables_async(conn, query, function(call)
-        set_result_for_note(note_id, call, exec_bufnr, exec_offset, conn.type)
+        local note_id = self.current_note_id
+        local exec_bufnr = self.last_exec_bufnr
+        local exec_offset = self.last_exec_offset
+        execute_query_with_variables_async(conn, query, function(call)
+          set_result_for_note(note_id, call, exec_bufnr, exec_offset, conn.type)
+        end)
       end)
     end,
     run_selection = function()
       local srow, scol, erow, ecol = utils.visual_selection()
-
       local selection = vim.api.nvim_buf_get_text(0, srow, scol, erow, ecol, {})
       local query = table.concat(selection, "\n")
-
-      self.last_exec_offset = srow
-      self.last_exec_bufnr = vim.api.nvim_get_current_buf()
-      vim.diagnostic.reset(self.diag_ns, self.last_exec_bufnr)
 
       local conn = self.handler:get_current_connection()
       if not conn then
         return
       end
-      local note_id = self.current_note_id
-      local exec_bufnr = self.last_exec_bufnr
-      local exec_offset = self.last_exec_offset
-      execute_query_with_variables_async(conn, query, function(call)
-        set_result_for_note(note_id, call, exec_bufnr, exec_offset, conn.type)
+
+      confirm_and_execute(function()
+        self.last_exec_offset = srow
+        self.last_exec_bufnr = vim.api.nvim_get_current_buf()
+        vim.diagnostic.reset(self.diag_ns, self.last_exec_bufnr)
+
+        local note_id = self.current_note_id
+        local exec_bufnr = self.last_exec_bufnr
+        local exec_offset = self.last_exec_offset
+        execute_query_with_variables_async(conn, query, function(call)
+          set_result_for_note(note_id, call, exec_bufnr, exec_offset, conn.type)
+        end)
       end)
     end,
     run_under_cursor = function()
@@ -525,32 +529,33 @@ function EditorUI:get_actions()
       })
 
       if query ~= "" then
-        self.last_exec_offset = srow
-        self.last_exec_bufnr = bufnr
-        vim.diagnostic.reset(self.diag_ns, bufnr)
+        confirm_and_execute(function()
+          self.last_exec_offset = srow
+          self.last_exec_bufnr = bufnr
+          vim.diagnostic.reset(self.diag_ns, bufnr)
 
-        -- highlight the statement that will be executed
-        local ns_id = vim.api.nvim_create_namespace("dbee_query_highlight")
-        vim.api.nvim_buf_clear_namespace(bufnr, ns_id, 0, -1)
-        vim.api.nvim_buf_set_extmark(bufnr, ns_id, srow, 0, {
-          end_row = erow + 1,
-          end_col = 0,
-          hl_group = "DiffText",
-          priority = 100,
-        })
-
-        -- run the query
-        local note_id = self.current_note_id
-        local exec_bufnr = self.last_exec_bufnr
-        local exec_offset = self.last_exec_offset
-        execute_query_with_variables_async(conn, query, function(call)
-          set_result_for_note(note_id, call, exec_bufnr, exec_offset, conn.type)
-        end)
-
-        -- remove highlighting after delay
-        vim.defer_fn(function()
+          -- highlight the statement that will be executed
+          local ns_id = vim.api.nvim_create_namespace("dbee_query_highlight")
           vim.api.nvim_buf_clear_namespace(bufnr, ns_id, 0, -1)
-        end, 750)
+          vim.api.nvim_buf_set_extmark(bufnr, ns_id, srow, 0, {
+            end_row = erow + 1,
+            end_col = 0,
+            hl_group = "DiffText",
+            priority = 100,
+          })
+
+          local note_id = self.current_note_id
+          local exec_bufnr = self.last_exec_bufnr
+          local exec_offset = self.last_exec_offset
+          execute_query_with_variables_async(conn, query, function(call)
+            set_result_for_note(note_id, call, exec_bufnr, exec_offset, conn.type)
+          end)
+
+          -- remove highlighting after delay
+          vim.defer_fn(function()
+            vim.api.nvim_buf_clear_namespace(bufnr, ns_id, 0, -1)
+          end, 750)
+        end)
       end
     end,
   }
