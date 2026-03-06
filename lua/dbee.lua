@@ -305,13 +305,13 @@ end
 ---Open notes picker using snacks.nvim.
 function dbee.pick_notes()
   if not api.ui.is_loaded() then
-    vim.notify("Dbee not loaded", vim.log.levels.WARN)
+    utils.log("warn", "Dbee not loaded")
     return
   end
 
   local notes = api.ui.editor_get_all_notes()
   if #notes == 0 then
-    vim.notify("No notes found", vim.log.levels.INFO)
+    utils.log("info", "No notes found")
     return
   end
 
@@ -352,13 +352,13 @@ end
 ---Open connections picker using snacks.nvim.
 function dbee.pick_connections()
   if not api.core.is_loaded() then
-    vim.notify("Dbee not loaded", vim.log.levels.WARN)
+    utils.log("warn", "Dbee not loaded")
     return
   end
 
   local conns = api.core.get_all_connections()
   if #conns == 0 then
-    vim.notify("No connections found", vim.log.levels.INFO)
+    utils.log("info", "No connections found")
     return
   end
 
@@ -418,13 +418,13 @@ end
 ---Open call history picker using snacks.nvim.
 function dbee.pick_history()
   if not api.core.is_loaded() then
-    vim.notify("Dbee not loaded", vim.log.levels.WARN)
+    utils.log("warn", "Dbee not loaded")
     return
   end
 
   local history = api.core.get_call_history()
   if #history == 0 then
-    vim.notify("No call history", vim.log.levels.INFO)
+    utils.log("info", "No call history")
     return
   end
 
@@ -625,14 +625,14 @@ function dbee.pick_history()
 
       vim.keymap.set("n", "yy", function()
         vim.fn.setreg("+", query)
-        vim.notify("Query yanked to clipboard", vim.log.levels.INFO)
+        utils.log("info", "Query yanked to clipboard")
         close_win()
       end, { buffer = buf })
 
       vim.keymap.set("n", "yr", function()
         if call.state == "archived" then
           api.core.call_store_result(call.id, "json", "yank", { extra_arg = "+" })
-          vim.notify("Results (JSON) yanked to clipboard", vim.log.levels.INFO)
+          utils.log("info", "Results (JSON) yanked to clipboard")
         end
         close_win()
       end, { buffer = buf })
@@ -640,7 +640,7 @@ function dbee.pick_history()
       vim.keymap.set("n", "yc", function()
         if call.state == "archived" then
           api.core.call_store_result(call.id, "csv", "yank", { extra_arg = "+" })
-          vim.notify("Results (CSV) yanked to clipboard", vim.log.levels.INFO)
+          utils.log("info", "Results (CSV) yanked to clipboard")
         end
         close_win()
       end, { buffer = buf })
@@ -691,13 +691,13 @@ function dbee.execute_context(opts)
 
   local core_ready, core_err = ensure_core_available()
   if not core_ready then
-    vim.notify(core_err or "dbee core not loaded", vim.log.levels.WARN)
+    utils.log("warn", core_err or "dbee core not loaded")
     return
   end
 
   local conn = api.core.get_current_connection()
   if not conn then
-    vim.notify("no connection currently selected", vim.log.levels.WARN)
+    utils.log("warn", "No connection selected. Select one from the drawer, then run again.")
     return
   end
 
@@ -717,13 +717,13 @@ function dbee.execute_context(opts)
   end
 
   if query == "" then
-    vim.notify("No SQL statement to execute at cursor", vim.log.levels.WARN)
+    utils.log("warn", "No SQL found at cursor. Place cursor on a query and try again.")
     return
   end
 
   execute_with_resolved_variables_async(conn, query, opts, function(_, err)
     if err then
-      vim.notify(err, vim.log.levels.WARN)
+      utils.log("warn", err)
     end
   end)
 end
@@ -823,7 +823,7 @@ function dbee.execute_script(opts)
     adapter_type = conn.type,
   })
   if #queries == 0 then
-    vim.notify("No executable statements found in script", vim.log.levels.WARN)
+    utils.log("warn", "No executable statements found in script")
     return {}, nil
   end
 
@@ -903,17 +903,17 @@ end
 ---Cancel currently running script execution.
 function dbee.cancel_script()
   if not active_script_run then
-    vim.notify("No running script execution", vim.log.levels.INFO)
+    utils.log("info", "No running script execution")
     return
   end
 
   if active_script_run.canceled then
-    vim.notify("Script cancellation already requested", vim.log.levels.INFO)
+    utils.log("info", "Script cancellation already requested")
     return
   end
 
   active_script_run.canceled = true
-  vim.notify("Script cancellation requested", vim.log.levels.INFO)
+  utils.log("info", "Script cancellation requested")
   if
     active_script_run.current_call_id
     and active_script_run.cancel_sent_call_id ~= active_script_run.current_call_id
@@ -963,7 +963,7 @@ function dbee.reconnect_current_connection(opts)
   end
 
   if opts.notify ~= false then
-    vim.notify("Reconnected " .. (reloaded_conn.name or reloaded_conn.id), vim.log.levels.INFO)
+    utils.log("info", "Reconnected " .. (reloaded_conn.name or reloaded_conn.id))
   end
   return reloaded_conn, nil
 end
@@ -1001,10 +1001,10 @@ function dbee.retry_last_disconnected(opts)
 
   execute_with_resolved_variables_async(reconnected_conn, query, opts, function(_, exec_err)
     if exec_err then
-      vim.notify(exec_err, vim.log.levels.WARN)
+      utils.log("warn", exec_err)
       return
     end
-    vim.notify("Retried last disconnected query", vim.log.levels.INFO)
+    utils.log("info", "Retried last disconnected query")
   end)
 
   return true, nil
@@ -1040,7 +1040,7 @@ function dbee.actions(opts)
       run = function()
         local _, err = dbee.execute_script()
         if err then
-          vim.notify(err, vim.log.levels.WARN)
+          utils.log("warn", err)
         end
       end,
     },
@@ -1088,7 +1088,7 @@ function dbee.actions(opts)
       run = function()
         local _, err = dbee.compile_object()
         if err then
-          vim.notify(err, vim.log.levels.WARN)
+          utils.log("warn", err)
         end
       end,
     })
@@ -1101,7 +1101,7 @@ function dbee.actions(opts)
       run = function()
         local _, err = dbee.reconnect_current_connection()
         if err then
-          vim.notify(err, vim.log.levels.WARN)
+          utils.log("warn", err)
         end
       end,
     }
@@ -1125,7 +1125,7 @@ function dbee.actions(opts)
       run = function()
         local _, err = dbee.retry_last_disconnected()
         if err then
-          vim.notify(err, vim.log.levels.WARN)
+          utils.log("warn", err)
         end
       end,
     })
@@ -1138,7 +1138,7 @@ function dbee.actions(opts)
         return
       end
     end
-    vim.notify("unknown or unavailable dbee action: " .. tostring(opts.action), vim.log.levels.WARN)
+    utils.log("warn", "unknown or unavailable dbee action: " .. tostring(opts.action))
     return
   end
 
@@ -1156,7 +1156,7 @@ function dbee.actions(opts)
         end
       end)
     else
-      vim.notify("snacks.nvim not available and no vim.ui.select fallback", vim.log.levels.WARN)
+      utils.log("warn", "snacks.nvim not available and no vim.ui.select fallback")
     end
     return
   end
