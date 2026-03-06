@@ -4,6 +4,7 @@ local common = require("dbee.ui.common")
 local menu = require("dbee.ui.drawer.menu")
 local convert = require("dbee.ui.drawer.convert")
 local expansion = require("dbee.ui.drawer.expansion")
+local utils = require("dbee.utils")
 
 -- action function of drawer nodes
 ---@alias drawer_node_action fun(cb: fun(), select: menu_select, input: menu_input)
@@ -31,6 +32,7 @@ local expansion = require("dbee.ui.drawer.expansion")
 ---@field private current_conn_id? connection_id current active connection
 ---@field private current_note_id? note_id current active note
 ---@field private pending_generated_calls table<string, { note_id: note_id, fallback_template: string }>
+---@field private _manual_refresh_conns table<string, boolean>
 ---@field private window_options table<string, any> a table of window options.
 ---@field private buffer_options table<string, any> a table of buffer options.
 local DrawerUI = {}
@@ -89,6 +91,7 @@ function DrawerUI:new(handler, editor, result, opts)
     current_conn_id = current_conn.id,
     current_note_id = current_note.id,
     pending_generated_calls = {},
+    _manual_refresh_conns = {},
     structure_cache = {},
     window_options = vim.tbl_extend("force", {
       wrap = false,
@@ -163,6 +166,18 @@ end
 function DrawerUI:on_structure_loaded(data)
   if not data or not data.conn_id then
     return
+  end
+
+  -- Check if this conn_id was part of a manual refresh cycle
+  if self._manual_refresh_conns[data.conn_id] then
+    -- Remove from expected set (drain approach -- prevents leak into later auto-loads)
+    self._manual_refresh_conns[data.conn_id] = nil
+    -- Notify on success
+    if not data.error then
+      local ok_params, conn_params = pcall(self.handler.connection_get_params, self.handler, data.conn_id)
+      local name = (ok_params and conn_params and conn_params.name) or data.conn_id
+      utils.log("info", "Schema loaded: " .. name)
+    end
   end
 
   self.structure_cache[data.conn_id] = {
@@ -425,6 +440,16 @@ function DrawerUI:get_actions()
 
   return {
     refresh = function()
+      -- Capture ONLY connection IDs that will actually be re-fetched:
+      -- cached AND currently expanded.
+      local exp = expansion.get(self.tree)
+      self._manual_refresh_conns = {}
+      for conn_id, _ in pairs(self.structure_cache) do
+        if exp[conn_id] then
+          self._manual_refresh_conns[conn_id] = true
+        end
+      end
+
       self.structure_cache = {}
       self:refresh()
     end,
