@@ -253,6 +253,136 @@ if not found_add_error then
   return
 end
 
+-- NOTIF-04b: source_update_connection failure
+clear_notifications()
+
+local mock_handler_update = {
+  get_sources = function()
+    return { mock_source }
+  end,
+  source_get_connections = function()
+    return { { id = "conn1", name = "test-conn" } }
+  end,
+  source_update_connection = function(self, source_id, conn_id, spec)
+    error("update permission denied")
+  end,
+  connection_get_params = function(self, conn_id)
+    return { name = "test-conn", type = "postgres", url = "postgres://localhost/test" }
+  end,
+}
+
+-- Add update capability to source
+mock_source.update = function() end
+
+local nodes_upd = convert.handler_nodes(mock_handler_update, mock_result, {})
+local edit_node = nil
+for _, node in ipairs(nodes_upd) do
+  if node._children then
+    for _, child in ipairs(node._children) do
+      if child.id == "conn1" then
+        edit_node = child
+        break
+      end
+    end
+  end
+  if edit_node then break end
+end
+
+if not edit_node or not edit_node.action_2 then
+  fail("notif04_edit_node_not_found")
+  return
+end
+
+-- action_2 is edit; triggers float_prompt stub -> callback -> pcall -> error -> utils.log
+edit_node.action_2(function() end)
+
+local found_update_error = false
+for _, n in ipairs(notifications) do
+  if n.msg:find("Failed to update connection", 1, true) and n.level == vim.log.levels.ERROR then
+    if n.opts and n.opts.title == "nvim-dbee" then
+      found_update_error = true
+      break
+    end
+  end
+end
+
+if not found_update_error then
+  fail("notif04_update_error_not_surfaced: notifications=" .. vim.inspect(notifications))
+  return
+end
+
+-- NOTIF-04c: source_remove_connection failure
+clear_notifications()
+
+local mock_handler_delete = {
+  get_sources = function()
+    return { mock_source }
+  end,
+  source_get_connections = function()
+    return { { id = "conn2", name = "del-conn" } }
+  end,
+  source_remove_connection = function(self, source_id, conn_id)
+    error("delete forbidden")
+  end,
+}
+
+-- Add delete capability to source
+mock_source.delete = function() end
+
+-- Stub common to auto-confirm deletion
+package.loaded["dbee.ui.common"] = {
+  float_prompt = function(prompt, opts)
+    if opts and opts.callback then
+      opts.callback({ name = "test-conn", type = "postgres", url = "postgres://localhost/test" })
+    end
+  end,
+}
+
+-- Re-require convert to pick up the new common stub
+package.loaded["dbee.ui.drawer.convert"] = nil
+convert = require("dbee.ui.drawer.convert")
+
+local nodes_del = convert.handler_nodes(mock_handler_delete, mock_result, {})
+local del_node = nil
+for _, node in ipairs(nodes_del) do
+  if node._children then
+    for _, child in ipairs(node._children) do
+      if child.id == "conn2" then
+        del_node = child
+        break
+      end
+    end
+  end
+  if del_node then break end
+end
+
+if not del_node or not del_node.action_3 then
+  fail("notif04_delete_node_not_found")
+  return
+end
+
+-- action_3 is delete; provide a select stub that auto-confirms "Yes"
+del_node.action_3(function() end, function(opts)
+  if opts and opts.on_confirm then
+    opts.on_confirm("Yes")
+  end
+end)
+
+local found_delete_error = false
+for _, n in ipairs(notifications) do
+  if n.msg:find("Failed to delete connection", 1, true) and n.level == vim.log.levels.ERROR then
+    if n.opts and n.opts.title == "nvim-dbee" then
+      found_delete_error = true
+      break
+    end
+  end
+end
+
+if not found_delete_error then
+  fail("notif04_delete_error_not_surfaced: notifications=" .. vim.inspect(notifications))
+  return
+end
+
 -- ---------------------------------------------------------------------------
 -- Level mapping + title test (utils.log direct verification)
 -- ---------------------------------------------------------------------------

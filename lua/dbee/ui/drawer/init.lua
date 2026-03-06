@@ -172,10 +172,12 @@ function DrawerUI:on_structure_loaded(data)
   if self._manual_refresh_conns[data.conn_id] then
     -- Remove from expected set (drain approach -- prevents leak into later auto-loads)
     self._manual_refresh_conns[data.conn_id] = nil
-    -- Notify on success
-    if not data.error then
-      local ok_params, conn_params = pcall(self.handler.connection_get_params, self.handler, data.conn_id)
-      local name = (ok_params and conn_params and conn_params.name) or data.conn_id
+    local ok_params, conn_params = pcall(self.handler.connection_get_params, self.handler, data.conn_id)
+    local name = (ok_params and conn_params and conn_params.name) or data.conn_id
+    if data.error then
+      local reason = tostring(data.error):sub(1, 120)
+      utils.log("error", "Schema refresh failed: " .. name .. " (" .. reason .. ")")
+    else
       utils.log("info", "Schema loaded: " .. name)
     end
   end
@@ -440,13 +442,16 @@ function DrawerUI:get_actions()
 
   return {
     refresh = function()
-      -- Capture ONLY connection IDs that will actually be re-fetched:
-      -- cached AND currently expanded.
+      -- Capture expanded connection IDs that will emit structure_loaded.
+      -- Read from current tree nodes to avoid extra source scans here.
       local exp = expansion.get(self.tree)
       self._manual_refresh_conns = {}
-      for conn_id, _ in pairs(self.structure_cache) do
-        if exp[conn_id] then
-          self._manual_refresh_conns[conn_id] = true
+      for node_id, expanded in pairs(exp) do
+        if expanded then
+          local node = self.tree:get_node(node_id)
+          if node and node.type == "connection" then
+            self._manual_refresh_conns[node_id] = true
+          end
         end
       end
 

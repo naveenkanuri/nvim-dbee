@@ -55,12 +55,11 @@ function M.log(level, message, subtitle)
   end
 
   -- subtitle
+  local prefix = ""
   if subtitle then
-    subtitle = "[" .. subtitle .. "]:"
-  else
-    subtitle = ""
+    prefix = "[" .. subtitle .. "]: "
   end
-  vim.notify(subtitle .. " " .. message, l, { title = "nvim-dbee" })
+  vim.notify(prefix .. message, l, { title = "nvim-dbee" })
 end
 
 ---Trim leading and trailing whitespace from a value.

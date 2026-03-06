@@ -6,6 +6,10 @@ local common = require("dbee.ui.common")
 ---@param us number microseconds
 ---@return string
 local function format_duration(us)
+  us = tonumber(us) or 0
+  if us <= 0 then
+    return "0ms"
+  end
   local seconds = us / 1000000
   if seconds >= 60 then
     local minutes = math.floor(seconds / 60)
@@ -31,6 +35,7 @@ end
 ---@field private page_ammount integer number of pages in the current result set
 ---@field private total_rows integer total row count from last display_result
 ---@field private stop_progress fun() function that stops progress display
+---@field private _progress_running boolean whether progress display is active
 ---@field private progress_opts progress_config
 ---@field private window_options table<string, any> a table of window options.
 ---@field private buffer_options table<string, any> a table of buffer options.
@@ -539,7 +544,7 @@ function ResultUI:current_row_index()
   -- get the line and extract the line number
   local line = vim.api.nvim_buf_get_lines(self.bufnr, row - 1, row, true)[1] or ""
 
-  local index = line:match("%d+")
+  local index = tonumber(line:match("%d+"))
   if not index then
     error("couldn't retrieve current row number")
   end
@@ -573,7 +578,7 @@ function ResultUI:current_row_range()
   -- get the selected line and extract the line number
   local line = vim.api.nvim_buf_get_lines(self.bufnr, row - 1, row, true)[1] or ""
 
-  local index_start = line:match("%d+")
+  local index_start = tonumber(line:match("%d+"))
   if not index_start then
     error("couldn't retrieve start row number")
   end

@@ -274,7 +274,11 @@ package.loaded["nui.tree"] = setmetatable({}, {
     return {
       set_nodes = function() end,
       render = function() end,
-      get_node = function() end,
+      get_node = function(_, id)
+        if id == "c1" then
+          return { type = "connection" }
+        end
+      end,
       get_nodes = function()
         return {}
       end,
@@ -311,10 +315,11 @@ package.loaded["dbee.ui.drawer.convert"] = {
   end,
 }
 
--- Stub expansion module
+-- Stub expansion module with configurable return value
+local expansion_state = {}
 package.loaded["dbee.ui.drawer.expansion"] = {
   get = function()
-    return {}
+    return expansion_state
   end,
   set = function() end,
 }
@@ -332,6 +337,12 @@ package.loaded["dbee.ui.drawer"] = nil
 local DrawerUI = require("dbee.ui.drawer")
 
 -- Create a minimal DrawerUI-like object with the real on_structure_loaded method
+local mock_source = {
+  name = function() return "test-source" end,
+}
+local mock_connections = {
+  { id = "c1", name = "my-postgres-dev" },
+}
 local drawer_mock_handler = {
   register_event_listener = function() end,
   get_current_connection = function()
@@ -344,11 +355,12 @@ local drawer_mock_handler = {
     return { name = "my-postgres-dev" }
   end,
   get_sources = function()
-    return {}
+    return { mock_source }
   end,
   source_get_connections = function()
-    return {}
+    return mock_connections
   end,
+  connection_get_structure_async = function() end,
 }
 
 local drawer_mock_editor = {
@@ -392,13 +404,32 @@ drawer:on_structure_loaded({ conn_id = "c2", structures = {} })
 assert_true("schema_fallback_count", #notifications >= 1)
 assert_match("schema_fallback_msg", notifications[1].msg, "Schema loaded: c2")
 
--- 5e: Error in data -> no notification even if in manual set
+-- 5e: Error in data -> error notification for manual refresh (includes reason)
 clear_notifications()
 drawer._manual_refresh_conns = { c3 = true }
 drawer:on_structure_loaded({ conn_id = "c3", structures = {}, error = "connection failed" })
-assert_eq("schema_error_no_notif", #notifications, 0)
--- But c3 should still be drained
+assert_true("schema_error_notif_count", #notifications >= 1)
+assert_match("schema_error_notif_msg", notifications[1].msg, "Schema refresh failed")
+assert_match("schema_error_reason", notifications[1].msg, "connection failed")
+assert_eq("schema_error_notif_level", notifications[1].level, vim.log.levels.ERROR)
+-- c3 should still be drained
 assert_eq("schema_error_drained", drawer._manual_refresh_conns["c3"], nil)
+
+-- 5f: Integration test -- refresh() populates _manual_refresh_conns from expanded connections
+-- Simulate: c1 is expanded but NOT in structure_cache (still loading)
+expansion_state = { c1 = true }
+drawer.structure_cache = {}
+drawer:get_actions().refresh()
+-- refresh() should have tracked c1 via expanded connection enumeration
+assert_eq("refresh_tracks_expanded", drawer._manual_refresh_conns["c1"], true)
+
+-- Now simulate structure_loaded arriving -> should notify
+clear_notifications()
+drawer:on_structure_loaded({ conn_id = "c1", structures = {} })
+assert_true("refresh_expanded_notif_count", #notifications >= 1)
+assert_match("refresh_expanded_notif_msg", notifications[1].msg, "Schema loaded: my-postgres-dev")
+-- Reset expansion state
+expansion_state = {}
 
 print("WINBAR_SCHEMA_REFRESH_OK=true")
 
