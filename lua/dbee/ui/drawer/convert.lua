@@ -170,7 +170,10 @@ local function handler_real_nodes(handler, result, structure_cache)
                   url = res.url,
                   type = res.type,
                 }
-                pcall(handler.source_add_connection, handler, source_id, spec)
+                local ok, err = pcall(handler.source_add_connection, handler, source_id, spec)
+                if not ok then
+                  utils.log("error", "Failed to add connection: " .. tostring(err))
+                end
                 cb()
               end,
             })
@@ -224,7 +227,10 @@ local function handler_real_nodes(handler, result, structure_cache)
                 url = res.url,
                 type = res.type,
               }
-              pcall(handler.source_update_connection, handler, source_id, conn.id, spec)
+              local ok, err = pcall(handler.source_update_connection, handler, source_id, conn.id, spec)
+              if not ok then
+                utils.log("error", "Failed to update connection: " .. tostring(err))
+              end
               cb()
             end,
           })
@@ -241,7 +247,10 @@ local function handler_real_nodes(handler, result, structure_cache)
             items = { "Yes", "No" },
             on_confirm = function(selection)
               if selection == "Yes" then
-                pcall(handler.source_remove_connection, handler, source_id, conn.id)
+                local ok, err = pcall(handler.source_remove_connection, handler, source_id, conn.id)
+                if not ok then
+                  utils.log("error", "Failed to delete connection: " .. tostring(err))
+                end
               end
               cb()
             end,
