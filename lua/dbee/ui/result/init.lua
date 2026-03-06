@@ -2,6 +2,22 @@ local utils = require("dbee.utils")
 local progress = require("dbee.ui.result.progress")
 local common = require("dbee.ui.common")
 
+---Format microseconds into adaptive human-readable duration.
+---@param us number microseconds
+---@return string
+local function format_duration(us)
+  local seconds = us / 1000000
+  if seconds >= 60 then
+    local minutes = math.floor(seconds / 60)
+    local remaining = seconds - (minutes * 60)
+    return string.format("%dm %ds", minutes, math.floor(remaining))
+  elseif seconds >= 1 then
+    return string.format("%.2fs", seconds)
+  else
+    return string.format("%dms", math.floor(seconds * 1000))
+  end
+end
+
 -- ResultUI represents the part of ui with displayed results
 ---@class ResultUI
 ---@field private handler Handler
@@ -13,6 +29,7 @@ local common = require("dbee.ui.common")
 ---@field private mappings key_mapping[]
 ---@field private page_index integer index of the current page
 ---@field private page_ammount integer number of pages in the current result set
+---@field private total_rows integer total row count from last display_result
 ---@field private stop_progress fun() function that stops progress display
 ---@field private progress_opts progress_config
 ---@field private window_options table<string, any> a table of window options.
@@ -35,6 +52,7 @@ function ResultUI:new(handler, opts)
     page_size = opts.page_size or 100,
     page_index = 0,
     page_ammount = 0,
+    total_rows = 0,
     focus_result = opts.focus_result,
     mappings = opts.mappings or {},
     stop_progress = function() end,
@@ -87,11 +105,19 @@ function ResultUI:on_call_state_changed(data)
 
   -- perform action based on the state
   if call.state == "executing" or call.state == "retrieving" then
-    -- Keep spinner running during both phases to avoid blocking
-    -- the main thread with synchronous RPC during row retrieval.
+    -- Update winbar to reflect current state (must happen on EVERY transition,
+    -- not just the first entry when _progress_running is false)
+    if self:has_window() then
+      if call.state == "executing" then
+        vim.api.nvim_set_option_value("winbar", "Executing...", { win = self.winid })
+      else
+        vim.api.nvim_set_option_value("winbar", "Retrieving...", { win = self.winid })
+      end
+    end
+
+    -- Only start the progress spinner once per call lifecycle
     if not self._progress_running then
       self.stop_progress()
-      self:set_default_result_window()
       self:display_progress()
       self._progress_running = true
     end
@@ -139,7 +165,7 @@ end
 ---@private
 function ResultUI:set_default_result_window()
   if self:has_window() then
-    vim.api.nvim_win_set_option(self.winid, "winbar", "Results")
+    vim.api.nvim_set_option_value("winbar", "Results", { win = self.winid })
   end
 end
 
@@ -246,6 +272,7 @@ function ResultUI:display_result(page)
 
   -- call go function
   local length = self.handler:call_display_result(self.current_call.id, self.bufnr, from, to)
+  self.total_rows = length
 
   -- adjust page ammount
   self.page_ammount = math.floor(length / self.page_size)
@@ -253,16 +280,12 @@ function ResultUI:display_result(page)
     self.page_ammount = self.page_ammount - 1
   end
 
-  -- convert from microseconds to seconds
-  local seconds = self.current_call.time_taken_us / 1000000
-
   -- set winbar status
   if self:has_window() then
-    vim.api.nvim_win_set_option(
-      self.winid,
-      "winbar",
-      string.format("%d/%d (%d)%%=Took %.3fs", page + 1, self.page_ammount + 1, length, seconds)
-    )
+    vim.api.nvim_set_option_value("winbar",
+      string.format("Page %d/%d | %d rows | %s",
+        page + 1, self.page_ammount + 1, length, format_duration(self.current_call.time_taken_us)),
+      { win = self.winid })
   end
   -- set focus if window exists
   self:focus_result_window()
@@ -314,7 +337,7 @@ function ResultUI:get_actions()
       if self.current_call then
         local ok, err = self.handler:call_cancel(self.current_call.id)
         if ok == false and err then
-          vim.notify(err, vim.log.levels.WARN)
+          utils.log("warn", err)
         end
       end
     end,
@@ -361,12 +384,15 @@ function ResultUI:restore_call(call)
   end
 
   if call.state == "executing" then
-    self:set_default_result_window()
-    -- Calculate elapsed time so the timer doesn't restart from 0
+    if self:has_window() then
+      vim.api.nvim_set_option_value("winbar", "Executing...", { win = self.winid })
+    end
     local elapsed = elapsed_since_call_start_us(call.timestamp_us)
     self:display_progress(elapsed)
   elseif call.state == "retrieving" then
-    self:set_default_result_window()
+    if self:has_window() then
+      vim.api.nvim_set_option_value("winbar", "Retrieving...", { win = self.winid })
+    end
     local elapsed = elapsed_since_call_start_us(call.timestamp_us)
     self:display_progress(elapsed)
   elseif call.state == "archived" then
@@ -426,48 +452,60 @@ end
 ---@param register string
 function ResultUI:store_current_wrapper(format, register)
   if not self.current_call then
-    error("no call set to result")
+    utils.log("warn", "No results to yank")
+    return
   end
-  local index = self:current_row_index()
+  local ok_idx, index = pcall(self.current_row_index, self)
+  if not ok_idx then
+    utils.log("warn", "Could not determine current row")
+    return
+  end
 
-  -- indexes in table start with 1, but in go they start with 0,
-  -- to correct this, we subtract 1 from sindex and eindex.
-  -- Since range select [:] in go is exclusive for the upper bound, we additionally add 1 to eindex
   index = index - 1
   if index <= 0 then
     index = 0
   end
 
-  self.handler:call_store_result(
-    self.current_call.id,
-    format,
-    "yank",
-    { from = index, to = index + 1, extra_arg = register }
-  )
+  local ok, err = pcall(self.handler.call_store_result, self.handler,
+    self.current_call.id, format, "yank",
+    { from = index, to = index + 1, extra_arg = register })
+  if not ok then
+    utils.log("error", "Yank failed: " .. tostring(err))
+    return
+  end
+  utils.log("info", "Yanked 1 row (" .. string.upper(format) .. ")")
 end
 
--- wrapper for storing the current visualy selected rows
+-- wrapper for storing the current visually selected rows
 ---@private
 ---@param format string
 ---@param register string
 function ResultUI:store_selection_wrapper(format, register)
   if not self.current_call then
-    error("no call set to result")
+    utils.log("warn", "No results to yank")
+    return
   end
-  local sindex, eindex = self:current_row_range()
+  local ok_range, sindex, eindex = pcall(self.current_row_range, self)
+  if not ok_range then
+    utils.log("warn", "Could not determine selected rows")
+    return
+  end
 
-  -- see above comment
   sindex = sindex - 1
   if sindex <= 0 then
     sindex = 0
   end
 
-  self.handler:call_store_result(
-    self.current_call.id,
-    format,
-    "yank",
-    { from = sindex, to = eindex, extra_arg = register }
-  )
+  local row_count = eindex - sindex
+
+  local ok, err = pcall(self.handler.call_store_result, self.handler,
+    self.current_call.id, format, "yank",
+    { from = sindex, to = eindex, extra_arg = register })
+  if not ok then
+    utils.log("error", "Yank failed: " .. tostring(err))
+    return
+  end
+  utils.log("info", string.format("Yanked %d row%s (%s)", row_count, row_count == 1 and "" or "s", string.upper(format)))
 end
 
 -- wrapper for storing all rows
@@ -476,9 +514,17 @@ end
 ---@param register string
 function ResultUI:store_all_wrapper(format, register)
   if not self.current_call then
-    error("no call set to result")
+    utils.log("warn", "No results to yank")
+    return
   end
-  self.handler:call_store_result(self.current_call.id, format, "yank", { extra_arg = register })
+  local ok, err = pcall(self.handler.call_store_result, self.handler,
+    self.current_call.id, format, "yank", { extra_arg = register })
+  if not ok then
+    utils.log("error", "Yank failed: " .. tostring(err))
+    return
+  end
+  local count = self.total_rows or 0
+  utils.log("info", string.format("Yanked %d row%s (%s)", count, count == 1 and "" or "s", string.upper(format)))
 end
 
 ---@private
