@@ -453,4 +453,24 @@ function M.query_under_cursor(bufnr, opts)
   return query:gsub(";%s*$", ""), start_row, end_row
 end
 
+---Format microseconds into adaptive human-readable duration.
+---@param us number microseconds
+---@return string
+function M.format_duration(us)
+  us = tonumber(us) or 0
+  if us <= 0 then
+    return "0ms"
+  end
+  local seconds = us / 1000000
+  if seconds >= 60 then
+    local minutes = math.floor(seconds / 60)
+    local remaining = seconds - (minutes * 60)
+    return string.format("%dm %ds", minutes, math.floor(remaining))
+  elseif seconds >= 1 then
+    return string.format("%.2fs", seconds)
+  else
+    return string.format("%dms", math.floor(seconds * 1000))
+  end
+end
+
 return M
