@@ -308,6 +308,8 @@ config.default = {
       { key = "<CR>", mode = "", action = "show_result" },
       -- cancel the currently selected call (if its still executing)
       { key = "<C-c>", mode = "", action = "cancel_call" },
+      -- yank the full query text of the selected call
+      { key = "yy", mode = "n", action = "yank_query" },
     },
 
     -- candies (icons and highlights)

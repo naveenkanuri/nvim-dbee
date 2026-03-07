@@ -3,6 +3,9 @@ local NuiTree = require("nui.tree")
 local utils = require("dbee.utils")
 local common = require("dbee.ui.common")
 
+local QUERY_WIDTH = 30   -- Reduced from 40 to fit duration + timestamp columns
+local DURATION_WIDTH = 8  -- Enough for "12m 34s" or "999ms"
+
 -- CallLogUI is connection's call history.
 ---@class CallLogUI
 ---@field private result ResultUI
@@ -156,9 +159,31 @@ function CallLogUI:create_tree(bufnr)
         state_preview = call_state_initials(call.state)
       end
 
+      -- Duration column
+      local is_running = call.state == "executing" or call.state == "retrieving"
+      local duration_text = is_running and "..." or utils.format_duration(call.time_taken_us)
+
+      -- Timestamp column (smart date: HH:MM today, MM-DD HH:MM for older)
+      local ts_text = ""
+      local ts_us = tonumber(call.timestamp_us) or 0
+      if ts_us > 0 then
+        local ts = math.floor(ts_us / 1000000)
+        local today = os.date("%Y-%m-%d")
+        local call_date = os.date("%Y-%m-%d", ts)
+        if call_date == today then
+          ts_text = os.date("%H:%M", ts)
+        else
+          ts_text = os.date("%m-%d %H:%M", ts)
+        end
+      end
+
       line:append(make_length(state_preview, 3), candy.icon_highlight)
       line:append(" ┃ ", "NonText")
-      line:append(make_length(string.gsub(call.query, "\n", " "), 40), candy.text_highlight)
+      line:append(make_length(string.gsub(call.query, "\n", " "), QUERY_WIDTH), candy.text_highlight)
+      line:append(" | ", "NonText")
+      line:append(make_length(duration_text, DURATION_WIDTH), "Comment")
+      line:append(" | ", "NonText")
+      line:append(ts_text, "Comment")
 
       return line
     end,
@@ -199,8 +224,26 @@ function CallLogUI:get_actions()
 
       local ok, err = self.handler:call_cancel(call.id)
       if ok == false and err then
-        vim.notify(err, vim.log.levels.WARN)
+        utils.log("warn", err)
       end
+    end,
+    yank_query = function()
+      local node = self.tree:get_node()
+      if not node or not node.call then
+        return
+      end
+      local query = node.call.query
+      if not query or query == "" then
+        utils.log("warn", "No query to yank")
+        return
+      end
+      local ok, err = pcall(vim.fn.setreg, '"', query)
+      if not ok then
+        utils.log("error", "Yank failed: " .. tostring(err))
+        return
+      end
+      pcall(vim.fn.setreg, '+', query)
+      utils.log("info", string.format("Yanked query (%d chars)", vim.fn.strchars(query)))
     end,
   }
 end
