@@ -728,6 +728,31 @@ function dbee.execute_context(opts)
   end)
 end
 
+---Re-run a query from call log history on the currently selected connection.
+---@param query string the SQL query to re-execute
+function dbee.rerun_query(query)
+  local core_ready, core_err = ensure_core_available()
+  if not core_ready then
+    utils.log("warn", core_err or "dbee core not loaded")
+    return
+  end
+  local sql = utils.trim(query)
+  if sql == "" then
+    utils.log("warn", "No query to re-run")
+    return
+  end
+  local conn = api.core.get_current_connection()
+  if not conn then
+    utils.log("warn", "No connection selected. Select one from the drawer, then run again.")
+    return
+  end
+  execute_with_resolved_variables_async(conn, sql, {}, function(_, err)
+    if err then
+      utils.log("warn", err)
+    end
+  end)
+end
+
 ---Compile object/query contextually from current buffer.
 ---In normal mode compiles the statement under cursor (SQL filetype only).
 ---If opts.query is provided, that query is compiled directly.

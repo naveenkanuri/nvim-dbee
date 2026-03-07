@@ -245,6 +245,20 @@ function CallLogUI:get_actions()
       pcall(vim.fn.setreg, '+', query)
       utils.log("info", string.format("Yanked query (%d chars)", vim.fn.strchars(query)))
     end,
+    rerun_query = function()
+      local node = self.tree:get_node()
+      if not node or not node.call then
+        return
+      end
+      local query = utils.trim(node.call.query or "")
+      if query == "" then
+        utils.log("warn", "No query to re-run")
+        return
+      end
+      -- Lazy require to avoid circular dependency (dbee -> api -> state -> call_log -> dbee)
+      local dbee_mod = require("dbee")
+      dbee_mod.rerun_query(query)
+    end,
   }
 end
 

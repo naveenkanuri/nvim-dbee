@@ -310,6 +310,8 @@ config.default = {
       { key = "<C-c>", mode = "", action = "cancel_call" },
       -- yank the full query text of the selected call
       { key = "yy", mode = "n", action = "yank_query" },
+      -- re-run the selected query on the current connection
+      { key = "R", mode = "n", action = "rerun_query" },
     },
 
     -- candies (icons and highlights)
