@@ -23,8 +23,9 @@ local CallLogUI = {}
 ---@param handler Handler
 ---@param result ResultUI
 ---@param opts call_log_config
+---@param rerun_fn? fun(query: string) callback to re-run a query (avoids circular dependency on dbee)
 ---@return CallLogUI
-function CallLogUI:new(handler, result, opts)
+function CallLogUI:new(handler, result, opts, rerun_fn)
   opts = opts or {}
 
   if not handler then
@@ -43,6 +44,8 @@ function CallLogUI:new(handler, result, opts)
   local o = {
     handler = handler,
     result = result,
+    rerun_fn = rerun_fn,
+    _today = os.date("%Y-%m-%d"),
     candies = candies,
     hover_close = function() end,
     current_connection_id = (handler:get_current_connection() or {}).id,
@@ -105,7 +108,7 @@ end
 local function make_length(str, len)
   local orig_len = vim.fn.strchars(str)
   if orig_len > len then
-    return str:sub(1, len - 1) .. "…"
+    return vim.fn.strcharpart(str, 0, len - 1) .. "…"
   elseif orig_len < len then
     return str .. string.rep(" ", len - orig_len)
   end
@@ -168,9 +171,8 @@ function CallLogUI:create_tree(bufnr)
       local ts_us = tonumber(call.timestamp_us) or 0
       if ts_us > 0 then
         local ts = math.floor(ts_us / 1000000)
-        local today = os.date("%Y-%m-%d")
         local call_date = os.date("%Y-%m-%d", ts)
-        if call_date == today then
+        if call_date == self._today then
           ts_text = os.date("%H:%M", ts)
         else
           ts_text = os.date("%m-%d %H:%M", ts)
@@ -242,8 +244,15 @@ function CallLogUI:get_actions()
         utils.log("error", "Yank failed: " .. tostring(err))
         return
       end
+      -- System clipboard is best-effort — round-trip verify
       pcall(vim.fn.setreg, '+', query)
-      utils.log("info", string.format("Yanked query (%d chars)", vim.fn.strchars(query)))
+      local ok_get_clip, clip_value = pcall(vim.fn.getreg, '+')
+      local clip_ok = ok_get_clip and clip_value == query
+      local msg = string.format("Yanked query (%d chars)", vim.fn.strchars(query))
+      if not clip_ok then
+        msg = msg .. " (clipboard unavailable)"
+      end
+      utils.log("info", msg)
     end,
     rerun_query = function()
       local node = self.tree:get_node()
@@ -255,9 +264,11 @@ function CallLogUI:get_actions()
         utils.log("warn", "No query to re-run")
         return
       end
-      -- Lazy require to avoid circular dependency (dbee -> api -> state -> call_log -> dbee)
-      local dbee_mod = require("dbee")
-      dbee_mod.rerun_query(query)
+      if self.rerun_fn then
+        self.rerun_fn(query)
+      else
+        utils.log("warn", "Re-run not available")
+      end
     end,
   }
 end
@@ -276,6 +287,7 @@ function CallLogUI:refresh()
   if not self.current_connection_id then
     return
   end
+  self._today = os.date("%Y-%m-%d")
   local calls = self.handler:connection_get_calls(self.current_connection_id)
 
   -- dummy node if no calls
@@ -342,7 +354,9 @@ function CallLogUI:configure_preview(bufnr)
         { key = "query", value = string.gsub(call.query, "\n", " ") },
         { key = "state", value = call.state },
         { key = "time_taken", value = string.format("%.3f seconds", (call.time_taken_us or 0) / 1000000) },
-        { key = "timestamp", value = tostring(os.date("%c", (call.timestamp_us or 0) / 1000000)) },
+        { key = "timestamp", value = (tonumber(call.timestamp_us) or 0) > 0
+            and tostring(os.date("%c", math.floor(call.timestamp_us / 1000000)))
+            or "N/A" },
       }
 
       if call.error and call.error ~= "" then

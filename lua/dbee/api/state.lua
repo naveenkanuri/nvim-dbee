@@ -62,7 +62,10 @@ local function setup_ui()
 
   -- initiate all UI elements
   m.result = ResultUI:new(m.handler, m.config.result)
-  m.call_log = CallLogUI:new(m.handler, m.result, m.config.call_log)
+  m.call_log = CallLogUI:new(m.handler, m.result, m.config.call_log, function(query)
+    -- Deferred require to avoid circular dependency (state -> call_log -> dbee)
+    require("dbee").rerun_query(query)
+  end)
   m.editor = EditorUI:new(m.handler, m.result, m.config.editor)
   m.drawer = DrawerUI:new(m.handler, m.editor, m.result, m.config.drawer)
 

@@ -52,6 +52,23 @@ local function clear_notifications()
 end
 
 -- ---------------------------------------------------------------------------
+-- Stub clipboard provider for deterministic + register in headless
+-- ---------------------------------------------------------------------------
+
+local clipboard_store = {}
+vim.g.clipboard = {
+  name = "test-clipboard",
+  copy = {
+    ["+"] = function(lines) clipboard_store["+"] = table.concat(lines, "\n") end,
+    ["*"] = function(lines) clipboard_store["*"] = table.concat(lines, "\n") end,
+  },
+  paste = {
+    ["+"] = function() return { clipboard_store["+"] or "" } end,
+    ["*"] = function() return { clipboard_store["*"] or "" } end,
+  },
+}
+
+-- ---------------------------------------------------------------------------
 -- Stub dependencies before requiring call_log
 -- ---------------------------------------------------------------------------
 
@@ -172,12 +189,18 @@ local mock_result = {
   restore_call = function() end,
 }
 
+-- Capture for rerun_query action tests
+local rerun_captured_query = nil
+local mock_rerun_fn = function(q)
+  rerun_captured_query = q
+end
+
 -- Create a CallLogUI instance
 local call_log = CallLogUI:new(mock_handler, mock_result, {
   mappings = {},
   disable_candies = true,
   candies = {},
-})
+}, mock_rerun_fn)
 
 -- Get the actions table via do_action method wrapper
 -- (get_actions is private but do_action exposes it)
@@ -213,7 +236,7 @@ local line_b1 = tree_prepare_node(node_b1)
 -- Find duration segment containing "35ms"
 local found_dur_35ms = false
 local found_time_today = false
-local today_hhmm = os.date("%H:%M")
+local today_hhmm = os.date("%H:%M", math.floor(now_us / 1000000))
 for _, seg in ipairs(line_b1._segments) do
   if type(seg.text) == "string" and seg.text:find("35ms", 1, true) then
     found_dur_35ms = true
@@ -317,13 +340,8 @@ print("CLOG_YANK_QUERY_OK=true")
 -- Group D: CLOG-02 - Re-run query behavior
 -- ---------------------------------------------------------------------------
 
--- D1: Dispatch from call_log action
-local rerun_captured_query = nil
-package.loaded["dbee"] = {
-  rerun_query = function(q)
-    rerun_captured_query = q
-  end,
-}
+-- D1: Dispatch from call_log action (rerun_fn injected via constructor)
+rerun_captured_query = nil
 
 clear_notifications()
 tree_current_node = { call = { query = "SELECT * FROM orders" } }
@@ -522,7 +540,7 @@ local call_log_e = CallLogUI:new(mock_handler_e, mock_result, {
   mappings = {},
   disable_candies = true,
   candies = {},
-})
+}, function() end)
 
 -- Get fresh tree reference and set current node
 local actions_e = call_log_e:get_actions()
