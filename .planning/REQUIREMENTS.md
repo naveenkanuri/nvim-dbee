@@ -35,7 +35,7 @@ Requirements for this milestone. Each maps to roadmap phases.
 
 ### Adapter Features
 
-- [ ] **ADPT-01**: User can execute Explain Plan on current query with per-adapter EXPLAIN syntax wrapping
+- [x] **ADPT-01**: User can execute Explain Plan on current query with per-adapter EXPLAIN syntax wrapping
 - [ ] **ADPT-02**: User sees inline error diagnostics (line/column markers) for all adapters, not just Oracle
 
 ### Drawer
@@ -93,7 +93,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CLOG-01 | Phase 2 | Complete |
 | CLOG-02 | Phase 2 | Complete |
 | RSLT-01 | Phase 3 | Complete |
-| ADPT-01 | Phase 3 | Pending |
+| ADPT-01 | Phase 3 | Complete |
 | ADPT-02 | Phase 5 | Pending |
 | DRAW-01 | Phase 4 | Pending |
 | CONN-01 | Phase 5 | Pending |
