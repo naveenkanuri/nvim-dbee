@@ -64,6 +64,8 @@ jobs:
           - check_notifications.lua
           - check_winbar_format.lua
           - check_call_log_display.lua
+          - check_note_cycling.lua
+          - check_result_export.lua
     steps:
       - uses: actions/checkout@v4
       - name: Install Neovim

@@ -273,6 +273,8 @@ config.default = {
 
       -- cancel current call execution
       { key = "<C-c>", mode = "", action = "cancel_call" },
+      -- export results to file
+      { key = "ge", mode = "n", action = "export_result" },
     },
   },
 

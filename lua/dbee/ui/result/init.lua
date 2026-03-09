@@ -328,6 +328,58 @@ function ResultUI:get_actions()
         end
       end
     end,
+
+    -- export current result set to a CSV or JSON file
+    export_result = function()
+      if not self.current_call then
+        utils.log("warn", "No results to export")
+        return
+      end
+
+      -- Capture state before async prompts to avoid race conditions
+      local call_id = self.current_call.id
+      local row_count = self.total_rows or 0
+
+      vim.ui.input({ prompt = "Export to: ", default = vim.fn.getcwd() .. "/result.csv" }, function(path)
+        if not path or path == "" then
+          return
+        end
+
+        -- Infer format from extension
+        local ext = vim.fn.fnamemodify(path, ":e"):lower()
+        local format_map = { csv = "csv", json = "json" }
+        local format = format_map[ext]
+        if not format then
+          utils.log("warn", "Unsupported format '." .. ext .. "'. Use .csv or .json")
+          return
+        end
+
+        local function do_export()
+          -- Large export warning
+          if row_count > 10000 then
+            utils.log("info", string.format("Exporting %d rows - this may take a moment...", row_count))
+          end
+
+          local ok, err = pcall(self.handler.call_store_result, self.handler, call_id, format, "file", { extra_arg = path })
+          if not ok then
+            utils.log("error", "Export failed: " .. tostring(err))
+            return
+          end
+          utils.log("info", string.format("Exported %d rows to %s", row_count, path))
+        end
+
+        -- Overwrite guard
+        if vim.fn.filereadable(path) == 1 then
+          vim.ui.select({ "No", "Yes" }, { prompt = "File exists. Overwrite?" }, function(choice)
+            if choice == "Yes" then
+              do_export()
+            end
+          end)
+        else
+          do_export()
+        end
+      end)
+    end,
   }
 end
 
