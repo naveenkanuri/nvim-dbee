@@ -30,6 +30,10 @@ local terminal_states = {
 ---@type { canceled: boolean, current_call_id: string?, cancel_sent_call_id: string? }|nil
 local active_script_run = nil
 
+-- Oracle explain plan singleton listener state
+local explain_oracle_pending = {} -- [step1_call_id] = { conn_id, timer }
+local explain_oracle_listener_registered = false
+
 local disconnected_error_states = {
   executing_failed = true,
   retrieving_failed = true,
@@ -651,6 +655,44 @@ function dbee.pick_history()
   })
 end
 
+--- Extract query from context: explicit opts.query, visual selection, or query under cursor.
+--- Shared helper for execute_context and explain_plan (DRY).
+---@param conn { type: string }
+---@param opts? { query?: string, is_visual?: boolean }
+---@return string query (trimmed, may be empty)
+local function extract_query_from_context(conn, opts)
+  opts = opts or {}
+
+  -- 1) Explicit query override
+  local query = utils.trim(opts.query)
+  if query ~= "" then
+    return query
+  end
+
+  -- 2) Explicit is_visual flag (e.g. from explain_plan_visual action where
+  --    mode has already exited visual by the time the action fires)
+  if opts.is_visual then
+    local srow, scol, erow, ecol = utils.visual_selection()
+    local selection = vim.api.nvim_buf_get_text(0, srow, scol, erow, ecol, {})
+    return utils.trim(table.concat(selection, "\n"))
+  end
+
+  -- 3) Runtime visual-mode detection (preserves existing execute_context behavior
+  --    for callers like dbee.actions() picker while in visual mode)
+  local mode = vim.api.nvim_get_mode().mode
+  if mode:match("^[vV\22]") then
+    local srow, scol, erow, ecol = utils.visual_selection()
+    local selection = vim.api.nvim_buf_get_text(0, srow, scol, erow, ecol, {})
+    return utils.trim(table.concat(selection, "\n"))
+  end
+
+  -- 4) Query under cursor
+  local under_cursor = utils.query_under_cursor(vim.api.nvim_get_current_buf(), {
+    adapter_type = conn.type,
+  })
+  return utils.trim(under_cursor)
+end
+
 ---Run SQL contextually from current buffer.
 ---In visual mode runs the selection.
 ---In normal mode runs the statement under cursor (SQL filetype only).
@@ -701,20 +743,7 @@ function dbee.execute_context(opts)
     return
   end
 
-  local query = utils.trim(opts.query)
-  if query == "" then
-    local mode = vim.api.nvim_get_mode().mode
-    if mode:match("^[vV\22]") then
-      local srow, scol, erow, ecol = utils.visual_selection()
-      local selection = vim.api.nvim_buf_get_text(0, srow, scol, erow, ecol, {})
-      query = utils.trim(table.concat(selection, "\n"))
-    else
-      local under_cursor = utils.query_under_cursor(vim.api.nvim_get_current_buf(), {
-        adapter_type = conn.type,
-      })
-      query = utils.trim(under_cursor)
-    end
-  end
+  local query = extract_query_from_context(conn, opts)
 
   if query == "" then
     utils.log("warn", "No SQL found at cursor. Place cursor on a query and try again.")
@@ -751,6 +780,140 @@ function dbee.rerun_query(query)
       utils.log("warn", err)
     end
   end)
+end
+
+---@private
+local function stop_timeout_timer(timer)
+  if not timer then
+    return
+  end
+  pcall(function()
+    if timer.stop then
+      timer:stop()
+    end
+    if timer.close then
+      timer:close()
+    end
+  end)
+end
+
+---@private
+local function ensure_oracle_explain_listener()
+  if explain_oracle_listener_registered then
+    return
+  end
+  explain_oracle_listener_registered = true
+  api.core.register_event_listener("call_state_changed", function(data)
+    if not data or not data.call or not data.call.id then
+      return
+    end
+    local pending = explain_oracle_pending[data.call.id]
+    if not pending then
+      return
+    end
+    local state = data.call.state
+    if not terminal_states[state] then
+      return -- keep timer running until terminal
+    end
+
+    stop_timeout_timer(pending.timer)
+    explain_oracle_pending[data.call.id] = nil
+
+    if state ~= "archived" then
+      utils.log("warn", "Explain plan failed (step 1): " .. (data.call.error or state))
+      return
+    end
+
+    local ok2, step2_call = pcall(api.core.connection_execute, pending.conn_id, "SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY)")
+    if not ok2 then
+      utils.log("warn", "Explain plan failed (step 2): " .. tostring(step2_call))
+      return
+    end
+    api.ui.result_set_call(step2_call)
+    dbee.open()
+  end)
+end
+
+local explain_supported_adapters = {
+  postgres = true,
+  mysql = true,
+  sqlite = true,
+  oracle = true,
+}
+
+---Execute an explain plan for the query under cursor or visual selection.
+---Wraps the query with adapter-specific EXPLAIN syntax.
+---Oracle uses async two-step: EXPLAIN PLAN FOR + SELECT FROM DBMS_XPLAN.DISPLAY.
+---Known limitation: bind variables (:var) are NOT resolved for explain plan.
+---@param opts? { query?: string, is_visual?: boolean }
+function dbee.explain_plan(opts)
+  opts = opts or {}
+
+  local core_ready, core_err = ensure_core_available()
+  if not core_ready then
+    utils.log("warn", core_err or "dbee core not loaded")
+    return
+  end
+
+  local conn = api.core.get_current_connection()
+  if not conn then
+    utils.log("warn", "No connection selected. Select one from the drawer, then run again.")
+    return
+  end
+
+  local query = extract_query_from_context(conn, opts)
+
+  if query == "" then
+    utils.log("warn", "No SQL found at cursor. Place cursor on a query and try again.")
+    return
+  end
+
+  local adapter = conn.type:lower()
+
+  local wrappers = {
+    postgres = function(q) return "EXPLAIN " .. q end,
+    mysql = function(q) return "EXPLAIN " .. q end,
+    sqlite = function(q) return "EXPLAIN QUERY PLAN " .. q end,
+  }
+
+  if adapter == "oracle" then
+    ensure_oracle_explain_listener()
+
+    local step1 = "EXPLAIN PLAN FOR " .. query
+    local ok1, step1_call = pcall(api.core.connection_execute, conn.id, step1)
+    if not ok1 then
+      utils.log("warn", "Explain plan failed: " .. tostring(step1_call))
+      return
+    end
+
+    local step1_id = step1_call.id
+    local timeout_timer = vim.defer_fn(function()
+      if explain_oracle_pending[step1_id] then
+        explain_oracle_pending[step1_id] = nil
+        utils.log("warn", "Explain plan timed out (step 1 took >10s)")
+      end
+    end, 10000)
+    explain_oracle_pending[step1_id] = {
+      conn_id = conn.id,
+      timer = timeout_timer,
+    }
+    return
+  end
+
+  local wrapper = wrappers[adapter]
+  if not wrapper then
+    utils.log("warn", "Explain Plan not supported for " .. conn.type)
+    return
+  end
+
+  local explain_query = wrapper(query)
+  local ok, call = pcall(api.core.connection_execute, conn.id, explain_query)
+  if not ok then
+    utils.log("warn", "Explain plan failed: " .. tostring(call))
+    return
+  end
+  api.ui.result_set_call(call)
+  dbee.open()
 end
 
 ---Compile object/query contextually from current buffer.
@@ -1115,6 +1278,24 @@ function dbee.actions(opts)
         if err then
           utils.log("warn", err)
         end
+      end,
+    })
+  end
+
+  if current_conn and explain_supported_adapters[current_conn.type:lower()] then
+    -- Insert after "Execute Script" (or after "Compile Object" if present)
+    local insert_idx = 3
+    for idx, action in ipairs(actions) do
+      if action.id == "execute_script" then
+        insert_idx = idx + 1
+        break
+      end
+    end
+    table.insert(actions, insert_idx, {
+      id = "explain_plan",
+      label = "Explain Plan",
+      run = function()
+        dbee.explain_plan()
       end,
     })
   end
