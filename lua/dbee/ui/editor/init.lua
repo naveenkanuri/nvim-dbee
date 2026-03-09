@@ -518,6 +518,60 @@ function EditorUI:get_actions()
         end)
       end)
     end,
+    -- cycle to next note within current namespace
+    note_next = function()
+      if not self.current_note_id then
+        return
+      end
+      local note, namespace = self:search_note(self.current_note_id)
+      if not note or namespace == "" then
+        return
+      end
+      local notes = self:namespace_get_notes(namespace)
+      if #notes <= 1 then
+        return
+      end
+      local current_idx = 0
+      for i, n in ipairs(notes) do
+        if n.id == self.current_note_id then
+          current_idx = i
+          break
+        end
+      end
+      if current_idx == 0 then
+        return
+      end
+      local next_idx = current_idx % #notes + 1
+      self:set_current_note(notes[next_idx].id)
+    end,
+
+    -- cycle to previous note within current namespace
+    note_prev = function()
+      if not self.current_note_id then
+        return
+      end
+      local note, namespace = self:search_note(self.current_note_id)
+      if not note or namespace == "" then
+        return
+      end
+      local notes = self:namespace_get_notes(namespace)
+      if #notes <= 1 then
+        return
+      end
+      local current_idx = 0
+      for i, n in ipairs(notes) do
+        if n.id == self.current_note_id then
+          current_idx = i
+          break
+        end
+      end
+      if current_idx == 0 then
+        return
+      end
+      local prev_idx = (current_idx - 2) % #notes + 1
+      self:set_current_note(notes[prev_idx].id)
+    end,
+
     run_under_cursor = function()
       local bufnr = vim.api.nvim_get_current_buf()
       local conn = self.handler:get_current_connection()

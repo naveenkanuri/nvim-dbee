@@ -293,6 +293,10 @@ config.default = {
       { key = "BB", mode = "n", action = "run_file" },
       -- run what's under the cursor to the next newline
       { key = "<CR>", mode = "n", action = "run_under_cursor" },
+      -- cycle to next note
+      { key = "]n", mode = "n", action = "note_next" },
+      -- cycle to previous note
+      { key = "[n", mode = "n", action = "note_prev" },
     },
   },
 
