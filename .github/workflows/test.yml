@@ -48,6 +48,7 @@ jobs:
           - check_execute_script.lua
           - check_editor_variables.lua
           - check_editor_error_jump.lua
+          - check_explain_plan.lua
           - check_call_cancel_retry.lua
           - check_editor_call_routing.lua
           - check_events_dispatch_resilience.lua

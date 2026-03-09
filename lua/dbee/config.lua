@@ -299,6 +299,10 @@ config.default = {
       { key = "]n", mode = "n", action = "note_next" },
       -- cycle to previous note
       { key = "[n", mode = "n", action = "note_prev" },
+      -- explain plan (normal mode)
+      { key = "gE", mode = "n", action = "explain_plan" },
+      -- explain plan (visual selection)
+      { key = "gE", mode = "v", action = "explain_plan_visual" },
     },
   },
 

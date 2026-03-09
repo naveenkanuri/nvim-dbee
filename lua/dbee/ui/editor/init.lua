@@ -572,6 +572,17 @@ function EditorUI:get_actions()
       self:set_current_note(notes[prev_idx].id)
     end,
 
+    -- explain plan (normal mode): query under cursor
+    explain_plan = function()
+      require("dbee").explain_plan()
+    end,
+
+    -- explain plan (visual selection): uses is_visual flag since mode has
+    -- already exited visual by the time the keybinding fires
+    explain_plan_visual = function()
+      require("dbee").explain_plan({ is_visual = true })
+    end,
+
     run_under_cursor = function()
       local bufnr = vim.api.nvim_get_current_buf()
       local conn = self.handler:get_current_connection()
