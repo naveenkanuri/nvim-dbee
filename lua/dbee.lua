@@ -306,6 +306,48 @@ function dbee.toggle_drawer()
   end
 end
 
+---Focus a specific dbee pane by name.
+---@param name string pane name: "editor", "result", "drawer", "call_log"
+function dbee.focus_pane(name)
+  local layout = api.current_config().window_layout
+  if not layout or type(layout.is_open) ~= "function" then
+    utils.log("warn", "Pane jumping is not supported by the current layout")
+    return
+  end
+
+  if not layout:is_open() then
+    utils.log("warn", "Dbee is not open")
+    return
+  end
+
+  if type(layout.focus_pane) ~= "function" then
+    utils.log("warn", "Pane jumping is not supported by the current layout")
+    return
+  end
+
+  if name == "drawer" then
+    if type(layout.ensure_drawer_visible) == "function" then
+      local shown = layout:ensure_drawer_visible()
+      if shown == false then
+        utils.log("warn", "Drawer is not available in this layout")
+        return
+      end
+    else
+      utils.log("warn", "Drawer is not supported by the current layout")
+      return
+    end
+  end
+
+  local ok = layout:focus_pane(name)
+  if not ok then
+    if name == "call_log" then
+      utils.log("warn", "Call log pane is not available in this layout")
+    else
+      utils.log("warn", "Pane '" .. name .. "' is not available")
+    end
+  end
+end
+
 ---Open notes picker using snacks.nvim.
 function dbee.pick_notes()
   if not api.ui.is_loaded() then

@@ -4,6 +4,49 @@ local NuiTree = require("nui.tree")
 
 local M = {}
 
+local ID_SEP = "\x1f"
+local SEGMENT_SEP = ":"
+
+---@param value string?
+---@return string
+local function escape_node_id_part(value)
+  return tostring(value or ""):gsub("[%z\1-\31%%:]", function(char)
+    return string.format("%%%02X", string.byte(char))
+  end)
+end
+
+---@param parts string[]
+---@return string
+local function encode_node_segment(parts)
+  local encoded = {}
+  for _, part in ipairs(parts) do
+    table.insert(encoded, escape_node_id_part(part))
+  end
+  return table.concat(encoded, SEGMENT_SEP)
+end
+
+---@param parent_id string
+---@param struct { name: string, schema?: string, type: string }
+---@return string
+function M.structure_node_id(parent_id, struct)
+  return parent_id .. ID_SEP .. encode_node_segment({
+    struct.type,
+    struct.name,
+    struct.schema or "",
+  })
+end
+
+---@param parent_id string
+---@param column Column
+---@return string
+local function column_node_id(parent_id, column)
+  return parent_id .. ID_SEP .. encode_node_segment({
+    "column",
+    column.type,
+    column.name,
+  })
+end
+
 ---@param parent_id string
 ---@param columns Column[]
 ---@return DrawerUINode[]
@@ -15,9 +58,10 @@ local function column_nodes(parent_id, columns)
     table.insert(
       nodes,
       NuiTree.Node {
-        id = parent_id .. column.type .. column.name,
+        id = column_node_id(parent_id, column),
         name = column.name .. "   [" .. column.type .. "]",
         type = "column",
+        raw_name = column.name,
       }
     )
   end
@@ -47,7 +91,7 @@ local function connection_nodes(handler, conn, result, structure_cache)
     local nodes = {}
 
     for _, struct in ipairs(structs) do
-      local node_id = (parent_id or "") .. "__connection_" .. struct.name .. struct.schema .. struct.type .. "__"
+      local node_id = M.structure_node_id(parent_id or "", struct)
       local node = NuiTree.Node({
         id = node_id,
         name = struct.name,

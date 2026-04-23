@@ -92,6 +92,13 @@ config.default = {
       { key = "o", mode = "n", action = "toggle" },
       -- generate call template for procedure/function
       { key = "gC", mode = "n", action = "generate_call" },
+      -- yank qualified name to clipboard
+      { key = "yy", mode = "n", action = "yank_name" },
+      -- pane jumping
+      { key = "<leader>e", mode = "n", action = "focus_editor" },
+      { key = "<leader>r", mode = "n", action = "focus_result" },
+      { key = "<leader>d", mode = "n", action = "focus_drawer" },
+      { key = "<leader>l", mode = "n", action = "focus_call_log" },
       -- mappings for menu popups:
       { key = "<CR>", mode = "n", action = "menu_confirm" },
       { key = "y", mode = "n", action = "menu_yank" },
@@ -275,6 +282,11 @@ config.default = {
       { key = "<C-c>", mode = "", action = "cancel_call" },
       -- export results to file
       { key = "ge", mode = "n", action = "export_result" },
+      -- pane jumping
+      { key = "<leader>e", mode = "n", action = "focus_editor" },
+      { key = "<leader>r", mode = "n", action = "focus_result" },
+      { key = "<leader>d", mode = "n", action = "focus_drawer" },
+      { key = "<leader>l", mode = "n", action = "focus_call_log" },
     },
   },
 
@@ -303,6 +315,11 @@ config.default = {
       { key = "gE", mode = "n", action = "explain_plan" },
       -- explain plan (visual selection)
       { key = "gE", mode = "v", action = "explain_plan_visual" },
+      -- pane jumping
+      { key = "<leader>e", mode = "n", action = "focus_editor" },
+      { key = "<leader>r", mode = "n", action = "focus_result" },
+      { key = "<leader>d", mode = "n", action = "focus_drawer" },
+      { key = "<leader>l", mode = "n", action = "focus_call_log" },
     },
   },
 
@@ -322,6 +339,11 @@ config.default = {
       { key = "yy", mode = "n", action = "yank_query" },
       -- re-run the selected query on the current connection
       { key = "R", mode = "n", action = "rerun_query" },
+      -- pane jumping
+      { key = "<leader>e", mode = "n", action = "focus_editor" },
+      { key = "<leader>r", mode = "n", action = "focus_result" },
+      { key = "<leader>d", mode = "n", action = "focus_drawer" },
+      { key = "<leader>l", mode = "n", action = "focus_call_log" },
     },
 
     -- candies (icons and highlights)

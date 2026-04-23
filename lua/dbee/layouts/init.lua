@@ -22,6 +22,9 @@ local api_ui = require("dbee.api.ui")
 ---@field open fun(self: Layout) function to open ui.
 ---@field reset fun(self: Layout) function to reset ui.
 ---@field close fun(self: Layout) function to close ui.
+---@field focus_pane? fun(self: Layout, name: string):boolean
+---@field ensure_drawer_visible? fun(self: Layout):boolean
+--- Callers must check optional compatibility methods before using them and WARN gracefully.
 
 local layouts = {}
 
@@ -190,6 +193,24 @@ function layouts.Default:close()
   tools.restore(self.egg)
   self.egg = nil
   self.is_opened = false
+end
+
+---Focus a named pane window.
+---@param name string pane name: "editor", "result", "drawer", "call_log"
+---@return boolean success
+function layouts.Default:focus_pane(name)
+  local winid = self.windows[name]
+  if not winid or not vim.api.nvim_win_is_valid(winid) then
+    return false
+  end
+  vim.api.nvim_set_current_win(winid)
+  return true
+end
+
+---Ensure drawer is visible. No-op for DefaultLayout (drawer always visible).
+---@return boolean
+function layouts.Default:ensure_drawer_visible()
+  return true
 end
 
 ---@divider -
@@ -376,6 +397,37 @@ function layouts.Minimal:toggle_drawer()
       vim.api.nvim_set_current_win(editor_win)
     end
   end
+end
+
+---Focus a named pane window.
+---@param name string pane name: "editor", "result", "drawer", "call_log"
+---@return boolean success
+function layouts.Minimal:focus_pane(name)
+  if name == "call_log" then
+    return false
+  end
+  if name == "drawer" then
+    if not self.drawer_win or not vim.api.nvim_win_is_valid(self.drawer_win) then
+      return false
+    end
+    vim.api.nvim_set_current_win(self.drawer_win)
+    return true
+  end
+  local winid = self.windows[name]
+  if not winid or not vim.api.nvim_win_is_valid(winid) then
+    return false
+  end
+  vim.api.nvim_set_current_win(winid)
+  return true
+end
+
+---Ensure drawer is visible. Opens drawer if not visible.
+---@return boolean
+function layouts.Minimal:ensure_drawer_visible()
+  if not self.drawer_win or not vim.api.nvim_win_is_valid(self.drawer_win) then
+    self:toggle_drawer()
+  end
+  return self.drawer_win ~= nil and vim.api.nvim_win_is_valid(self.drawer_win)
 end
 
 return layouts

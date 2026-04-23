@@ -72,11 +72,11 @@ Plans:
   1. User can copy qualified table names (schema.table) and column names from the drawer to clipboard
   2. User can jump focus between editor, result, drawer, and call log panes with dedicated keybindings
   3. User can search/filter tables in the drawer to find objects in schemas with hundreds of tables
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 04-01: TBD
-- [ ] 04-02: TBD
+- [ ] 04-01-PLAN.md -- Drawer yank qualified names (CLIP-02), pane jumping with layout API (NAV-02), headless tests
+- [ ] 04-02-PLAN.md -- Live drawer search/filter with NuiInput (DRAW-01), headless tests
 
 ### Phase 5: Resilience & Diagnostics
 **Goal**: Connection failures surface actionable prompts and query errors show inline markers across all adapters
@@ -103,5 +103,5 @@ Note: Phases 3 and 4 depend only on Phase 1, not on Phase 2. They can execute in
 | 1. Notifications & Feedback | 2/2 | Complete | 2026-03-06 |
 | 2. Call Log Enhancements | 2/2 | Complete | 2026-03-07 |
 | 3. Editor & Result Actions | 1/2 | In Progress|  |
-| 4. Drawer & Navigation | 0/0 | Not started | - |
+| 4. Drawer & Navigation | 0/2 | Not started | - |
 | 5. Resilience & Diagnostics | 0/0 | Not started | - |

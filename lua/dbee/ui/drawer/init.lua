@@ -566,6 +566,71 @@ function DrawerUI:get_actions()
       end
 
     end,
+    yank_name = function()
+      local node = self.tree:get_node() --[[@as DrawerUINode]]
+      if not node then
+        return
+      end
+
+      local yankable_types = {
+        table = true,
+        view = true,
+        procedure = true,
+        ["function"] = true,
+        column = true,
+      }
+      if not yankable_types[node.type] then
+        utils.log("warn", "Nothing to copy")
+        return
+      end
+
+      local qualified_name
+      if node.type == "column" then
+        local parent = self.tree:get_node(node:get_parent_id())
+        if not parent or not parent.name then
+          utils.log("warn", "Nothing to copy")
+          return
+        end
+        local col_name = node.raw_name or node.name:match("^(.-)%s+%[") or node.name
+        if not parent.schema or parent.schema == "" then
+          utils.log("warn", "Nothing to copy (schema unavailable)")
+          return
+        end
+        qualified_name = parent.schema .. "." .. parent.name .. "." .. col_name
+      else
+        if not node.schema or node.schema == "" then
+          utils.log("warn", "Nothing to copy (schema unavailable)")
+          return
+        end
+        qualified_name = node.schema .. "." .. node.name
+      end
+
+      local ok, err = pcall(vim.fn.setreg, '"', qualified_name)
+      if not ok then
+        utils.log("error", "Yank failed: " .. tostring(err))
+        return
+      end
+      pcall(vim.fn.setreg, '+', qualified_name)
+      local ok_get_clip, clip_value = pcall(vim.fn.getreg, '+')
+      local clip_ok = ok_get_clip and clip_value == qualified_name
+      local msg = "Copied: " .. qualified_name
+      if not clip_ok then
+        msg = msg .. " (clipboard unavailable)"
+      end
+      utils.log("info", msg)
+    end,
+    focus_editor = function()
+      require("dbee").focus_pane("editor")
+    end,
+    focus_result = function()
+      require("dbee").focus_pane("result")
+    end,
+    focus_drawer = function()
+      require("dbee").focus_pane("drawer")
+    end,
+    focus_call_log = function()
+      require("dbee").focus_pane("call_log")
+    end,
   }
 end
 

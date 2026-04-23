@@ -380,6 +380,18 @@ function ResultUI:get_actions()
         end
       end)
     end,
+    focus_editor = function()
+      require("dbee").focus_pane("editor")
+    end,
+    focus_result = function()
+      require("dbee").focus_pane("result")
+    end,
+    focus_drawer = function()
+      require("dbee").focus_pane("drawer")
+    end,
+    focus_call_log = function()
+      require("dbee").focus_pane("call_log")
+    end,
   }
 end
 

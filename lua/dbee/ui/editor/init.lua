@@ -582,6 +582,18 @@ function EditorUI:get_actions()
     explain_plan_visual = function()
       require("dbee").explain_plan({ is_visual = true })
     end,
+    focus_editor = function()
+      require("dbee").focus_pane("editor")
+    end,
+    focus_result = function()
+      require("dbee").focus_pane("result")
+    end,
+    focus_drawer = function()
+      require("dbee").focus_pane("drawer")
+    end,
+    focus_call_log = function()
+      require("dbee").focus_pane("call_log")
+    end,
 
     run_under_cursor = function()
       local bufnr = vim.api.nvim_get_current_buf()
