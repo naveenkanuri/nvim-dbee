@@ -62,7 +62,8 @@ local utils = require("dbee.utils")
 ---@field private pending_filter_text? string latest queued filter text
 ---@field private filter_timer? uv_timer_t
 ---@field private loaded_lazy_ids table<string, boolean> tracks branches whose lazy children were materialized at least once, even if they loaded empty
----@field private structure_request_gen table<string, integer> latest in-flight request_id per connection for DB-switch stale-load rejection
+---@field private structure_request_gen table<string, integer> latest requested request_id per connection for DB-switch stale-load rejection
+---@field private structure_applied_gen table<string, integer> latest applied request_id per connection so stale-after-fresh loads are ignored
 ---@field private cached_search_model? { nodes: table[], coverage: DrawerModelCoverage } immutable search corpus reused across repeated filter starts within the same authoritative drawer generation
 ---@field private cached_render_snapshot? DrawerRenderSnapshotNode[] baseline rendered-tree snapshot reused across repeated filter starts while the rendered tree is unchanged
 ---@field private filter_cached_connections integer ready cached connections in the current filter session
@@ -502,6 +503,7 @@ function DrawerUI:new(handler, editor, result, opts)
     filter_timer = nil,
     loaded_lazy_ids = {},
     structure_request_gen = {},
+    structure_applied_gen = {},
     cached_search_model = nil,
     cached_render_snapshot = nil,
     filter_cached_connections = 0,
@@ -618,8 +620,15 @@ function DrawerUI:on_structure_loaded(data)
     return
   end
 
+  local request_id = data.request_id
   local pending_request_id = self.structure_request_gen[data.conn_id]
-  if pending_request_id ~= nil and data.request_id ~= pending_request_id then
+  local applied_request_id = self.structure_applied_gen[data.conn_id] or 0
+
+  if request_id ~= nil and request_id < applied_request_id then
+    return
+  end
+
+  if pending_request_id ~= nil and request_id ~= pending_request_id then
     return
   end
 
@@ -627,7 +636,9 @@ function DrawerUI:on_structure_loaded(data)
     self:interrupt_filter("Drawer data changed; closing filter before refresh")
   end
 
-  self.structure_request_gen[data.conn_id] = nil
+  if request_id ~= nil then
+    self.structure_applied_gen[data.conn_id] = math.max(applied_request_id, request_id)
+  end
   invalidate_authoritative_caches(self)
 
   if self._manual_refresh_conns[data.conn_id] then
@@ -902,7 +913,9 @@ end
 ---@param conn_id string
 ---@return integer request_id
 function DrawerUI:request_structure_reload(conn_id)
-  self.structure_request_gen[conn_id] = (self.structure_request_gen[conn_id] or 0) + 1
+  local applied_request_id = self.structure_applied_gen[conn_id] or 0
+  local requested_request_id = self.structure_request_gen[conn_id] or 0
+  self.structure_request_gen[conn_id] = math.max(requested_request_id, applied_request_id) + 1
   local request_id = self.structure_request_gen[conn_id]
   self.handler:connection_get_structure_async(conn_id, request_id)
   return request_id

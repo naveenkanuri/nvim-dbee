@@ -958,7 +958,13 @@ assert_eq("a15_stale_cache_ignored", drawer.structure_cache[conn_id], nil)
 drawer:on_structure_loaded({ conn_id = conn_id, request_id = pending_request_id, structures = alt_structures })
 assert_eq("a15_winning_refresh_runs_once", drawer.refresh_count, 1)
 assert_true("a15_winning_cache_updates", drawer.structure_cache[conn_id] ~= nil)
-assert_eq("a15_request_cleared", drawer.structure_request_gen[conn_id], nil)
+assert_eq("a15_request_preserved", drawer.structure_request_gen[conn_id], pending_request_id)
+assert_eq("a15_applied_gen_recorded", drawer.structure_applied_gen[conn_id], pending_request_id)
+
+drawer:on_structure_loaded({ conn_id = conn_id, request_id = pending_request_id - 1, structures = default_structures })
+assert_eq("a15_stale_after_fresh_refresh_ignored", drawer.refresh_count, 1)
+assert_eq("a15_stale_after_fresh_cache_kept", drawer.structure_cache[conn_id].structures[1].name, "ops")
+assert_eq("a15_applied_gen_retained", drawer.structure_applied_gen[conn_id], pending_request_id)
 
 drawer:get_actions().filter()
 session = stub_filter_sessions[#stub_filter_sessions]
