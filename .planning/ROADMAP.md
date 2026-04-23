@@ -15,7 +15,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 1: Notifications & Feedback** - Replace silent failures with vim.notify messages and self-documenting winbar labels
 - [x] **Phase 2: Call Log Enhancements** - Add duration/timestamp display, query copy, and re-run from history
 - [x] **Phase 3: Editor & Result Actions** - Add note cycling, file export, and explain plan execution
-- [ ] **Phase 4: Drawer & Navigation** - Add drawer copy/search and dedicated pane-jumping keybindings
+- [x] **Phase 4: Drawer & Navigation** - Add drawer copy/search and dedicated pane-jumping keybindings
 - [ ] **Phase 5: Resilience & Diagnostics** - Add auto-reconnect prompt and generic adapter error diagnostics
 
 ## Phase Details
@@ -103,5 +103,5 @@ Note: Phases 3 and 4 depend only on Phase 1, not on Phase 2. They can execute in
 | 1. Notifications & Feedback | 2/2 | Complete | 2026-03-06 |
 | 2. Call Log Enhancements | 2/2 | Complete | 2026-03-07 |
 | 3. Editor & Result Actions | 2/2 | Complete | 2026-03-09 |
-| 4. Drawer & Navigation | 0/2 | Ready for execution | - |
+| 4. Drawer & Navigation | 2/2 | Complete | 2026-04-23 |
 | 5. Resilience & Diagnostics | 0/0 | Not started | - |
