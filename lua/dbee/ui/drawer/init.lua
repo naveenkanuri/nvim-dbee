@@ -970,14 +970,21 @@ function DrawerUI:interrupt_filter(reason)
 end
 
 ---@private
-function DrawerUI:render_restore_snapshot()
-  self.loaded_lazy_ids = collect_loaded_lazy_ids(self.filter_restore_snapshot)
-  self.tree:set_nodes(snapshot_to_tree_nodes(self.filter_restore_snapshot or {}))
-  local unresolved = restore_expansion_state(self, self.pre_filter_expansion)
+---@param snapshot? DrawerRenderSnapshotNode[]
+---@param expansion_state? table<string, boolean>
+---@param cursor? integer[]
+function DrawerUI:render_restore_snapshot(snapshot, expansion_state, cursor)
+  snapshot = snapshot or self.filter_restore_snapshot
+  expansion_state = expansion_state or self.pre_filter_expansion
+  cursor = cursor or self.pre_filter_cursor
+
+  self.loaded_lazy_ids = collect_loaded_lazy_ids(snapshot)
+  self.tree:set_nodes(snapshot_to_tree_nodes(snapshot or {}))
+  local unresolved = restore_expansion_state(self, expansion_state)
   self.tree:render()
 
-  if self.pre_filter_cursor and self.winid and vim.api.nvim_win_is_valid(self.winid) then
-    pcall(vim.api.nvim_win_set_cursor, self.winid, self.pre_filter_cursor)
+  if cursor and self.winid and vim.api.nvim_win_is_valid(self.winid) then
+    pcall(vim.api.nvim_win_set_cursor, self.winid, cursor)
   end
 
   if next(unresolved) ~= nil then
@@ -1425,6 +1432,9 @@ function DrawerUI:get_actions()
             return
           end
 
+          local snapshot = self.filter_restore_snapshot
+          local expansion_state = self.pre_filter_expansion
+          local restore_cursor = self.pre_filter_cursor
           self.active_filter_session_id = nil
           self:cancel_pending_filter_apply()
 
@@ -1432,9 +1442,8 @@ function DrawerUI:get_actions()
           local selected_id = selected_node and selected_node:get_id()
           local selected_path = selected_path_ids(self.tree, selected_node)
 
-          self.filter_text = ""
-          self.filter_input = nil
-          self:render_restore_snapshot()
+          clear_filter_state(self)
+          self:render_restore_snapshot(snapshot, expansion_state, restore_cursor)
 
           if selected_id then
             self.cached_render_snapshot = nil
@@ -1452,38 +1461,20 @@ function DrawerUI:get_actions()
             if selected_id and not exact then
               utils.log("warn", "Drawer filter submit fell back to the nearest restored ancestor")
             end
-          elseif self.pre_filter_cursor and self.winid and vim.api.nvim_win_is_valid(self.winid) then
-            pcall(vim.api.nvim_win_set_cursor, self.winid, self.pre_filter_cursor)
           end
-
-          self.filter_restore_snapshot = nil
-          self.filter_search_model = nil
-          self.pre_filter_expansion = nil
-          self.pre_filter_cursor = nil
-          self.filter_cached_connections = 0
-          self.filter_total_connections = 0
         end,
         on_close = function()
           if session_id ~= self.active_filter_session_id then
             return
           end
 
+          local snapshot = self.filter_restore_snapshot
+          local expansion_state = self.pre_filter_expansion
+          local restore_cursor = self.pre_filter_cursor
           self.active_filter_session_id = nil
           self:cancel_pending_filter_apply()
-          self.filter_text = ""
-          self.filter_input = nil
-          self:render_restore_snapshot()
-
-          if self.pre_filter_cursor and self.winid and vim.api.nvim_win_is_valid(self.winid) then
-            pcall(vim.api.nvim_win_set_cursor, self.winid, self.pre_filter_cursor)
-          end
-
-          self.filter_restore_snapshot = nil
-          self.filter_search_model = nil
-          self.pre_filter_expansion = nil
-          self.pre_filter_cursor = nil
-          self.filter_cached_connections = 0
-          self.filter_total_connections = 0
+          clear_filter_state(self)
+          self:render_restore_snapshot(snapshot, expansion_state, restore_cursor)
         end,
       })
     end,

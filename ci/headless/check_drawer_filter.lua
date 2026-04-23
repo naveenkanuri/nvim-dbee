@@ -709,11 +709,24 @@ session:change("bonus")
 assert_eq("a8_zero_columns_while_typing", counters.columns, 0)
 print("DRAW01_A8_OK=true")
 
+local real_render_restore_snapshot = drawer.render_restore_snapshot
+local close_restore_used_captured_state = false
+drawer.render_restore_snapshot = function(self, snapshot, expansion, cursor)
+  close_restore_used_captured_state = snapshot ~= nil and expansion ~= nil and cursor ~= nil
+  -- Simulate async state clearing between filter_input = nil and restore.
+  self.filter_restore_snapshot = nil
+  self.pre_filter_expansion = nil
+  self.pre_filter_cursor = nil
+  return real_render_restore_snapshot(self, snapshot, expansion, cursor)
+end
 session:close()
+drawer.render_restore_snapshot = real_render_restore_snapshot
 assert_true("a9_filter_cleared", drawer.filter_input == nil and drawer.filter_restore_snapshot == nil)
 assert_eq("a9_cursor_restored", vim.inspect(vim.api.nvim_win_get_cursor(fixture.winid)), vim.inspect(baseline_cursor))
 assert_true("a9_employees_expanded", drawer.tree:get_node(employees_id):is_expanded())
 assert_eq("a9_no_extra_empty_branch_load", counters.columns, 0)
+assert_true("a9_close_uses_captured_snapshot", close_restore_used_captured_state)
+assert_true("a9_close_not_blank", drawer.tree:get_node(employees_id) ~= nil)
 print("DRAW01_A9_OK=true")
 
 clear_notifications()
@@ -721,8 +734,20 @@ drawer:get_actions().filter()
 session = stub_filter_sessions[#stub_filter_sessions]
 session:change("emp")
 set_current_node(fixture.winid, drawer.tree, employees_id)
+local submit_restore_used_captured_state = false
+drawer.render_restore_snapshot = function(self, snapshot, expansion, cursor)
+  submit_restore_used_captured_state = snapshot ~= nil and expansion ~= nil and cursor ~= nil
+  -- Simulate async state clearing between filter_input = nil and restore.
+  self.filter_restore_snapshot = nil
+  self.pre_filter_expansion = nil
+  self.pre_filter_cursor = nil
+  return real_render_restore_snapshot(self, snapshot, expansion, cursor)
+end
 session:submit("emp")
+drawer.render_restore_snapshot = real_render_restore_snapshot
 assert_eq("a10_exact_submit_focus", drawer.tree:get_node():get_id(), employees_id)
+assert_true("a10_submit_uses_captured_snapshot", submit_restore_used_captured_state)
+assert_true("a10_submit_not_blank", drawer.tree:get_node(employees_id) ~= nil)
 print("DRAW01_A10_OK=true")
 
 drawer:get_actions().filter()
