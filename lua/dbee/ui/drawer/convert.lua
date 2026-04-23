@@ -39,7 +39,7 @@ end
 ---@param parent_id string
 ---@param column Column
 ---@return string
-local function column_node_id(parent_id, column)
+function M.column_node_id(parent_id, column)
   return parent_id .. ID_SEP .. encode_node_segment({
     "column",
     column.type,
@@ -58,7 +58,7 @@ local function column_nodes(parent_id, columns)
     table.insert(
       nodes,
       NuiTree.Node {
-        id = column_node_id(parent_id, column),
+        id = M.column_node_id(parent_id, column),
         name = column.name .. "   [" .. column.type .. "]",
         type = "column",
         raw_name = column.name,

@@ -202,7 +202,7 @@ local nil_schema_table = new_node({
 })
 
 local column_node = new_node({
-  id = table_node.id .. "\x1fcolumn:NUMBER:employee_id",
+  id = convert.column_node_id(table_node.id, { type = "NUMBER", name = "employee_id" }),
   name = "employee_id   [NUMBER]",
   type = "column",
   raw_name = "employee_id",
@@ -210,7 +210,7 @@ local column_node = new_node({
 column_node._parent_id = table_node.id
 
 local missing_schema_column = new_node({
-  id = nil_schema_table.id .. "\x1fcolumn:NUMBER:employee_id",
+  id = convert.column_node_id(nil_schema_table.id, { type = "NUMBER", name = "employee_id" }),
   name = "employee_id   [NUMBER]",
   type = "column",
   raw_name = "employee_id",

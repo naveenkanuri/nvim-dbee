@@ -222,7 +222,7 @@ current_config.window_layout = {
   is_open = function() return true end,
 }
 dbee.focus_pane("editor")
-assert_match("a7_missing_focus_method_warn", last_notification().msg, "Pane jumping is not supported by the current layout")
+assert_match("a7_missing_focus_method_warn", last_notification().msg, "This layout does not support pane jumping")
 print("NAV02_A7_OK=true")
 
 local drawer_stub = {
@@ -321,7 +321,7 @@ current_config.window_layout = {
   end,
 }
 dbee.focus_pane("result")
-assert_match("a15_missing_is_open_warn", last_notification().msg, "Pane jumping is not supported by the current layout")
+assert_match("a15_missing_is_open_warn", last_notification().msg, "Layout does not implement the Layout interface")
 assert_eq("a15_missing_is_open_calls", invalid_layout_calls, 0)
 print("NAV02_A15_OK=true")
 

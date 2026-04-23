@@ -311,7 +311,7 @@ end
 function dbee.focus_pane(name)
   local layout = api.current_config().window_layout
   if not layout or type(layout.is_open) ~= "function" then
-    utils.log("warn", "Pane jumping is not supported by the current layout")
+    utils.log("warn", "Layout does not implement the Layout interface")
     return
   end
 
@@ -321,14 +321,14 @@ function dbee.focus_pane(name)
   end
 
   if type(layout.focus_pane) ~= "function" then
-    utils.log("warn", "Pane jumping is not supported by the current layout")
+    utils.log("warn", "This layout does not support pane jumping")
     return
   end
 
   if name == "drawer" then
     if type(layout.ensure_drawer_visible) == "function" then
       local shown = layout:ensure_drawer_visible()
-      if shown == false then
+      if not shown then
         utils.log("warn", "Drawer is not available in this layout")
         return
       end
