@@ -148,4 +148,109 @@ function M.input(opts)
   input:mount()
 end
 
+-- Live filter with on_change callback.
+---@param opts { relative_winid: integer, coverage_label?: string, on_change: fun(value: string), on_submit: fun(value: string), on_close: fun(), mappings?: key_mapping[], forward_insert?: table<string, fun()>, forward_normal?: table<string, fun()> }
+function M.filter(opts)
+  if not opts.relative_winid or not vim.api.nvim_win_is_valid(opts.relative_winid) then
+    error("no window id provided")
+  end
+
+  local width = vim.api.nvim_win_get_width(opts.relative_winid)
+  local input
+  local manual_submit_value = nil
+
+  local popup_options = {
+    relative = {
+      type = "win",
+      winid = opts.relative_winid,
+    },
+    position = {
+      row = 0,
+      col = 0,
+    },
+    size = {
+      width = width,
+    },
+    zindex = 160,
+    border = {
+      style = { "─", "─", "─", "", "─", "─", "─", "" },
+      text = {
+        top = " Filter ",
+        top_align = "left",
+        bottom = opts.coverage_label,
+        bottom_align = "right",
+      },
+    },
+    win_options = {
+      cursorline = false,
+    },
+  }
+
+  local function current_value()
+    local line = vim.api.nvim_buf_get_lines(input.bufnr, 0, 1, false)[1] or ""
+    if line:sub(1, 1) == "/" then
+      return line:sub(2)
+    end
+    return line
+  end
+
+  input = NuiInput(popup_options, {
+    prompt = "/",
+    default_value = "",
+    on_change = opts.on_change,
+    on_submit = function(value)
+      manual_submit_value = nil
+      if opts.on_submit then
+        opts.on_submit(value)
+      end
+    end,
+    on_close = function()
+      if manual_submit_value ~= nil then
+        local value = manual_submit_value
+        manual_submit_value = nil
+        if opts.on_submit then
+          opts.on_submit(value)
+        end
+        return
+      end
+      if opts.on_close then
+        opts.on_close()
+      end
+    end,
+  })
+
+  local reserved_map_opts = { noremap = true, nowait = true }
+  local forwarded_map_opts = { noremap = true, nowait = true }
+
+  input:map("i", "<Esc>", function()
+    input:unmount()
+  end, reserved_map_opts)
+  input:map("n", "<Esc>", function()
+    input:unmount()
+  end, reserved_map_opts)
+
+  for key, fn in pairs(opts.forward_insert or {}) do
+    input:map("i", key, fn, forwarded_map_opts)
+  end
+
+  input:map("i", "<C-]>", function()
+    vim.cmd("stopinsert")
+  end, reserved_map_opts)
+
+  input:map("n", "i", function()
+    vim.cmd("startinsert")
+  end, reserved_map_opts)
+  input:map("n", "<CR>", function()
+    manual_submit_value = current_value()
+    input:unmount()
+  end, reserved_map_opts)
+
+  for key, fn in pairs(opts.forward_normal or {}) do
+    input:map("n", key, fn, forwarded_map_opts)
+  end
+
+  input:mount()
+  return input
+end
+
 return M

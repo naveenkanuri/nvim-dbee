@@ -67,6 +67,9 @@ jobs:
           - check_call_log_display.lua
           - check_note_cycling.lua
           - check_result_export.lua
+          - check_drawer_yank.lua
+          - check_pane_jump.lua
+          - check_drawer_filter.lua
     steps:
       - uses: actions/checkout@v4
       - name: Install Neovim
@@ -74,10 +77,14 @@ jobs:
           curl -fsSLO https://github.com/neovim/neovim/releases/download/v0.11.6/nvim-linux-x86_64.tar.gz
           tar xzf nvim-linux-x86_64.tar.gz
           echo "${PWD}/nvim-linux-x86_64/bin" >> "${GITHUB_PATH}"
+      - name: Install nui.nvim
+        run: |
+          git clone https://github.com/MunifTanjim/nui.nvim "${RUNNER_TEMP}/nui.nvim"
+          git -C "${RUNNER_TEMP}/nui.nvim" checkout de740991c12411b663994b2860f1a4fd0937c130
       - name: Run Headless Lua Check
         run: |
           nvim --headless -u NONE -i NONE -n \
-            --cmd "set rtp+=${GITHUB_WORKSPACE}" \
+            --cmd "set rtp^=${RUNNER_TEMP}/nui.nvim | set rtp+=${GITHUB_WORKSPACE}" \
             -c "luafile ${GITHUB_WORKSPACE}/ci/headless/${{ matrix.script }}"
 
   bootstrap-testcontainers:

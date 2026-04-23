@@ -184,6 +184,7 @@ end
 
 ---@package
 function layouts.Default:close()
+  pcall(api_ui.drawer_prepare_close)
   -- close all windows
   for _, win in pairs(self.windows) do
     pcall(vim.api.nvim_win_close, win, false)
@@ -360,6 +361,7 @@ end
 
 ---@package
 function layouts.Minimal:close()
+  pcall(api_ui.drawer_prepare_close)
   -- close drawer if open
   if self.drawer_win and vim.api.nvim_win_is_valid(self.drawer_win) then
     pcall(vim.api.nvim_win_close, self.drawer_win, false)
@@ -377,11 +379,24 @@ function layouts.Minimal:close()
   self.is_opened = false
 end
 
+---@package
+---@param winid integer
+function layouts.Minimal:configure_drawer_window_cleanup(winid)
+  utils.create_singleton_autocmd({ "QuitPre", "WinClosed" }, {
+    window = winid,
+    callback = function()
+      pcall(api_ui.drawer_prepare_close)
+      self.drawer_win = nil
+    end,
+  })
+end
+
 ---Toggle the drawer panel on the left side.
 ---@package
 function layouts.Minimal:toggle_drawer()
   if self.drawer_win and vim.api.nvim_win_is_valid(self.drawer_win) then
     -- Close drawer
+    pcall(api_ui.drawer_prepare_close)
     pcall(vim.api.nvim_win_close, self.drawer_win, false)
     self.drawer_win = nil
   else
@@ -393,6 +408,7 @@ function layouts.Minimal:toggle_drawer()
       self.drawer_win = vim.api.nvim_get_current_win()
       api_ui.drawer_show(self.drawer_win)
       self:configure_window_on_switch(self.on_switch, self.drawer_win, api_ui.drawer_show)
+      self:configure_drawer_window_cleanup(self.drawer_win)
       -- Return focus to editor
       vim.api.nvim_set_current_win(editor_win)
     end

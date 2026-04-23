@@ -94,6 +94,8 @@ config.default = {
       { key = "gC", mode = "n", action = "generate_call" },
       -- yank qualified name to clipboard
       { key = "yy", mode = "n", action = "yank_name" },
+      -- search/filter drawer tree
+      { key = "/", mode = "n", action = "filter" },
       -- pane jumping
       { key = "<leader>e", mode = "n", action = "focus_editor" },
       { key = "<leader>r", mode = "n", action = "focus_result" },

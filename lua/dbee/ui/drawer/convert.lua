@@ -69,6 +69,117 @@ local function column_nodes(parent_id, columns)
   return nodes
 end
 
+M.column_nodes = column_nodes
+
+---@param node DrawerUINode|table
+---@param handler Handler
+---@param result ResultUI
+---@param conn_id string
+---@param struct { id: string, name: string, schema?: string, type: string }
+--- INVARIANT: struct.type MUST be passed through as the materialization.
+function M.decorate_structure_node(node, handler, result, conn_id, struct)
+  if struct.type ~= "table" and struct.type ~= "view" and struct.type ~= "procedure" and struct.type ~= "function" then
+    return node
+  end
+
+  local table_opts = {
+    table = struct.name,
+    schema = struct.schema,
+    materialization = struct.type,
+  }
+
+  node.action_1 = function(cb, select)
+    local helpers = handler:connection_get_helpers(conn_id, table_opts)
+    local items = vim.tbl_keys(helpers)
+    table.sort(items)
+
+    select {
+      title = "Select a Query",
+      items = items,
+      on_confirm = function(selection)
+        local call = handler:connection_execute(conn_id, helpers[selection])
+        result:set_call(call)
+        cb()
+      end,
+      on_yank = function(selection)
+        vim.fn.setreg(vim.v.register, helpers[selection])
+      end,
+    }
+  end
+
+  if struct.type == "table" or struct.type == "view" then
+    node.lazy_children = function()
+      return column_nodes(struct.id, handler:connection_get_columns(conn_id, table_opts))
+    end
+  end
+
+  return node
+end
+
+---@param node DrawerUINode|table
+---@param handler Handler
+---@param source_meta { id: string, can_update: boolean, can_delete: boolean }
+---@param conn_id string
+--- INVARIANT: source_meta.id MUST equal source:name().
+function M.decorate_connection_node(node, handler, source_meta, conn_id)
+  node.action_1 = function(cb)
+    handler:set_current_connection(conn_id)
+    cb()
+  end
+
+  node.action_2 = nil
+  if source_meta.can_update then
+    node.action_2 = function(cb)
+      local original_details = handler:connection_get_params(conn_id)
+      if not original_details then
+        return
+      end
+
+      local prompt = {
+        { key = "name", value = original_details.name },
+        { key = "type", value = original_details.type },
+        { key = "url", value = original_details.url },
+      }
+      common.float_prompt(prompt, {
+        title = "Edit Connection",
+        callback = function(res)
+          local spec = {
+            name = res.name,
+            url = res.url,
+            type = res.type,
+          }
+          local ok, err = pcall(handler.source_update_connection, handler, source_meta.id, conn_id, spec)
+          if not ok then
+            utils.log("error", "Failed to update connection: " .. tostring(err))
+          end
+          cb()
+        end,
+      })
+    end
+  end
+
+  node.action_3 = nil
+  if source_meta.can_delete then
+    node.action_3 = function(cb, select)
+      select {
+        title = "Confirm Deletion",
+        items = { "Yes", "No" },
+        on_confirm = function(selection)
+          if selection == "Yes" then
+            local ok, err = pcall(handler.source_remove_connection, handler, source_meta.id, conn_id)
+            if not ok then
+              utils.log("error", "Failed to delete connection: " .. tostring(err))
+            end
+          end
+          cb()
+        end,
+      }
+    end
+  end
+
+  return node
+end
+
 ---@param handler Handler
 ---@param conn ConnectionParams
 ---@param result ResultUI
@@ -99,36 +210,12 @@ local function connection_nodes(handler, conn, result, structure_cache)
         type = struct.type,
       }, to_tree_nodes(struct.children, node_id)) --[[@as DrawerUINode]]
 
-      if struct.type == "table" or struct.type == "view" or struct.type == "procedure" or struct.type == "function" then
-        local table_opts = { table = struct.name, schema = struct.schema, materialization = struct.type }
-
-        -- table helpers
-        node.action_1 = function(cb, select)
-          local helpers = handler:connection_get_helpers(conn.id, table_opts)
-          local items = vim.tbl_keys(helpers)
-          table.sort(items)
-
-          select {
-            title = "Select a Query",
-            items = items,
-            on_confirm = function(selection)
-              local call = handler:connection_execute(conn.id, helpers[selection])
-              result:set_call(call)
-              cb()
-            end,
-            on_yank = function(selection)
-              vim.fn.setreg(vim.v.register, helpers[selection])
-            end,
-          }
-        end
-
-        -- only tables and views have expandable columns
-        if struct.type == "table" or struct.type == "view" then
-          node.lazy_children = function()
-            return column_nodes(node_id, handler:connection_get_columns(conn.id, table_opts))
-          end
-        end
-      end
+      M.decorate_structure_node(node, handler, result, conn.id, {
+        id = node_id,
+        name = struct.name,
+        schema = struct.schema,
+        type = struct.type,
+      })
 
       table.insert(nodes, node)
     end
@@ -161,13 +248,12 @@ local function connection_nodes(handler, conn, result, structure_cache)
       id = conn.id .. "_database_switch__",
       name = current_db,
       type = "database_switch",
-      action_1 = function(cb, select)
+      action_1 = function(_, select)
         select {
           title = "Select a Database",
           items = available_dbs,
           on_confirm = function(selection)
             handler:connection_select_database(conn.id, selection)
-            cb()
           end,
         }
       end,
@@ -249,76 +335,20 @@ local function handler_real_nodes(handler, result, structure_cache)
 
     -- get connections of that source
     for _, conn in ipairs(handler:source_get_connections(source_id)) do
-      -- if source has update, we can edit connections
-      ---@type drawer_node_action
-      local edit_action
-      if type(source.update) == "function" then
-        edit_action = function(cb)
-          local original_details = handler:connection_get_params(conn.id)
-          if not original_details then
-            return
-          end
-          local prompt = {
-            { key = "name", value = original_details.name },
-            { key = "type", value = original_details.type },
-            { key = "url", value = original_details.url },
-          }
-          common.float_prompt(prompt, {
-            title = "Edit Connection",
-            callback = function(res)
-              local spec = {
-                name = res.name,
-                url = res.url,
-                type = res.type,
-              }
-              local ok, err = pcall(handler.source_update_connection, handler, source_id, conn.id, spec)
-              if not ok then
-                utils.log("error", "Failed to update connection: " .. tostring(err))
-              end
-              cb()
-            end,
-          })
-        end
-      end
-
-      -- if source has delete, we can delete connections
-      ---@type drawer_node_action
-      local delete_action
-      if type(source.delete) == "function" then
-        delete_action = function(cb, select)
-          select {
-            title = "Confirm Deletion",
-            items = { "Yes", "No" },
-            on_confirm = function(selection)
-              if selection == "Yes" then
-                local ok, err = pcall(handler.source_remove_connection, handler, source_id, conn.id)
-                if not ok then
-                  utils.log("error", "Failed to delete connection: " .. tostring(err))
-                end
-              end
-              cb()
-            end,
-          }
-        end
-      end
-
       local node = NuiTree.Node {
         id = conn.id,
         name = conn.name,
         type = "connection",
-        -- set connection as active manually
-        action_1 = function(cb)
-          handler:set_current_connection(conn.id)
-          cb()
-        end,
-        -- edit connection
-        action_2 = edit_action,
-        -- remove connection
-        action_3 = delete_action,
         lazy_children = function()
           return connection_nodes(handler, conn, result, structure_cache)
         end,
       } --[[@as DrawerUINode]]
+
+      M.decorate_connection_node(node, handler, {
+        id = source_id,
+        can_update = type(source.update) == "function",
+        can_delete = type(source.delete) == "function",
+      }, conn.id)
 
       table.insert(children, node)
     end

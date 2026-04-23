@@ -161,6 +161,11 @@ function ui.drawer_show(winid)
   state.drawer():show(winid)
 end
 
+--- Prepare the drawer for close/hide before its host window goes away.
+function ui.drawer_prepare_close()
+  state.drawer():prepare_close()
+end
+
 --- Trigger an action in drawer.
 ---@param action string
 function ui.drawer_do_action(action)
