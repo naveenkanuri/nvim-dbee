@@ -67,7 +67,7 @@ func (eb *eventBus) DatabaseSelected(id core.ConnectionID, dbname string) {
 }
 
 // StructureLoaded is called when async structure loading completes.
-func (eb *eventBus) StructureLoaded(id core.ConnectionID, structures []*core.Structure, loadErr error) {
+func (eb *eventBus) StructureLoaded(id core.ConnectionID, requestID int, structures []*core.Structure, loadErr error) {
 	errMsg := "nil"
 	if loadErr != nil {
 		errMsg = fmt.Sprintf("[[%s]]", loadErr.Error())
@@ -80,10 +80,11 @@ func (eb *eventBus) StructureLoaded(id core.ConnectionID, structures []*core.Str
 	}
 
 	data := fmt.Sprintf(`{
-		conn_id = %q,
-		structures = %s,
-		error = %s,
-	}`, id, structLua, errMsg)
+			conn_id = %q,
+			request_id = %d,
+			structures = %s,
+			error = %s,
+		}`, id, requestID, structLua, errMsg)
 
 	eb.callLua("structure_loaded", data)
 }

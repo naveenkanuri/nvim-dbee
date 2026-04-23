@@ -240,8 +240,13 @@ function Handler:connection_get_structure(id)
 end
 
 ---@param id connection_id
-function Handler:connection_get_structure_async(id)
-  vim.fn.DbeeConnectionGetStructureAsync(id)
+---@param request_id? integer
+function Handler:connection_get_structure_async(id, request_id)
+  if request_id == nil then
+    vim.fn.DbeeConnectionGetStructureAsync(id)
+    return
+  end
+  vim.fn.DbeeConnectionGetStructureAsync(id, request_id)
 end
 
 ---@param id connection_id

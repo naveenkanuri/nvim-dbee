@@ -7,6 +7,7 @@ import (
 	"os"
 	"slices"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/neovim/go-client/nvim"
@@ -29,6 +30,7 @@ type Handler struct {
 	lookupConnectionCall map[core.ConnectionID][]core.CallID
 
 	currentConnectionID core.ConnectionID
+	nextStructureReqID  atomic.Uint64
 }
 
 func New(vim *nvim.Nvim, logger *plugin.Logger) *Handler {
@@ -227,20 +229,24 @@ func (h *Handler) ConnectionGetStructure(connID core.ConnectionID) ([]*core.Stru
 	return layout, nil
 }
 
-func (h *Handler) ConnectionGetStructureAsync(connID core.ConnectionID) {
+func (h *Handler) ConnectionGetStructureAsync(connID core.ConnectionID, requestID int) {
+	if requestID <= 0 {
+		requestID = int(h.nextStructureReqID.Add(1))
+	}
+
 	c, ok := h.lookupConnection[connID]
 	if !ok {
-		h.events.StructureLoaded(connID, nil, fmt.Errorf("unknown connection with id: %q", connID))
+		h.events.StructureLoaded(connID, requestID, nil, fmt.Errorf("unknown connection with id: %q", connID))
 		return
 	}
 
 	go func() {
 		layout, err := c.GetStructure()
 		if err != nil {
-			h.events.StructureLoaded(connID, nil, fmt.Errorf("c.GetStructure: %w", err))
+			h.events.StructureLoaded(connID, requestID, nil, fmt.Errorf("c.GetStructure: %w", err))
 			return
 		}
-		h.events.StructureLoaded(connID, layout, nil)
+		h.events.StructureLoaded(connID, requestID, layout, nil)
 	}()
 }
 
