@@ -10,9 +10,9 @@ local SEGMENT_SEP = ":"
 ---@param value string?
 ---@return string
 local function escape_node_id_part(value)
-  return tostring(value or ""):gsub("[%z\1-\31%%:]", function(char)
+  return (tostring(value or ""):gsub("[%z\1-\31%%:]", function(char)
     return string.format("%%%02X", string.byte(char))
-  end)
+  end))
 end
 
 ---@param parts string[]
