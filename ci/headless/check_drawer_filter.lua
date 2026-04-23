@@ -774,8 +774,7 @@ assert_true("a12_filtered_unrelated_hidden", not vim.tbl_contains(names_after_re
 print("DRAW01_A12_OK=true")
 session:close()
 
-local requested_perf_mode = vim.env.DRAW01_PERF_MODE or "stub"
-local actual_perf_mode = requested_perf_mode == "real-nui" and "stub" or requested_perf_mode
+local actual_perf_mode = "non-release-smoke"
 
 package.loaded["dbee.ui.drawer.menu"] = nil
 package.loaded["nui.menu"] = {
@@ -1039,29 +1038,31 @@ print("DRAW01_A16_OK=true")
 assert_true("a17_real_menu_filter_exists", type(real_menu.filter) == "function")
 print("DRAW01_A17_OK=true")
 
-local startup_ms = {}
-local restart_ms = {}
-local refresh_ms = {}
+local smoke_filter_open_ms = {}
+local smoke_filter_cycle_ms = {}
+local smoke_refresh_ms = {}
 
 for _ = 1, 5 do
   local t0 = vim.loop.hrtime()
   drawer:get_actions().filter()
   session = stub_filter_sessions[#stub_filter_sessions]
-  startup_ms[#startup_ms + 1] = (vim.loop.hrtime() - t0) / 1e6
-
   local t1 = vim.loop.hrtime()
-  session:close()
-  restart_ms[#restart_ms + 1] = (vim.loop.hrtime() - t1) / 1e6
+  smoke_filter_open_ms[#smoke_filter_open_ms + 1] = (t1 - t0) / 1e6
 
+  session:close()
   local t2 = vim.loop.hrtime()
+  smoke_filter_cycle_ms[#smoke_filter_cycle_ms + 1] = (t2 - t0) / 1e6
+
+  local t3 = vim.loop.hrtime()
   drawer:refresh()
-  refresh_ms[#refresh_ms + 1] = (vim.loop.hrtime() - t2) / 1e6
+  smoke_refresh_ms[#smoke_refresh_ms + 1] = (vim.loop.hrtime() - t3) / 1e6
 end
 
-print(string.format("DRAW01_STARTUP_MS=%.2f", median(startup_ms)))
-print(string.format("DRAW01_FILTER_RESTART_MS=%.2f", median(restart_ms)))
-print(string.format("DRAW01_REFRESH_MS=%.2f", median(refresh_ms)))
+print(string.format("DRAW01_SMOKE_FILTER_OPEN_MS=%.2f", median(smoke_filter_open_ms)))
+print(string.format("DRAW01_SMOKE_FILTER_CYCLE_MS=%.2f", median(smoke_filter_cycle_ms)))
+print(string.format("DRAW01_SMOKE_REFRESH_MS=%.2f", median(smoke_refresh_ms)))
 print("DRAW01_PERF_MODE=" .. actual_perf_mode)
+print("DRAW01_PERF_NOTE=real-nui perf harness deferred; smoke metrics only")
 print("DRAW01_A18_OK=true")
 
 local applied_values = {}

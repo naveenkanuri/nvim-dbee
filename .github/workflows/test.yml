@@ -77,7 +77,7 @@ jobs:
           curl -fsSLO https://github.com/neovim/neovim/releases/download/v0.11.6/nvim-linux-x86_64.tar.gz
           tar xzf nvim-linux-x86_64.tar.gz
           echo "${PWD}/nvim-linux-x86_64/bin" >> "${GITHUB_PATH}"
-      - name: Install nui.nvim
+      - name: Install nui.nvim (future DRAW-01 real-nui perf harness scaffolding)
         run: |
           git clone https://github.com/MunifTanjim/nui.nvim "${RUNNER_TEMP}/nui.nvim"
           git -C "${RUNNER_TEMP}/nui.nvim" checkout de740991c12411b663994b2860f1a4fd0937c130
