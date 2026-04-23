@@ -20,7 +20,7 @@ Requirements for this milestone. Each maps to roadmap phases.
 ### Clipboard & Navigation
 
 - [x] **CLIP-01**: User can copy query text from call log entries to clipboard
-- [ ] **CLIP-02**: User can copy table/column qualified names from drawer to clipboard
+- [ ] **CLIP-02**: User can copy qualified database object names from drawer to clipboard
 - [x] **NAV-01**: User can cycle to next/previous note with keybindings without leaving editor
 - [ ] **NAV-02**: User can jump between panes (editor/result/drawer/call_log) with dedicated keybindings
 
@@ -40,7 +40,7 @@ Requirements for this milestone. Each maps to roadmap phases.
 
 ### Drawer
 
-- [ ] **DRAW-01**: User can search/filter tables in the drawer to find objects in large schemas
+- [ ] **DRAW-01**: User can search/filter searchable database objects in the drawer to find objects in large schemas
 
 ### Connection Management
 

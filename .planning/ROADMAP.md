@@ -12,9 +12,9 @@ This milestone delivers 18 quality-of-life improvements to nvim-dbee, progressin
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Notifications & Feedback** - Replace silent failures with vim.notify messages and self-documenting winbar labels
-- [ ] **Phase 2: Call Log Enhancements** - Add duration/timestamp display, query copy, and re-run from history
-- [ ] **Phase 3: Editor & Result Actions** - Add note cycling, file export, and explain plan execution
+- [x] **Phase 1: Notifications & Feedback** - Replace silent failures with vim.notify messages and self-documenting winbar labels
+- [x] **Phase 2: Call Log Enhancements** - Add duration/timestamp display, query copy, and re-run from history
+- [x] **Phase 3: Editor & Result Actions** - Add note cycling, file export, and explain plan execution
 - [ ] **Phase 4: Drawer & Navigation** - Add drawer copy/search and dedicated pane-jumping keybindings
 - [ ] **Phase 5: Resilience & Diagnostics** - Add auto-reconnect prompt and generic adapter error diagnostics
 
@@ -69,14 +69,14 @@ Plans:
 **Depends on**: Phase 1
 **Requirements**: CLIP-02, NAV-02, DRAW-01
 **Success Criteria** (what must be TRUE):
-  1. User can copy qualified table names (schema.table) and column names from the drawer to clipboard
+  1. User can copy qualified database object names from the drawer to clipboard (schema.object for tables/views/procedures/functions, schema.table.column for columns)
   2. User can jump focus between editor, result, drawer, and call log panes with dedicated keybindings
-  3. User can search/filter tables in the drawer to find objects in schemas with hundreds of tables
+  3. User can search/filter searchable database objects in the drawer to find objects in schemas with hundreds of tables when the required cache is ready, and gets a WARN instead of a partial/ambiguous filter corpus when it is not
 **Plans**: 2 plans
 
 Plans:
-- [ ] 04-01-PLAN.md -- Drawer yank qualified names (CLIP-02), pane jumping with layout API (NAV-02), headless tests
-- [ ] 04-02-PLAN.md -- Live drawer search/filter with NuiInput (DRAW-01), headless tests
+- [x] 04-01-PLAN.md -- Drawer yank qualified names (CLIP-02), pane jumping with layout API (NAV-02), headless tests
+- [x] 04-02-PLAN.md -- Live drawer search/filter with NuiInput (DRAW-01), headless tests
 
 ### Phase 5: Resilience & Diagnostics
 **Goal**: Connection failures surface actionable prompts and query errors show inline markers across all adapters
@@ -102,6 +102,6 @@ Note: Phases 3 and 4 depend only on Phase 1, not on Phase 2. They can execute in
 |-------|----------------|--------|-----------|
 | 1. Notifications & Feedback | 2/2 | Complete | 2026-03-06 |
 | 2. Call Log Enhancements | 2/2 | Complete | 2026-03-07 |
-| 3. Editor & Result Actions | 1/2 | In Progress|  |
-| 4. Drawer & Navigation | 0/2 | Not started | - |
+| 3. Editor & Result Actions | 2/2 | Complete | 2026-03-09 |
+| 4. Drawer & Navigation | 0/2 | Ready for execution | - |
 | 5. Resilience & Diagnostics | 0/0 | Not started | - |
