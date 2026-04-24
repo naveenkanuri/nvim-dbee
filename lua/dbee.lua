@@ -959,13 +959,14 @@ ensure_oracle_explain_listener = function()
       utils.log("warn", "Explain plan failed (step 2): " .. tostring(step2_call))
       return
     end
+    local original_query = pending.original_query
     reconnect.register_call(step2_call.id, {
       conn_id = pending.conn_id,
       conn_name = pending.conn_name,
       conn_type = pending.conn_type,
-      legacy_query = pending.original_query,
+      legacy_query = original_query,
       retry_fn = function(reconnected_conn_id, meta)
-        return run_oracle_explain_on_connection(reconnected_conn_id, meta.legacy_query or pending.original_query)
+        return run_oracle_explain_on_connection(reconnected_conn_id, meta.legacy_query or original_query)
       end,
     })
     api.ui.result_set_call(step2_call)

@@ -23,6 +23,8 @@ local call_ids_by_conn = {}
 local episodes = {}
 ---@type table<call_id, true>
 local retired_by_retry = {}
+---@type table<call_id, true>
+local superseded = {}
 ---@type table<string, fun(old_conn_id: connection_id, new_conn_id: connection_id)>
 local connection_rewritten_listeners = {}
 local reconnect_listener_registered = false
@@ -42,6 +44,25 @@ local disconnected_error_states = {
 }
 
 local SYNTHETIC_STEP2_PATTERN = "^%s*SELECT%s+%*%s+FROM%s+TABLE%s*%(%s*DBMS_XPLAN"
+
+---@param call_id call_id
+local function clear_tombstones(call_id)
+  retired_by_retry[call_id] = nil
+  superseded[call_id] = nil
+end
+
+local function prune_orphaned_tombstones()
+  for call_id in pairs(retired_by_retry) do
+    if not calls_by_id[call_id] then
+      retired_by_retry[call_id] = nil
+    end
+  end
+  for call_id in pairs(superseded) do
+    if not calls_by_id[call_id] then
+      superseded[call_id] = nil
+    end
+  end
+end
 
 ---@param exec_opts table|nil
 ---@return table|nil
@@ -296,6 +317,7 @@ end
 function M.reset_connection_episode(conn_id)
   local episode = episodes[conn_id]
   if not episode then
+    prune_orphaned_tombstones()
     return
   end
 
@@ -310,11 +332,12 @@ function M.reset_connection_episode(conn_id)
   end
 
   for _, call_id in ipairs(owned_ids) do
-    retired_by_retry[call_id] = nil
+    clear_tombstones(call_id)
     M.forget_call(call_id)
   end
 
   episodes[conn_id] = nil
+  prune_orphaned_tombstones()
 end
 
 ---@param call_id call_id
@@ -446,9 +469,13 @@ function M.reconnect_connection(conn_id, opts)
   end
 
   local previous_current = nil
+  local previous_current_source_id = nil
   local ok_current, current_or_err = pcall(api.core.get_current_connection)
   if ok_current then
     previous_current = current_or_err
+    if previous_current and previous_current.id then
+      previous_current_source_id = find_source_id_for_connection(previous_current.id)
+    end
   end
 
   local target_conn = nil
@@ -469,6 +496,8 @@ function M.reconnect_connection(conn_id, opts)
     return false, "could not locate source for current connection", nil, nil
   end
 
+  M.reset_connection_episode(conn_id)
+
   local ok_reload, reload_err = pcall(api.core.source_reload, source_id)
   if not ok_reload then
     return false, "failed reloading connection source: " .. tostring(reload_err), nil, nil
@@ -484,8 +513,35 @@ function M.reconnect_connection(conn_id, opts)
     return false, "failed selecting reloaded connection: " .. tostring(set_err), nil, nil
   end
 
+  M.reset_connection_episode(reloaded_conn.id)
+
   if opts.restore_current ~= false and previous_current and previous_current.id ~= conn_id then
-    pcall(api.core.set_current_connection, previous_current.id)
+    local restore_conn = previous_current
+    if previous_current_source_id and previous_current_source_id == source_id then
+      local resolved_previous, resolve_err = resolve_reloaded_connection(source_id, previous_current)
+      if not resolved_previous then
+        utils.log(
+          "warn",
+          ("Reconnect succeeded, but could not restore previous current connection %q: %s"):format(
+            tostring(previous_current.name or previous_current.id),
+            tostring(resolve_err)
+          )
+        )
+        return true, reloaded_conn.id, reloaded_conn.name, reloaded_conn.type
+      end
+      restore_conn = resolved_previous
+    end
+
+    local ok_restore, restore_err = pcall(api.core.set_current_connection, restore_conn.id)
+    if not ok_restore then
+      utils.log(
+        "warn",
+        ("Reconnect succeeded, but could not restore previous current connection %q: %s"):format(
+          tostring(previous_current.name or previous_current.id),
+          tostring(restore_err)
+        )
+      )
+    end
   end
 
   return true, reloaded_conn.id, reloaded_conn.name, reloaded_conn.type
@@ -561,13 +617,14 @@ function M.handle_call_state_changed(data)
   local episode = episodes[effective_conn_id]
   local conn_name = (meta and meta.conn_name) or effective_conn_id
 
+  if terminal_states[state] and (retired_by_retry[data.call.id] or superseded[data.call.id]) then
+    M.forget_call(data.call.id)
+    clear_tombstones(data.call.id)
+    return
+  end
+
   if state == "archived" then
-    if retired_by_retry[data.call.id] then
-      M.forget_call(data.call.id)
-      retired_by_retry[data.call.id] = nil
-      return
-    end
-    if episode and data.call.id == episode.latest_call_id and ts > (episode.latest_failed_ts or 0) then
+    if episode and ts > (episode.latest_failed_ts or 0) then
       M.reset_connection_episode(effective_conn_id)
     end
     M.forget_call(data.call.id)
@@ -576,7 +633,7 @@ function M.handle_call_state_changed(data)
 
   if state == "canceled" then
     M.forget_call(data.call.id)
-    retired_by_retry[data.call.id] = nil
+    clear_tombstones(data.call.id)
     return
   end
 
@@ -584,7 +641,7 @@ function M.handle_call_state_changed(data)
     and kind ~= "disconnected"
   then
     M.forget_call(data.call.id)
-    retired_by_retry[data.call.id] = nil
+    clear_tombstones(data.call.id)
     return
   end
 
@@ -596,17 +653,12 @@ function M.handle_call_state_changed(data)
     return
   end
 
-  if retired_by_retry[data.call.id] then
-    M.forget_call(data.call.id)
-    retired_by_retry[data.call.id] = nil
-    return
-  end
-
   episode = episode or ensure_episode(effective_conn_id)
   episodes[effective_conn_id] = episode
 
   if ts >= (episode.latest_failed_ts or 0) then
     if episode.latest_call_id and episode.latest_call_id ~= data.call.id then
+      superseded[episode.latest_call_id] = true
       M.forget_call(episode.latest_call_id)
     end
     episode.latest_failed_ts = ts
@@ -681,6 +733,7 @@ function M._debug_snapshot()
     call_ids_by_conn = vim.deepcopy(call_ids_by_conn),
     episodes = vim.deepcopy(episodes),
     retired_by_retry = vim.deepcopy(retired_by_retry),
+    superseded = vim.deepcopy(superseded),
     call_count = call_count,
     reconnect_listener_registered = reconnect_listener_registered,
     connection_rewritten_listener_keys = vim.tbl_keys(connection_rewritten_listeners),

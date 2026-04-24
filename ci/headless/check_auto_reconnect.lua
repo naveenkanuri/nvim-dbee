@@ -408,6 +408,69 @@ do
 end
 
 do
+  local env, dbee, reconnect = load_runtime({
+    current_conn = make_conn("conn_manual", { type = "oracle" }),
+    same_id_reload = true,
+  })
+
+  env.select_choices = { "No", "__defer__" }
+
+  reconnect.register_call("call_declined", {
+    conn_id = "conn_manual",
+    conn_name = "conn_manual",
+    conn_type = "oracle",
+    resolved_query = "select 1 from dual",
+  })
+
+  env.emit_call_state({
+    conn_id = "conn_manual",
+    call = {
+      id = "call_declined",
+      query = "select 1 from dual",
+      state = "executing_failed",
+      error_kind = "disconnected",
+      timestamp_us = 10,
+      time_taken_us = 0,
+      error = "lost once",
+    },
+  })
+  assert_prompt_count(env, 1)
+
+  local snapshot = reconnect._debug_snapshot()
+  assert_true("manual_reconnect_declined_latched", snapshot.episodes.conn_manual.declined == true)
+
+  local reconnected_conn, reconnect_err = dbee.reconnect_current_connection({ notify = false })
+  assert_true("manual_reconnect_ok", reconnected_conn ~= nil)
+  assert_eq("manual_reconnect_err", reconnect_err, nil)
+
+  snapshot = reconnect._debug_snapshot()
+  assert_true("manual_reconnect_episode_cleared", snapshot.episodes.conn_manual == nil)
+
+  reconnect.register_call("call_after_manual_reconnect", {
+    conn_id = "conn_manual",
+    conn_name = "conn_manual",
+    conn_type = "oracle",
+    resolved_query = "select 2 from dual",
+  })
+
+  env.emit_call_state({
+    conn_id = "conn_manual",
+    call = {
+      id = "call_after_manual_reconnect",
+      query = "select 2 from dual",
+      state = "executing_failed",
+      error_kind = "disconnected",
+      timestamp_us = 20,
+      time_taken_us = 0,
+      error = "lost twice",
+    },
+  })
+  assert_prompt_count(env, 2)
+
+  print("CONN01_MANUAL_RECONNECT_RESETS_EPISODE_OK=true")
+end
+
+do
   local env, _, reconnect = load_runtime({
     current_conn = make_conn("conn_same", { type = "oracle" }),
     same_id_reload = true,
@@ -439,6 +502,107 @@ do
 
   print("CONN01_SAME_ID_FAST_PATH_OK=true")
   print("CONN01_REWRITE_LISTENER_GUARD_OK=true")
+end
+
+do
+  local env, _, reconnect = load_runtime({
+    current_conn = make_conn("conn_archive_reset", { type = "oracle" }),
+    same_id_reload = true,
+  })
+
+  env.select_choices = { "Yes", "No", "__defer__" }
+
+  reconnect.register_call("call_retry_seed", {
+    conn_id = "conn_archive_reset",
+    conn_name = "conn_archive_reset",
+    conn_type = "oracle",
+    resolved_query = "select retry seed from dual",
+  })
+
+  env.emit_call_state({
+    conn_id = "conn_archive_reset",
+    call = {
+      id = "call_retry_seed",
+      query = "select retry seed from dual",
+      state = "executing_failed",
+      error_kind = "disconnected",
+      timestamp_us = 10,
+      time_taken_us = 0,
+      error = "lost retry seed",
+    },
+  })
+  assert_prompt_count(env, 1)
+  assert_true("archive_reset_retry_started", env.executed[1] ~= nil)
+
+  reconnect.register_call("call_declined_after_retry", {
+    conn_id = "conn_archive_reset",
+    conn_name = "conn_archive_reset",
+    conn_type = "oracle",
+    resolved_query = "select declined after retry from dual",
+  })
+
+  env.emit_call_state({
+    conn_id = "conn_archive_reset",
+    call = {
+      id = "call_declined_after_retry",
+      query = "select declined after retry from dual",
+      state = "executing_failed",
+      error_kind = "disconnected",
+      timestamp_us = 20,
+      time_taken_us = 0,
+      error = "lost declined",
+    },
+  })
+  assert_prompt_count(env, 2)
+
+  local snapshot = reconnect._debug_snapshot()
+  assert_true("archive_reset_declined_latched", snapshot.episodes.conn_archive_reset.declined == true)
+
+  reconnect.register_call("call_success_after_decline", {
+    conn_id = "conn_archive_reset",
+    conn_name = "conn_archive_reset",
+    conn_type = "oracle",
+    resolved_query = "select success from dual",
+  })
+
+  env.emit_call_state({
+    conn_id = "conn_archive_reset",
+    call = {
+      id = "call_success_after_decline",
+      query = "select success from dual",
+      state = "archived",
+      error_kind = "unknown",
+      timestamp_us = 30,
+      time_taken_us = 0,
+      error = nil,
+    },
+  })
+
+  snapshot = reconnect._debug_snapshot()
+  assert_true("archive_reset_episode_cleared", snapshot.episodes.conn_archive_reset == nil)
+
+  reconnect.register_call("call_after_archive_reset", {
+    conn_id = "conn_archive_reset",
+    conn_name = "conn_archive_reset",
+    conn_type = "oracle",
+    resolved_query = "select prompt again from dual",
+  })
+
+  env.emit_call_state({
+    conn_id = "conn_archive_reset",
+    call = {
+      id = "call_after_archive_reset",
+      query = "select prompt again from dual",
+      state = "executing_failed",
+      error_kind = "disconnected",
+      timestamp_us = 40,
+      time_taken_us = 0,
+      error = "lost after success",
+    },
+  })
+  assert_prompt_count(env, 3)
+
+  print("CONN01_ARCHIVED_SUCCESS_RESETS_EPISODE_OK=true")
 end
 
 do
@@ -539,6 +703,48 @@ do
   print("CONN01_EPISODE_MIGRATION_OK=true")
   print("CONN01_CONN_REWRITE_FANOUT_OK=true")
   print("CONN01_EFFECTIVE_CONN_ID_OK=true")
+end
+
+do
+  local target_old = make_conn("conn_target_old", {
+    type = "oracle",
+    name = "Reconnect Target",
+    url = "db://shared-target",
+  })
+  local previous_current = make_conn("conn_prev_old", {
+    type = "oracle",
+    name = "Current Conn",
+    url = "db://shared-current",
+  })
+
+  local env, _, reconnect = load_runtime({
+    current_conn = previous_current,
+    source_conns = { vim.deepcopy(target_old), vim.deepcopy(previous_current) },
+    reload_sequence = {
+      {
+        make_conn("conn_target_new", {
+          type = "oracle",
+          name = "Reconnect Target",
+          url = "db://shared-target",
+        }),
+        make_conn("conn_prev_new", {
+          type = "oracle",
+          name = "Current Conn",
+          url = "db://shared-current",
+        }),
+      },
+    },
+  })
+
+  local ok_reconnect, new_conn_id = reconnect.reconnect_connection("conn_target_old", { restore_current = true })
+  assert_true("previous_current_restore_ok", ok_reconnect)
+  assert_eq("previous_current_target_id", new_conn_id, "conn_target_new")
+  assert_eq("previous_current_restored_id", env.current_conn.id, "conn_prev_new")
+  assert_eq("previous_current_switch_count", #env.set_current_calls, 2)
+  assert_eq("previous_current_switch_target", env.set_current_calls[1], "conn_target_new")
+  assert_eq("previous_current_switch_restore", env.set_current_calls[2], "conn_prev_new")
+
+  print("CONN01_PREVIOUS_CURRENT_REMAP_OK=true")
 end
 
 do
@@ -764,7 +970,26 @@ do
   assert_eq("registry_bounded_count", snapshot.call_count, 1)
   assert_eq("registry_bounded_latest", snapshot.episodes.conn_flap.latest_call_id, "call_flap_10")
 
+  env.emit_call_state({
+    conn_id = "conn_flap",
+    call = {
+      id = "call_flap_9",
+      query = "select 9",
+      state = "archive_failed",
+      error_kind = "disconnected",
+      timestamp_us = 11,
+      time_taken_us = 0,
+      error = "late superseded terminal",
+    },
+  })
+
+  local after_late_terminal = reconnect._debug_snapshot()
+  assert_eq("superseded_tombstone_count", after_late_terminal.call_count, 1)
+  assert_eq("superseded_tombstone_latest", after_late_terminal.episodes.conn_flap.latest_call_id, "call_flap_10")
+  assert_true("superseded_tombstone_cleared", after_late_terminal.superseded.call_flap_9 == nil)
+
   print("CONN01_REGISTRY_BOUNDED=true")
+  print("CONN01_SUPERSEDED_TOMBSTONE_OK=true")
 end
 
 do
