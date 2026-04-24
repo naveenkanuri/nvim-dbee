@@ -1,5 +1,6 @@
 local utils = require("dbee.utils")
 local common = require("dbee.ui.common")
+local diagnostics = require("dbee.ui.editor.diagnostics")
 local welcome = require("dbee.ui.editor.welcome")
 local variables = require("dbee.variables")
 
@@ -10,33 +11,6 @@ local function get_reconnect()
     return nil
   end
   return reconnect
-end
-
---- Parse Oracle error location from error string.
---- Returns (line, col) or (nil, nil) if not found.
----@param err_msg string
----@return integer?, integer?
-local function parse_oracle_error_location(err_msg)
-  local line, col = err_msg:match("line%s+(%d+),?%s*column%s+(%d+)")
-  if line and col then
-    return tonumber(line), tonumber(col)
-  end
-  -- Also check the formatted [L3:C5] form
-  line, col = err_msg:match("%[L(%d+):C(%d+)%]")
-  if line and col then
-    return tonumber(line), tonumber(col)
-  end
-  -- Some Oracle errors only include line info (e.g. ORA-06512: at line 4).
-  line = err_msg:match("[Aa][Tt]%s+[Ll][Ii][Nn][Ee]%s+(%d+)")
-  if line then
-    return tonumber(line), 1
-  end
-  -- Fallback for "line N" without explicit column.
-  line = err_msg:match("[Ll][Ii][Nn][Ee]%s+(%d+)")
-  if line then
-    return tonumber(line), 1
-  end
-  return nil, nil
 end
 
 ---@alias namespace_id "global"|string
@@ -55,7 +29,10 @@ end
 ---@field private event_callbacks table<editor_event_name, event_listener[]> callbacks for events
 ---@field private window_options table<string, any> a table of window options.
 ---@field private buffer_options table<string, any> a table of buffer options for all notes.
----@field private diag_ns integer diagnostic namespace id
+---@field private diag_ns integer? last-used diagnostic namespace id (compat shim for existing single-connection callers)
+---@field private diag_ns_by_conn table<connection_id, integer>
+---@field private diag_bufs_by_conn table<connection_id, table<integer, true>>
+---@field private note_count_by_conn table<connection_id, integer>
 ---@field private last_exec_offset integer? line offset of last executed query in buffer
 ---@field private last_exec_bufnr integer? buffer of last executed query
 ---@field private note_calls table<note_id, CallDetails> last call per note
@@ -98,7 +75,10 @@ function EditorUI:new(handler, result, opts)
       swapfile = false,
       filetype = "sql",
     }, opts.buffer_options or {}),
-    diag_ns = vim.api.nvim_create_namespace("dbee_diagnostics"),
+    diag_ns = nil,
+    diag_ns_by_conn = {},
+    diag_bufs_by_conn = {},
+    note_count_by_conn = {},
     last_exec_offset = nil,
     last_exec_bufnr = nil,
     note_calls = {},
@@ -117,6 +97,18 @@ function EditorUI:new(handler, result, opts)
   handler:register_event_listener("call_state_changed", function(data)
     o:on_call_state_changed(data)
   end)
+
+  local reconnect = get_reconnect()
+  if reconnect then
+    reconnect.register_connection_rewritten_listener("editor-diagnostics", function(old_conn_id, new_conn_id)
+      if (o.note_count_by_conn[old_conn_id] or 0) <= 0 then
+        o:prune_diag_namespace(old_conn_id)
+      end
+      if (o.note_count_by_conn[new_conn_id] or 0) <= 0 then
+        o:prune_diag_namespace(new_conn_id)
+      end
+    end)
+  end
 
   -- Auto-dismiss cancel-confirm prompt when ALL calls on the monitored
   -- connection reach terminal state.
@@ -505,7 +497,7 @@ function EditorUI:get_actions()
       confirm_and_execute(function()
         self.last_exec_offset = 0
         self.last_exec_bufnr = bufnr
-        vim.diagnostic.reset(self.diag_ns, bufnr)
+        self:clear_note_diagnostics(self.current_note_id)
 
         local note_id = self.current_note_id
         local exec_bufnr = self.last_exec_bufnr
@@ -550,7 +542,7 @@ function EditorUI:get_actions()
       confirm_and_execute(function()
         self.last_exec_offset = srow
         self.last_exec_bufnr = vim.api.nvim_get_current_buf()
-        vim.diagnostic.reset(self.diag_ns, self.last_exec_bufnr)
+        self:clear_note_diagnostics(self.current_note_id)
 
         local note_id = self.current_note_id
         local exec_bufnr = self.last_exec_bufnr
@@ -658,6 +650,9 @@ function EditorUI:get_actions()
     focus_call_log = function()
       require("dbee").focus_pane("call_log")
     end,
+    clear_diagnostics = function()
+      self:clear_note_diagnostics(self.current_note_id)
+    end,
 
     run_under_cursor = function()
       local bufnr = vim.api.nvim_get_current_buf()
@@ -673,7 +668,7 @@ function EditorUI:get_actions()
         confirm_and_execute(function()
           self.last_exec_offset = srow
           self.last_exec_bufnr = bufnr
-          vim.diagnostic.reset(self.diag_ns, bufnr)
+          self:clear_note_diagnostics(self.current_note_id)
 
           -- highlight the statement that will be executed
           local ns_id = vim.api.nvim_create_namespace("dbee_query_highlight")
@@ -749,6 +744,134 @@ end
 function EditorUI:register_event_listener(event, listener)
   self.event_callbacks[event] = self.event_callbacks[event] or {}
   table.insert(self.event_callbacks[event], listener)
+end
+
+---@param conn_id connection_id?
+---@return integer?
+function EditorUI:get_diag_namespace(conn_id)
+  if not conn_id then
+    return nil
+  end
+  self.diag_ns_by_conn[conn_id] = self.diag_ns_by_conn[conn_id]
+    or vim.api.nvim_create_namespace("dbee-" .. tostring(conn_id))
+  self.diag_ns = self.diag_ns_by_conn[conn_id]
+  return self.diag_ns_by_conn[conn_id]
+end
+
+---@param conn_id connection_id?
+---@param bufnr integer
+function EditorUI:track_diag_buffer(conn_id, bufnr)
+  if not conn_id or not bufnr or bufnr <= 0 then
+    return
+  end
+  self.diag_bufs_by_conn[conn_id] = self.diag_bufs_by_conn[conn_id] or {}
+  self.diag_bufs_by_conn[conn_id][bufnr] = true
+end
+
+---@param conn_id connection_id?
+---@param bufnr integer?
+function EditorUI:prune_diag_namespace(conn_id, bufnr)
+  if not conn_id then
+    return
+  end
+
+  local ns = self.diag_ns_by_conn[conn_id]
+  local tracked = self.diag_bufs_by_conn[conn_id]
+
+  if bufnr ~= nil then
+    if ns and vim.api.nvim_buf_is_valid(bufnr) then
+      vim.diagnostic.reset(ns, bufnr)
+    end
+    if tracked then
+      tracked[bufnr] = nil
+    end
+  elseif tracked then
+    for tracked_buf in pairs(tracked) do
+      if ns and vim.api.nvim_buf_is_valid(tracked_buf) then
+        vim.diagnostic.reset(ns, tracked_buf)
+      end
+      tracked[tracked_buf] = nil
+    end
+  end
+
+  if tracked and next(tracked) == nil then
+    self.diag_bufs_by_conn[conn_id] = nil
+    self.diag_ns_by_conn[conn_id] = nil
+    if self.diag_ns == ns then
+      self.diag_ns = nil
+    end
+  end
+end
+
+---@param note_id note_id?
+function EditorUI:clear_note_diagnostics(note_id)
+  if not note_id then
+    return
+  end
+  local meta = self.note_exec_meta[note_id]
+  if not meta or not meta.conn_id then
+    return
+  end
+  local bufnr = meta.bufnr
+  if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
+    self:prune_diag_namespace(meta.conn_id, bufnr)
+  end
+end
+
+---@param note_id note_id
+---@param old_conn_id connection_id?
+---@param new_conn_id connection_id?
+---@param bufnr integer?
+function EditorUI:update_note_connection_counts(note_id, old_conn_id, new_conn_id, bufnr)
+  if old_conn_id and old_conn_id ~= new_conn_id then
+    self:prune_diag_namespace(old_conn_id, bufnr)
+    local next_count = (self.note_count_by_conn[old_conn_id] or 0) - 1
+    if next_count <= 0 then
+      self.note_count_by_conn[old_conn_id] = nil
+      self:prune_diag_namespace(old_conn_id)
+    else
+      self.note_count_by_conn[old_conn_id] = next_count
+    end
+  end
+
+  if new_conn_id and old_conn_id ~= new_conn_id then
+    self.note_count_by_conn[new_conn_id] = (self.note_count_by_conn[new_conn_id] or 0) + 1
+  end
+end
+
+---@param bufnr integer
+---@param diag dbee_diag_result
+---@return integer?
+---@return integer?
+---@return integer?
+local function clamp_diagnostic(bufnr, diag)
+  if not diag then
+    return nil, nil, nil
+  end
+
+  local line_count = vim.api.nvim_buf_line_count(bufnr)
+  if line_count < 1 then
+    return nil, nil, nil
+  end
+
+  local lnum = math.max(tonumber(diag.line) or 0, 0)
+  if lnum >= line_count then
+    lnum = line_count - 1
+  end
+
+  local line_text = vim.api.nvim_buf_get_lines(bufnr, lnum, lnum + 1, false)[1] or ""
+  local max_col = #line_text
+  local col = math.max(tonumber(diag.col) or 0, 0)
+  if col > max_col then
+    col = max_col
+  end
+
+  local cursor_col = col
+  if max_col > 0 and cursor_col >= max_col then
+    cursor_col = max_col - 1
+  end
+
+  return lnum, col, cursor_col
 end
 
 ---@private
@@ -926,6 +1049,10 @@ function EditorUI:namespace_remove_note(id, note_id)
       reconnect.forget_call(old_call.id)
     end
   end
+  local old_meta = self.note_exec_meta[note_id]
+  if old_meta and old_meta.conn_id then
+    self:update_note_connection_counts(note_id, old_meta.conn_id, nil, old_meta.bufnr)
+  end
   self.note_calls[note_id] = nil
   self.note_exec_meta[note_id] = nil
 
@@ -1031,12 +1158,14 @@ function EditorUI:set_result_for_note(note_id, call, bufnr, start_line, start_co
   self.call_note_ids[call.id] = note_id
 
   local meta = self.note_exec_meta[note_id] or {}
+  local previous_conn_id = meta.conn_id
   meta.bufnr = bufnr
   meta.offset = start_line or 0
   meta.start_line = start_line or 0
   meta.start_col = start_col or 0
   meta.resolved_query = resolved_query
   self.note_exec_meta[note_id] = meta
+  self:update_note_connection_counts(note_id, previous_conn_id, conn_id, bufnr)
   self:write_note_conn(note_id, conn_id, conn_name, conn_type)
 
   if self.current_note_id == note_id then
@@ -1056,6 +1185,7 @@ function EditorUI:rebind_note_connection(note_id, new_conn_id, new_conn_name, ne
   if meta.conn_id == new_conn_id then
     return
   end
+  self:update_note_connection_counts(note_id, meta.conn_id, new_conn_id, meta.bufnr)
   self:write_note_conn(note_id, new_conn_id, new_conn_name, new_conn_type)
 end
 
@@ -1082,6 +1212,7 @@ end
 -- and opens it in the window
 ---@param id note_id
 function EditorUI:set_current_note(id)
+  local previous_note_id = self.current_note_id
   if id and self.current_note_id == id then
     self:display_note(id)
     return
@@ -1093,6 +1224,9 @@ function EditorUI:set_current_note(id)
   end
 
   self.current_note_id = id
+  if previous_note_id and previous_note_id ~= id then
+    self:clear_note_diagnostics(previous_note_id)
+  end
 
   self:display_note(id)
 
@@ -1200,71 +1334,56 @@ function EditorUI:on_call_state_changed(data)
   end
 
   local exec_bufnr = meta.bufnr
-  local exec_start_line = meta.start_line or meta.offset or 0
-  local exec_start_col = meta.start_col or 0
-  local exec_conn_type = meta.conn_type
+  local conn_id = meta.conn_id
+  local conn_type = meta.conn_type
+
+  if conn_id then
+    self:prune_diag_namespace(conn_id, exec_bufnr)
+  end
 
   if data.call.state == "archived" then
-    vim.diagnostic.reset(self.diag_ns, exec_bufnr)
     return
   end
 
-  if data.call.state ~= "executing_failed" then
+  if
+    data.call.state ~= "executing_failed"
+    and data.call.state ~= "retrieving_failed"
+    and data.call.state ~= "archive_failed"
+  then
     return
   end
 
-  -- Always clear stale diagnostics for this note/call first.
-  vim.diagnostic.reset(self.diag_ns, exec_bufnr)
-
-  if not exec_conn_type or exec_conn_type:lower() ~= "oracle" then
+  if not diagnostics.is_sql_adapter(conn_type) then
     return
   end
 
-  local err_msg = data.call.error
-  if not err_msg or err_msg == "" then
+  local diag = diagnostics.build_diagnostic(conn_type, data.call.error or "", {
+    resolved_query = meta.resolved_query,
+    start_line = meta.start_line or meta.offset or 0,
+    start_col = meta.start_col or 0,
+  })
+  if not diag or not conn_id then
     return
   end
 
-  local err_line, err_col = parse_oracle_error_location(err_msg)
-  if not err_line then
+  local ns = self:get_diag_namespace(conn_id)
+  local buf_line, buf_col, cursor_col = clamp_diagnostic(exec_bufnr, diag)
+  if buf_line == nil or buf_col == nil or cursor_col == nil then
     return
   end
 
-  local buf_line = exec_start_line + err_line - 1
-  local buf_col = math.max((err_col or 1) - 1, 0)
-  if err_line == 1 then
-    buf_col = exec_start_col + buf_col
-  end
-
-  local line_count = vim.api.nvim_buf_line_count(exec_bufnr)
-  if line_count < 1 then
-    return
-  end
-  if buf_line < 0 then
-    buf_line = 0
-  end
-  if buf_line >= line_count then
-    buf_line = line_count - 1
-  end
-  local line_text = vim.api.nvim_buf_get_lines(exec_bufnr, buf_line, buf_line + 1, false)[1] or ""
-  local max_col = #line_text
-  local clamped_col = math.min(buf_col, max_col)
-  local cursor_col = clamped_col
-  if max_col > 0 and cursor_col >= max_col then
-    cursor_col = max_col - 1
-  end
-
-  vim.diagnostic.set(self.diag_ns, exec_bufnr, {
+  vim.diagnostic.set(ns, exec_bufnr, {
     {
       lnum = buf_line,
-      col = clamped_col,
-      severity = vim.diagnostic.severity.ERROR,
-      message = err_msg,
+      col = buf_col,
+      severity = diag.severity,
+      message = diag.message,
       source = "dbee",
     },
   })
+  self:track_diag_buffer(conn_id, exec_bufnr)
 
-  -- Jump cursor to first compile/runtime error location when note buffer is visible.
+  -- Jump cursor to first diagnostic location when note buffer is visible.
   for _, win in ipairs(vim.api.nvim_list_wins()) do
     if vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_buf(win) == exec_bufnr then
       vim.api.nvim_set_current_win(win)

@@ -118,6 +118,11 @@
 ---| '"current_connection_changed"' {conn_id}
 ---| '"database_selected"' {conn_id, database_name}
 
+---Editor-owned SQL diagnostics are rendered inside connection-scoped namespaces
+---named like `dbee-<conn_id>`.
+---Explain Plan stays on the existing result/notify path in Phase 5 and does not
+---participate in inline editor diagnostics.
+
 ---Available editor events.
 ---@alias editor_event_name
 ---| '"note_state_changed"' {note_id}
