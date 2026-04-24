@@ -121,6 +121,19 @@ function ui.editor_do_action(action)
   state.editor():do_action(action)
 end
 
+--- Rebind a note's connection ownership after reconnect-side identity rewrite.
+--- No-ops when the UI is not loaded yet.
+---@param note_id note_id
+---@param conn_id connection_id
+---@param conn_name string?
+---@param conn_type string?
+function ui.rebind_note_connection(note_id, conn_id, conn_name, conn_type)
+  if not ui.is_loaded() then
+    return
+  end
+  state.editor():rebind_note_connection(note_id, conn_id, conn_name, conn_type)
+end
+
 ---@divider -
 ---@tag dbee.ref.api.ui.call_log
 ---@brief [[

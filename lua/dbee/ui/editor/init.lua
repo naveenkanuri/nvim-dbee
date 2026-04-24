@@ -3,6 +3,15 @@ local common = require("dbee.ui.common")
 local welcome = require("dbee.ui.editor.welcome")
 local variables = require("dbee.variables")
 
+---@return table|nil
+local function get_reconnect()
+  local ok, reconnect = pcall(require, "dbee.reconnect")
+  if not ok then
+    return nil
+  end
+  return reconnect
+end
+
 --- Parse Oracle error location from error string.
 --- Returns (line, col) or (nil, nil) if not found.
 ---@param err_msg string
@@ -50,7 +59,7 @@ end
 ---@field private last_exec_offset integer? line offset of last executed query in buffer
 ---@field private last_exec_bufnr integer? buffer of last executed query
 ---@field private note_calls table<note_id, CallDetails> last call per note
----@field private note_exec_meta table<note_id, { bufnr: integer, offset: integer, conn_type: string? }> execution metadata per note
+---@field private note_exec_meta table<note_id, { bufnr: integer, offset: integer, start_line: integer, start_col: integer, conn_id: string?, conn_name: string?, conn_type: string?, resolved_query: string? }> execution metadata per note
 ---@field private call_note_ids table<string, note_id> call id to note ownership mapping for active note calls
 ---@field private state_file string path to persist last-active note state
 ---@field private pending_cursor_line? integer one-shot cursor line to restore on first display
@@ -315,7 +324,7 @@ function EditorUI:get_actions()
         return
       end
 
-      on_done(call_or_err)
+      on_done(call_or_err, resolved, exec_opts)
     end)
   end
 
@@ -446,27 +455,38 @@ function EditorUI:get_actions()
     end
   end
 
-  local function set_result_for_note(note_id, call, bufnr, offset, conn_type)
-    if not call then
+  local function register_note_retry(note_id, call, conn, bufnr, start_line, start_col, original_query, resolved_query, exec_opts)
+    if not note_id or not call or not call.id then
       return
     end
-    self.result:set_call(call)
-    if note_id then
-      local previous_call = self.note_calls[note_id]
-      if previous_call and previous_call.id and previous_call.id ~= call.id then
-        self.call_note_ids[previous_call.id] = nil
-      end
-      self.note_calls[note_id] = call
-      self.call_note_ids[call.id] = note_id
-      self.note_exec_meta[note_id] = {
-        bufnr = bufnr,
-        offset = offset,
-        conn_type = conn_type,
-      }
-      if self.current_note_id == note_id then
-        self:save_last_note()
-      end
+
+    local reconnect = get_reconnect()
+    if not reconnect then
+      return
     end
+
+    reconnect.register_call(call.id, {
+      conn_id = conn.id,
+      conn_name = conn.name,
+      conn_type = conn.type,
+      note_id = note_id,
+      resolved_query = resolved_query,
+      exec_opts = exec_opts,
+      legacy_query = original_query,
+      on_retry_created = function(new_call, meta)
+        self:set_result_for_note(
+          note_id,
+          new_call,
+          bufnr,
+          start_line,
+          start_col,
+          meta.conn_id or conn.id,
+          meta.conn_name or conn.name,
+          meta.conn_type or conn.type,
+          resolved_query
+        )
+      end,
+    })
   end
 
   return {
@@ -489,9 +509,31 @@ function EditorUI:get_actions()
 
         local note_id = self.current_note_id
         local exec_bufnr = self.last_exec_bufnr
-        local exec_offset = self.last_exec_offset
-        execute_query_with_variables_async(conn, query, function(call)
-          set_result_for_note(note_id, call, exec_bufnr, exec_offset, conn.type)
+        local exec_start_line = self.last_exec_offset
+        local exec_start_col = 0
+        execute_query_with_variables_async(conn, query, function(call, resolved_query, exec_opts)
+          self:set_result_for_note(
+            note_id,
+            call,
+            exec_bufnr,
+            exec_start_line,
+            exec_start_col,
+            conn.id,
+            conn.name,
+            conn.type,
+            resolved_query
+          )
+          register_note_retry(
+            note_id,
+            call,
+            conn,
+            exec_bufnr,
+            exec_start_line,
+            exec_start_col,
+            query,
+            resolved_query,
+            exec_opts
+          )
         end)
       end)
     end,
@@ -512,9 +554,31 @@ function EditorUI:get_actions()
 
         local note_id = self.current_note_id
         local exec_bufnr = self.last_exec_bufnr
-        local exec_offset = self.last_exec_offset
-        execute_query_with_variables_async(conn, query, function(call)
-          set_result_for_note(note_id, call, exec_bufnr, exec_offset, conn.type)
+        local exec_start_line = self.last_exec_offset
+        local exec_start_col = scol
+        execute_query_with_variables_async(conn, query, function(call, resolved_query, exec_opts)
+          self:set_result_for_note(
+            note_id,
+            call,
+            exec_bufnr,
+            exec_start_line,
+            exec_start_col,
+            conn.id,
+            conn.name,
+            conn.type,
+            resolved_query
+          )
+          register_note_retry(
+            note_id,
+            call,
+            conn,
+            exec_bufnr,
+            exec_start_line,
+            exec_start_col,
+            query,
+            resolved_query,
+            exec_opts
+          )
         end)
       end)
     end,
@@ -601,7 +665,7 @@ function EditorUI:get_actions()
       if not conn then
         return
       end
-      local query, srow, erow = utils.query_under_cursor(bufnr, {
+      local query, srow, scol, erow = utils.query_under_cursor(bufnr, {
         adapter_type = conn.type,
       })
 
@@ -623,9 +687,31 @@ function EditorUI:get_actions()
 
           local note_id = self.current_note_id
           local exec_bufnr = self.last_exec_bufnr
-          local exec_offset = self.last_exec_offset
-          execute_query_with_variables_async(conn, query, function(call)
-            set_result_for_note(note_id, call, exec_bufnr, exec_offset, conn.type)
+          local exec_start_line = self.last_exec_offset
+          local exec_start_col = scol or 0
+          execute_query_with_variables_async(conn, query, function(call, resolved_query, exec_opts)
+            self:set_result_for_note(
+              note_id,
+              call,
+              exec_bufnr,
+              exec_start_line,
+              exec_start_col,
+              conn.id,
+              conn.name,
+              conn.type,
+              resolved_query
+            )
+            register_note_retry(
+              note_id,
+              call,
+              conn,
+              exec_bufnr,
+              exec_start_line,
+              exec_start_col,
+              query,
+              resolved_query,
+              exec_opts
+            )
           end)
 
           -- remove highlighting after delay
@@ -835,6 +921,10 @@ function EditorUI:namespace_remove_note(id, note_id)
   local old_call = self.note_calls[note_id]
   if old_call and old_call.id then
     self.call_note_ids[old_call.id] = nil
+    local reconnect = get_reconnect()
+    if reconnect then
+      reconnect.forget_call(old_call.id)
+    end
   end
   self.note_calls[note_id] = nil
   self.note_exec_meta[note_id] = nil
@@ -891,6 +981,82 @@ end
 function EditorUI:get_current_note()
   local note, _ = self:search_note(self.current_note_id)
   return note
+end
+
+---@param note_id note_id
+---@param conn_id connection_id
+---@param conn_name string?
+---@param conn_type string?
+function EditorUI:write_note_conn(note_id, conn_id, conn_name, conn_type)
+  if not note_id then
+    return
+  end
+
+  local meta = self.note_exec_meta[note_id] or {}
+  meta.conn_id = conn_id
+  meta.conn_name = conn_name
+  meta.conn_type = conn_type or meta.conn_type
+  self.note_exec_meta[note_id] = meta
+end
+
+---@param note_id note_id
+---@param call CallDetails
+---@param bufnr integer
+---@param start_line integer
+---@param start_col integer
+---@param conn_id connection_id
+---@param conn_name string?
+---@param conn_type string?
+---@param resolved_query string?
+function EditorUI:set_result_for_note(note_id, call, bufnr, start_line, start_col, conn_id, conn_name, conn_type, resolved_query)
+  if not call then
+    return
+  end
+
+  self.result:set_call(call)
+  if not note_id then
+    return
+  end
+
+  local previous_call = self.note_calls[note_id]
+  if previous_call and previous_call.id and previous_call.id ~= call.id then
+    self.call_note_ids[previous_call.id] = nil
+    local reconnect = get_reconnect()
+    if reconnect then
+      reconnect.forget_call(previous_call.id)
+    end
+  end
+
+  self.note_calls[note_id] = call
+  self.call_note_ids[call.id] = note_id
+
+  local meta = self.note_exec_meta[note_id] or {}
+  meta.bufnr = bufnr
+  meta.offset = start_line or 0
+  meta.start_line = start_line or 0
+  meta.start_col = start_col or 0
+  meta.resolved_query = resolved_query
+  self.note_exec_meta[note_id] = meta
+  self:write_note_conn(note_id, conn_id, conn_name, conn_type)
+
+  if self.current_note_id == note_id then
+    self:save_last_note()
+  end
+end
+
+---@param note_id note_id
+---@param new_conn_id connection_id
+---@param new_conn_name string?
+---@param new_conn_type string?
+function EditorUI:rebind_note_connection(note_id, new_conn_id, new_conn_name, new_conn_type)
+  local meta = self.note_exec_meta[note_id]
+  if not meta then
+    return
+  end
+  if meta.conn_id == new_conn_id then
+    return
+  end
+  self:write_note_conn(note_id, new_conn_id, new_conn_name, new_conn_type)
 end
 
 ---@private
@@ -1034,7 +1200,8 @@ function EditorUI:on_call_state_changed(data)
   end
 
   local exec_bufnr = meta.bufnr
-  local exec_offset = meta.offset or 0
+  local exec_start_line = meta.start_line or meta.offset or 0
+  local exec_start_col = meta.start_col or 0
   local exec_conn_type = meta.conn_type
 
   if data.call.state == "archived" then
@@ -1063,8 +1230,11 @@ function EditorUI:on_call_state_changed(data)
     return
   end
 
-  local buf_line = exec_offset + err_line - 1
+  local buf_line = exec_start_line + err_line - 1
   local buf_col = math.max((err_col or 1) - 1, 0)
+  if err_line == 1 then
+    buf_col = exec_start_col + buf_col
+  end
 
   local line_count = vim.api.nvim_buf_line_count(exec_bufnr)
   if line_count < 1 then

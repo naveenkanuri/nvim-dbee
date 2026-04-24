@@ -3,6 +3,7 @@ local api = require("dbee.api")
 local config = require("dbee.config")
 local utils = require("dbee.utils")
 local query_splitter = require("dbee.query_splitter")
+local reconnect = require("dbee.reconnect")
 local variables = require("dbee.variables")
 
 ---@toc dbee.ref.contents
@@ -33,6 +34,8 @@ local active_script_run = nil
 -- Oracle explain plan singleton listener state
 local explain_oracle_pending = {} -- [step1_call_id] = { conn_id, timer }
 local explain_oracle_listener_registered = false
+local ensure_oracle_explain_listener
+local run_oracle_explain_on_connection
 
 local disconnected_error_states = {
   executing_failed = true,
@@ -265,6 +268,7 @@ function dbee.setup(cfg)
   config.validate(merged)
 
   api.setup(merged)
+  reconnect.ensure_reconnect_listener()
 end
 
 ---Toggle dbee UI.
@@ -766,6 +770,90 @@ local function execute_with_resolved_variables_async(conn, query, opts, on_done)
   end)
 end
 
+---@param conn ConnectionParams
+---@param call CallDetails
+---@param resolved_query string
+---@param exec_opts QueryExecuteOpts|nil
+---@param extra? table<string, any>
+local function register_flat_retry_metadata(conn, call, resolved_query, exec_opts, extra)
+  if not call or not call.id then
+    return
+  end
+
+  local meta = vim.tbl_extend("force", {
+    conn_id = conn.id,
+    conn_name = conn.name,
+    conn_type = conn.type,
+    resolved_query = resolved_query,
+    exec_opts = exec_opts,
+  }, extra or {})
+  reconnect.register_call(call.id, meta)
+end
+
+---@param conn_id connection_id
+---@return ConnectionParams
+local function get_connection_metadata(conn_id)
+  local ok_current, current = pcall(api.core.get_current_connection)
+  if ok_current and current and current.id == conn_id then
+    return current
+  end
+
+  if type(api.core.connection_get_params) == "function" then
+    local ok_params, params = pcall(api.core.connection_get_params, conn_id)
+    if ok_params and params then
+      return params
+    end
+  end
+
+  return {
+    id = conn_id,
+    name = conn_id,
+    type = "oracle",
+    url = "",
+  }
+end
+
+---@param conn_id connection_id
+---@param original_query string
+---@return call_id|nil
+---@return string|nil
+run_oracle_explain_on_connection = function(conn_id, original_query)
+  ensure_oracle_explain_listener()
+
+  local conn = get_connection_metadata(conn_id)
+  local retry_fn = function(reconnected_conn_id, meta)
+    return run_oracle_explain_on_connection(reconnected_conn_id, meta.legacy_query or original_query)
+  end
+
+  local step1 = "EXPLAIN PLAN FOR " .. original_query
+  local ok1, step1_call = pcall(api.core.connection_execute, conn_id, step1)
+  if not ok1 or not step1_call then
+    return nil, tostring(step1_call)
+  end
+
+  register_flat_retry_metadata(conn, step1_call, step1, nil, {
+    legacy_query = original_query,
+    retry_fn = retry_fn,
+  })
+
+  local step1_id = step1_call.id
+  local timeout_timer = vim.defer_fn(function()
+    if explain_oracle_pending[step1_id] then
+      explain_oracle_pending[step1_id] = nil
+      utils.log("warn", "Explain plan timed out (step 1 took >10s)")
+    end
+  end, 10000)
+  explain_oracle_pending[step1_id] = {
+    conn_id = conn_id,
+    conn_name = conn.name,
+    conn_type = conn.type,
+    original_query = original_query,
+    timer = timeout_timer,
+  }
+
+  return step1_id, nil
+end
+
 ---Run SQL contextually from current buffer.
 ---In visual mode runs the selection.
 ---In normal mode runs the statement under cursor (SQL filetype only).
@@ -840,7 +928,7 @@ local function stop_timeout_timer(timer)
 end
 
 ---@private
-local function ensure_oracle_explain_listener()
+ensure_oracle_explain_listener = function()
   if explain_oracle_listener_registered then
     return
   end
@@ -871,6 +959,15 @@ local function ensure_oracle_explain_listener()
       utils.log("warn", "Explain plan failed (step 2): " .. tostring(step2_call))
       return
     end
+    reconnect.register_call(step2_call.id, {
+      conn_id = pending.conn_id,
+      conn_name = pending.conn_name,
+      conn_type = pending.conn_type,
+      legacy_query = pending.original_query,
+      retry_fn = function(reconnected_conn_id, meta)
+        return run_oracle_explain_on_connection(reconnected_conn_id, meta.legacy_query or pending.original_query)
+      end,
+    })
     api.ui.result_set_call(step2_call)
     dbee.open()
   end)
@@ -919,26 +1016,10 @@ function dbee.explain_plan(opts)
   }
 
   if adapter == "oracle" then
-    ensure_oracle_explain_listener()
-
-    local step1 = "EXPLAIN PLAN FOR " .. query
-    local ok1, step1_call = pcall(api.core.connection_execute, conn.id, step1)
-    if not ok1 then
-      utils.log("warn", "Explain plan failed: " .. tostring(step1_call))
-      return
+    local _, explain_err = run_oracle_explain_on_connection(conn.id, query)
+    if explain_err then
+      utils.log("warn", "Explain plan failed: " .. tostring(explain_err))
     end
-
-    local step1_id = step1_call.id
-    local timeout_timer = vim.defer_fn(function()
-      if explain_oracle_pending[step1_id] then
-        explain_oracle_pending[step1_id] = nil
-        utils.log("warn", "Explain plan timed out (step 1 took >10s)")
-      end
-    end, 10000)
-    explain_oracle_pending[step1_id] = {
-      conn_id = conn.id,
-      timer = timeout_timer,
-    }
     return
   end
 
@@ -954,6 +1035,9 @@ function dbee.explain_plan(opts)
     utils.log("warn", "Explain plan failed: " .. tostring(call))
     return
   end
+  register_flat_retry_metadata(conn, call, explain_query, nil, {
+    legacy_query = query,
+  })
   api.ui.result_set_call(call)
   dbee.open()
 end
@@ -1000,6 +1084,10 @@ function dbee.compile_object(opts)
   if not call or not call.id then
     return nil, "compile execution returned no call details"
   end
+
+  register_flat_retry_metadata(conn, call, query, nil, {
+    legacy_query = query,
+  })
 
   local ok_set, set_err = pcall(api.ui.result_set_call, call)
   if not ok_set then
@@ -1097,6 +1185,9 @@ function dbee.execute_script(opts)
         else
           run_state.current_call_id = call.id
           run_state.cancel_sent_call_id = nil
+          register_flat_retry_metadata(conn, call, query, query_exec_opts, {
+            legacy_query = query,
+          })
           api.ui.result_set_call(call)
           calls[#calls + 1] = call
 
@@ -1168,29 +1259,15 @@ function dbee.reconnect_current_connection(opts)
   if not conn then
     return nil, "no connection currently selected"
   end
-
-  local source_id = find_source_id_for_connection(conn.id)
-  if not source_id then
-    return nil, "could not locate source for current connection"
-  end
-  if type(api.core.source_reload) ~= "function" then
-    return nil, "source reload is not supported by current core API"
+  local ok_conn, new_conn_id_or_err, new_conn_name, new_conn_type =
+    reconnect.reconnect_connection(conn.id, { restore_current = false })
+  if not ok_conn then
+    return nil, new_conn_id_or_err
   end
 
-  local ok_reload, reload_err = pcall(api.core.source_reload, source_id)
-  if not ok_reload then
-    return nil, "failed reloading connection source: " .. tostring(reload_err)
-  end
-
-  local reloaded_conn, resolve_err = resolve_reloaded_connection(source_id, conn)
-  if not reloaded_conn then
-    return nil, resolve_err
-  end
-
-  local ok_set, set_err = pcall(api.core.set_current_connection, reloaded_conn.id)
-  if not ok_set then
-    return nil, "failed selecting reloaded connection: " .. tostring(set_err)
-  end
+  local reloaded_conn = get_connection_metadata(new_conn_id_or_err)
+  reloaded_conn.name = new_conn_name or reloaded_conn.name
+  reloaded_conn.type = new_conn_type or reloaded_conn.type
 
   if opts.notify ~= false then
     utils.log("info", "Reconnected " .. (reloaded_conn.name or reloaded_conn.id))
@@ -1214,6 +1291,18 @@ function dbee.retry_last_disconnected(opts)
     return false, "no connection currently selected"
   end
 
+  local retry_meta, retry_call_id = reconnect.get_latest_retry_meta(conn.id)
+  if retry_meta and retry_call_id then
+    local ok_retry, retry_err = reconnect.retry_call(conn.id, retry_call_id, retry_meta, {
+      restore_current = true,
+    })
+    if not ok_retry then
+      return false, tostring(retry_err)
+    end
+    utils.log("info", "Retried last disconnected query")
+    return true, nil
+  end
+
   local call = find_latest_disconnected_call(conn.id)
   if not call then
     return false, "no disconnected call available to retry"
@@ -1223,6 +1312,14 @@ function dbee.retry_last_disconnected(opts)
   if query == "" then
     return false, "last disconnected call has empty query"
   end
+
+  if query:match(reconnect.synthetic_step2_pattern()) then
+    local message = "Cannot auto-retry opaque flow. Please rerun explain plan manually after reconnecting."
+    utils.log("warn", message)
+    return false, message
+  end
+
+  utils.log("warn", "Retry metadata unavailable; falling back to raw disconnected query replay")
 
   local reconnected_conn, reconnect_err = dbee.reconnect_current_connection({ notify = false })
   if not reconnected_conn then
@@ -1470,6 +1567,10 @@ function dbee.execute(query, opts)
   if not call or not call.id then
     return nil, "query execution returned no call details"
   end
+
+  register_flat_retry_metadata(conn, call, resolved, exec_opts, {
+    legacy_query = query,
+  })
 
   local ok_set, set_err = pcall(api.ui.result_set_call, call)
   if not ok_set then

@@ -22,13 +22,14 @@ func (eb *eventBus) callLua(event string, data string) {
 	}
 }
 
-func (eb *eventBus) CallStateChanged(call *core.Call) {
+func (eb *eventBus) CallStateChanged(connID core.ConnectionID, call *core.Call) {
 	errMsg := "nil"
 	if err := call.Err(); err != nil {
 		errMsg = fmt.Sprintf("[[%s]]", err.Error())
 	}
 
 	data := fmt.Sprintf(`{
+		conn_id = %q,
 		call = {
 			id = %q,
 			query = %q,
@@ -36,13 +37,16 @@ func (eb *eventBus) CallStateChanged(call *core.Call) {
 			time_taken_us = %d,
 			timestamp_us = %d,
 			error = %s,
+			error_kind = %q,
 		},
-	}`, call.GetID(),
+	}`, connID,
+		call.GetID(),
 		call.GetQuery(),
 		call.GetState().String(),
 		call.GetTimeTaken().Microseconds(),
 		call.GetTimestamp().UnixMicro(),
-		errMsg)
+		errMsg,
+		call.ErrorKind())
 
 	eb.callLua("call_state_changed", data)
 }

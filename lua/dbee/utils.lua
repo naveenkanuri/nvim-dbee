@@ -322,11 +322,58 @@ local SQL_INCOMPLETE_CLAUSE_ENDINGS = {
   MINUS = true,     -- Oracle: MINUS SELECT
 }
 
+---@param lines string[]
+---@param start_row integer
+---@param end_row integer
+---@param query string
+---@return integer
+---@return integer
+local function find_statement_columns(lines, start_row, end_row, query)
+  local qlines = vim.split(tostring(query or ""), "\n", { plain = true })
+  local first_query_line = qlines[1] or ""
+  local last_query_line = qlines[#qlines] or first_query_line
+  local start_line = lines[start_row + 1] or ""
+  local end_line = lines[end_row + 1] or ""
+
+  local start_col = 0
+  local exact_start = start_line:find(first_query_line, 1, true)
+  if exact_start then
+    start_col = exact_start - 1
+  else
+    local trimmed_first = trim_leading_whitespace(first_query_line)
+    if trimmed_first ~= "" then
+      local trimmed_pos = start_line:find(trimmed_first, 1, true)
+      if trimmed_pos then
+        start_col = trimmed_pos - 1
+      else
+        start_col = #(start_line:match("^%s*") or "")
+      end
+    end
+  end
+
+  local end_col = #end_line
+  local trimmed_last = trim_trailing_semicolon(last_query_line)
+  if trimmed_last ~= "" then
+    local exact_end = end_line:find(trimmed_last, 1, true)
+    if exact_end then
+      end_col = exact_end - 1 + #trimmed_last
+    else
+      local fallback_end = trim_trailing_semicolon(end_line)
+      local fallback_pos = fallback_end:find(trimmed_last, 1, true)
+      if fallback_pos then
+        end_col = fallback_pos - 1 + #trimmed_last
+      end
+    end
+  end
+
+  return start_col, end_col
+end
+
 --- Get the SQL statement under the cursor and its range (using treesitter).
 --- Potential returns are 1. the SQL query, 2. empty string, 3. nil if filetype isn't SQL.
 ---@param bufnr integer buffer containing the SQL queries.
 ---@param opts? { adapter_type?: string }
----@return nil|string query, nil|integer start_row, nil|integer end_row
+---@return nil|string query, nil|integer start_row, nil|integer start_col, nil|integer end_row, nil|integer end_col
 function M.query_under_cursor(bufnr, opts)
   opts = opts or {}
   bufnr = bufnr or vim.api.nvim_get_current_buf()
@@ -345,7 +392,7 @@ function M.query_under_cursor(bufnr, opts)
   -- This is the maximum extent of the query — tree-sitter can only narrow it down.
   local block_query, block_start, block_end = query_block_at_cursor(lines, cursor_row)
   if block_query == "" then
-    return "", cursor_row, cursor_row
+    return "", cursor_row, cursor_col, cursor_row, cursor_col
   end
 
   -- Step 2: Extract block lines for tree-sitter parsing
@@ -360,7 +407,7 @@ function M.query_under_cursor(bufnr, opts)
   vim.api.nvim_buf_set_lines(tmp_buf, 0, -1, false, block_lines)
 
   local query = ""
-  local start_row, end_row = block_start, block_end
+  local start_row, start_col, end_row, end_col = block_start, 0, block_end, 0
 
   local should_use_treesitter = adapter_type ~= "oracle"
   local ok, parser = false, nil
@@ -376,7 +423,8 @@ function M.query_under_cursor(bufnr, opts)
         local ns, _, ne, _ = node:range()
         if cursor_in_block >= ns and cursor_in_block <= ne then
           query = vim.treesitter.get_node_text(node, tmp_buf)
-          start_row, end_row = block_start + ns, block_start + ne
+          local _, node_start_col, _, node_end_col = node:range()
+          start_row, start_col, end_row, end_col = block_start + ns, node_start_col, block_start + ne, node_end_col
 
           -- Merge continuation clauses split by the parser (e.g. FETCH FIRST)
           local sibling = node:next_named_sibling()
@@ -391,7 +439,9 @@ function M.query_under_cursor(bufnr, opts)
             end
             local sib_text = vim.treesitter.get_node_text(sibling, tmp_buf)
             query = query .. " " .. sib_text
+            local _, _, _, sib_end_col = sibling:range()
             end_row = block_start + sib_end
+            end_col = sib_end_col
             sibling = sibling:next_named_sibling()
           end
 
@@ -448,9 +498,10 @@ function M.query_under_cursor(bufnr, opts)
     else
       start_row, end_row = block_start, block_end
     end
+    start_col, end_col = find_statement_columns(lines, start_row, end_row, query)
   end
 
-  return query:gsub(";%s*$", ""), start_row, end_row
+  return query:gsub(";%s*$", ""), start_row, start_col, end_row, end_col
 end
 
 ---Format microseconds into adaptive human-readable duration.

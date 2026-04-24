@@ -169,7 +169,7 @@ func (h *Handler) ConnectionExecute(connID core.ConnectionID, query string, opts
 			h.log.Errorf("cl.Err: %s", err)
 		}
 
-		h.events.CallStateChanged(c)
+		h.events.CallStateChanged(connID, c)
 	})
 
 	id := call.GetID()

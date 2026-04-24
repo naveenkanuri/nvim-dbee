@@ -217,7 +217,7 @@ function ResultUI:display_status()
   }
 
   if error_kind == "disconnected" then
-    table.insert(lines, "Hint: open dbee actions and choose Reconnect + Retry Last Query")
+    table.insert(lines, "Hint: answer the reconnect prompt, or use Dbee Actions -> Reconnect + Retry Last Query")
   end
 
   if self.current_call.error and self.current_call.error ~= "" then

@@ -114,7 +114,7 @@
 
 ---Avaliable core events.
 ---@alias core_event_name
----| '"call_state_changed"' {call}
+---| '"call_state_changed"' {conn_id, call={id,query,state,time_taken_us,timestamp_us,error,error_kind}}
 ---| '"current_connection_changed"' {conn_id}
 ---| '"database_selected"' {conn_id, database_name}
 
