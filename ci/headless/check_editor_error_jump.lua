@@ -47,6 +47,7 @@ local editor = EditorUI:new(handler, result, {
   buffer_options = {},
   window_options = {},
 })
+local diag_ns = editor:get_diag_namespace("conn_test")
 
 local bufnr = vim.api.nvim_create_buf(false, true)
 vim.api.nvim_set_current_buf(bufnr)
@@ -78,7 +79,7 @@ editor:on_call_state_changed({
 })
 
 local cursor = vim.api.nvim_win_get_cursor(0)
-local diagnostics = vim.diagnostic.get(bufnr, { namespace = editor.diag_ns })
+local diagnostics = vim.diagnostic.get(bufnr, { namespace = diag_ns })
 if #diagnostics ~= 1 then
   fail("diagnostic_count:" .. tostring(#diagnostics))
   return
@@ -100,14 +101,15 @@ editor:on_call_state_changed({
     error = nil,
   },
 })
-diagnostics = vim.diagnostic.get(bufnr, { namespace = editor.diag_ns })
+diagnostics = vim.diagnostic.get(bufnr, { namespace = diag_ns })
 if #diagnostics ~= 0 then
   fail("archived_should_clear_diag:" .. tostring(#diagnostics))
   return
 end
 
--- Unparseable Oracle errors should clear stale diagnostics and not leave old markers behind.
-vim.diagnostic.set(editor.diag_ns, bufnr, {
+-- Unparseable Oracle errors now fall back to a truthful 1:1 diagnostic.
+diag_ns = editor:get_diag_namespace("conn_test")
+vim.diagnostic.set(diag_ns, bufnr, {
   {
     lnum = 0,
     col = 0,
@@ -123,9 +125,17 @@ editor:on_call_state_changed({
     error = "ORA-00000: generic failure without location",
   },
 })
-diagnostics = vim.diagnostic.get(bufnr, { namespace = editor.diag_ns })
-if #diagnostics ~= 0 then
-  fail("unparseable_should_clear_diag:" .. tostring(#diagnostics))
+diagnostics = vim.diagnostic.get(bufnr, { namespace = diag_ns })
+if #diagnostics ~= 1 then
+  fail("unparseable_should_fallback_diag:" .. tostring(#diagnostics))
+  return
+end
+if diagnostics[1].message:find("stale", 1, true) then
+  fail("unparseable_should_replace_stale")
+  return
+end
+if diagnostics[1].col ~= 0 then
+  fail("unparseable_fallback_col:" .. tostring(diagnostics[1].col))
   return
 end
 
@@ -140,7 +150,7 @@ editor:on_call_state_changed({
 })
 
 cursor = vim.api.nvim_win_get_cursor(0)
-diagnostics = vim.diagnostic.get(bufnr, { namespace = editor.diag_ns })
+diagnostics = vim.diagnostic.get(bufnr, { namespace = diag_ns })
 if #diagnostics ~= 1 then
   fail("line_only_diag_count:" .. tostring(#diagnostics))
   return
@@ -164,7 +174,7 @@ editor:on_call_state_changed({
   },
 })
 cursor = vim.api.nvim_win_get_cursor(0)
-diagnostics = vim.diagnostic.get(bufnr, { namespace = editor.diag_ns })
+diagnostics = vim.diagnostic.get(bufnr, { namespace = diag_ns })
 if #diagnostics ~= 1 then
   fail("col0_diag_count:" .. tostring(#diagnostics))
   return
@@ -189,7 +199,7 @@ editor:on_call_state_changed({
 })
 
 cursor = vim.api.nvim_win_get_cursor(0)
-diagnostics = vim.diagnostic.get(bufnr, { namespace = editor.diag_ns })
+diagnostics = vim.diagnostic.get(bufnr, { namespace = diag_ns })
 if #diagnostics ~= 1 then
   fail("clamp_diag_count:" .. tostring(#diagnostics))
   return
@@ -206,14 +216,15 @@ if cursor[1] ~= diagnostics[1].lnum + 1 or cursor[2] ~= expected_cursor_col then
   return
 end
 
--- Non-Oracle calls should not parse "line N/column M" errors into diagnostics or cursor jumps.
+-- Non-Oracle SQL calls now use the shared diagnostics framework and fall back truthfully.
 current_conn_type = "postgres"
 editor:do_action("run_under_cursor")
 if #calls ~= 2 then
   fail("non_oracle_execute_call_count:" .. tostring(#calls))
   return
 end
-vim.diagnostic.set(editor.diag_ns, bufnr, {
+diag_ns = editor:get_diag_namespace("conn_test")
+vim.diagnostic.set(diag_ns, bufnr, {
   {
     lnum = 0,
     col = 0,
@@ -231,13 +242,17 @@ editor:on_call_state_changed({
   },
 })
 cursor = vim.api.nvim_win_get_cursor(0)
-diagnostics = vim.diagnostic.get(bufnr, { namespace = editor.diag_ns })
-if #diagnostics ~= 0 then
-  fail("non_oracle_diag_should_be_empty:" .. tostring(#diagnostics))
+diagnostics = vim.diagnostic.get(bufnr, { namespace = diag_ns })
+if #diagnostics ~= 1 then
+  fail("non_oracle_diag_count:" .. tostring(#diagnostics))
   return
 end
-if cursor[1] ~= 1 or cursor[2] ~= 0 then
-  fail("non_oracle_cursor_should_not_jump:" .. tostring(cursor[1]) .. ":" .. tostring(cursor[2]))
+if not diagnostics[1].message:find("[postgres]", 1, true) then
+  fail("non_oracle_fallback_message:" .. tostring(diagnostics[1].message))
+  return
+end
+if cursor[1] ~= diagnostics[1].lnum + 1 or cursor[2] ~= diagnostics[1].col then
+  fail("non_oracle_cursor_not_at_diag:" .. tostring(cursor[1]) .. ":" .. tostring(cursor[2]))
   return
 end
 

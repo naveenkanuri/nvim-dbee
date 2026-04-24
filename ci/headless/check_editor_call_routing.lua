@@ -46,6 +46,7 @@ local editor = EditorUI:new(handler, result, {
   buffer_options = {},
   window_options = {},
 })
+local diag_ns = editor:get_diag_namespace("conn_test")
 
 local winid = vim.api.nvim_get_current_win()
 editor:show(winid)
@@ -119,8 +120,8 @@ editor:on_call_state_changed({
   },
 })
 
-local note1_diags = vim.diagnostic.get(note1_buf, { namespace = editor.diag_ns })
-local note2_diags = vim.diagnostic.get(note2_buf, { namespace = editor.diag_ns })
+local note1_diags = vim.diagnostic.get(note1_buf, { namespace = diag_ns })
+local note2_diags = vim.diagnostic.get(note2_buf, { namespace = diag_ns })
 if #note1_diags ~= 1 then
   fail("call1_note1_diag_count:" .. tostring(#note1_diags))
   return
@@ -136,7 +137,8 @@ if cursor[1] ~= 1 or cursor[2] ~= 0 then
 end
 
 -- Unknown call ids must not use any "last exec" fallback or clear unrelated diagnostics.
-vim.diagnostic.set(editor.diag_ns, note2_buf, {
+diag_ns = editor:get_diag_namespace("conn_test")
+vim.diagnostic.set(diag_ns, note2_buf, {
   {
     lnum = 0,
     col = 0,
@@ -152,7 +154,7 @@ editor:on_call_state_changed({
     error = "ORA-06550: line 2, column 3:\nPLS-00103: Encountered the symbol \"END\"",
   },
 })
-note2_diags = vim.diagnostic.get(note2_buf, { namespace = editor.diag_ns })
+note2_diags = vim.diagnostic.get(note2_buf, { namespace = diag_ns })
 if #note2_diags ~= 1 or note2_diags[1].message ~= "stale" then
   fail("unknown_call_should_not_touch_note2")
   return
@@ -166,7 +168,7 @@ editor:on_call_state_changed({
     error = "ORA-06550: line 2, column 4:\nPLS-00103: Encountered the symbol \"END\"",
   },
 })
-note2_diags = vim.diagnostic.get(note2_buf, { namespace = editor.diag_ns })
+note2_diags = vim.diagnostic.get(note2_buf, { namespace = diag_ns })
 if #note2_diags ~= 1 then
   fail("call2_note2_diag_count:" .. tostring(#note2_diags))
   return
@@ -176,7 +178,7 @@ if cursor[1] ~= note2_diags[1].lnum + 1 or cursor[2] ~= note2_diags[1].col then
   fail("call2_cursor_not_at_diag:" .. tostring(cursor[1]) .. ":" .. tostring(cursor[2]))
   return
 end
-note1_diags = vim.diagnostic.get(note1_buf, { namespace = editor.diag_ns })
+note1_diags = vim.diagnostic.get(note1_buf, { namespace = diag_ns })
 if #note1_diags ~= 1 then
   fail("call2_should_not_clear_note1_diag")
   return
@@ -190,12 +192,12 @@ editor:on_call_state_changed({
     error = nil,
   },
 })
-note2_diags = vim.diagnostic.get(note2_buf, { namespace = editor.diag_ns })
+note2_diags = vim.diagnostic.get(note2_buf, { namespace = diag_ns })
 if #note2_diags ~= 0 then
   fail("call2_archived_should_clear_note2_diag:" .. tostring(#note2_diags))
   return
 end
-note1_diags = vim.diagnostic.get(note1_buf, { namespace = editor.diag_ns })
+note1_diags = vim.diagnostic.get(note1_buf, { namespace = diag_ns })
 if #note1_diags ~= 1 then
   fail("call2_archived_should_not_clear_note1_diag")
   return
@@ -221,7 +223,8 @@ if editor:find_note_for_call(calls[3].id) ~= note2_id then
   return
 end
 
-vim.diagnostic.set(editor.diag_ns, note2_buf, {
+diag_ns = editor:get_diag_namespace("conn_test")
+vim.diagnostic.set(diag_ns, note2_buf, {
   {
     lnum = 0,
     col = 0,
@@ -237,7 +240,7 @@ editor:on_call_state_changed({
     error = "ORA-06550: line 2, column 5",
   },
 })
-note2_diags = vim.diagnostic.get(note2_buf, { namespace = editor.diag_ns })
+note2_diags = vim.diagnostic.get(note2_buf, { namespace = diag_ns })
 if #note2_diags ~= 1 or note2_diags[1].message ~= "latest_stale" then
   fail("stale_call2_event_should_not_apply")
   return
