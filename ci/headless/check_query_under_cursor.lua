@@ -83,7 +83,7 @@ local function run_case(name, lines, cursor_row_1based, cursor_col_0based, want_
   vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
   vim.api.nvim_win_set_cursor(0, { cursor_row_1based, cursor_col_0based })
 
-  local query, srow, erow = utils.query_under_cursor(bufnr, opts)
+  local query, srow, _, erow = utils.query_under_cursor(bufnr, opts)
   if not assert_eq(name .. "_query", query, want_query) then
     return false
   end
