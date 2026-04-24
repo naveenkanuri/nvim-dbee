@@ -15,6 +15,10 @@ type eventBus struct {
 	log *plugin.Logger
 }
 
+func luaStringLiteral(value string) string {
+	return fmt.Sprintf("%q", value)
+}
+
 func (eb *eventBus) callLua(event string, data string) {
 	err := eb.vim.ExecLua(fmt.Sprintf(`require("dbee.handler.__events").trigger(%q, %s)`, event, data), nil)
 	if err != nil {
@@ -25,7 +29,7 @@ func (eb *eventBus) callLua(event string, data string) {
 func (eb *eventBus) CallStateChanged(connID core.ConnectionID, call *core.Call) {
 	errMsg := "nil"
 	if err := call.Err(); err != nil {
-		errMsg = fmt.Sprintf("[[%s]]", err.Error())
+		errMsg = luaStringLiteral(err.Error())
 	}
 
 	data := fmt.Sprintf(`{
@@ -74,7 +78,7 @@ func (eb *eventBus) DatabaseSelected(id core.ConnectionID, dbname string) {
 func (eb *eventBus) StructureLoaded(id core.ConnectionID, requestID int, structures []*core.Structure, loadErr error) {
 	errMsg := "nil"
 	if loadErr != nil {
-		errMsg = fmt.Sprintf("[[%s]]", loadErr.Error())
+		errMsg = luaStringLiteral(loadErr.Error())
 	}
 
 	// Serialize structures as Lua table
