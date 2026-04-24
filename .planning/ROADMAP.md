@@ -2,7 +2,7 @@
 
 ## Overview
 
-This milestone delivers 18 quality-of-life improvements to nvim-dbee, progressing from foundational notification/feedback fixes through clipboard and call log enhancements, new editor and result actions, drawer improvements with pane navigation, and finally resilience and cross-adapter diagnostics. All changes are Lua-only (no Go backend modifications), building on existing extension points (get_actions, event bus, config defaults).
+This milestone delivers 18 quality-of-life improvements to nvim-dbee, progressing from foundational notification/feedback fixes through clipboard and call log enhancements, new editor and result actions, drawer improvements with pane navigation, and finally resilience and cross-adapter diagnostics. Milestone v1.0 is complete across commits `a233f01..c7b8ab3`, shipping all 5 phases and 10 plans on top of existing Lua-first extension points (with only minimal additive Go event-bus support).
 
 ## Phases
 
@@ -16,7 +16,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 2: Call Log Enhancements** - Add duration/timestamp display, query copy, and re-run from history
 - [x] **Phase 3: Editor & Result Actions** - Add note cycling, file export, and explain plan execution
 - [x] **Phase 4: Drawer & Navigation** - Add drawer copy/search and dedicated pane-jumping keybindings
-- [ ] **Phase 5: Resilience & Diagnostics** - Add auto-reconnect prompt and generic adapter error diagnostics
+- [x] **Phase 5: Resilience & Diagnostics** - Add auto-reconnect prompt and generic adapter error diagnostics
 
 ## Phase Details
 
@@ -82,15 +82,16 @@ Plans:
 **Goal**: Connection failures surface actionable prompts and query errors show inline markers across all adapters
 **Depends on**: Phase 1
 **Requirements**: ADPT-02, CONN-01
+**Status**: Complete (`a233f01..c7b8ab3`)
 **Success Criteria** (what must be TRUE):
   1. User sees inline error diagnostics (line/column markers via vim.diagnostic) for query errors from any adapter, not just Oracle
   2. User sees an auto-reconnect prompt when a connection is lost during query execution, following the cancel-confirm prompt pattern
   3. Auto-reconnect prompt includes debounce/cooldown to prevent prompt spam on flapping connections
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 05-01: TBD
-- [ ] 05-02: TBD
+- [x] 05-01-PLAN.md -- Auto-reconnect prompt, bounded replay registry, connection rewrite/rebind flow, and headless coverage
+- [x] 05-02-PLAN.md -- Adapter diagnostics registry, connection-scoped namespace lifecycle, and CI/headless coverage
 
 ## Progress
 
@@ -104,4 +105,11 @@ Note: Phases 3 and 4 depend only on Phase 1, not on Phase 2. They can execute in
 | 2. Call Log Enhancements | 2/2 | Complete | 2026-03-07 |
 | 3. Editor & Result Actions | 2/2 | Complete | 2026-03-09 |
 | 4. Drawer & Navigation | 2/2 | Complete | 2026-04-23 |
-| 5. Resilience & Diagnostics | 0/0 | Not started | - |
+| 5. Resilience & Diagnostics | 2/2 | Complete (`a233f01..c7b8ab3`) | 2026-04-24 |
+
+## Milestone Summary
+
+- Milestone v1.0 is complete: 5/5 phases and 10/10 plans shipped
+- Commit range: `a233f01..c7b8ab3`
+- Delivered scope: notifications and feedback, call log history actions, editor/result actions, drawer navigation and filtering, and resilience plus diagnostics
+- Phase 5 closed with reconnect registry coverage (`CONN-01`) and adapter diagnostics coverage (`ADPT-02`) verified clean at impl-gate
