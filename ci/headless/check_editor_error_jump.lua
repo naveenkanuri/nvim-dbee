@@ -12,6 +12,19 @@ local function fail(msg)
   vim.cmd("cquit 1")
 end
 
+local function flush_scheduled()
+  local drained = false
+  vim.schedule(function()
+    drained = true
+  end)
+  local ok = vim.wait(200, function()
+    return drained
+  end, 10)
+  if not ok then
+    fail("schedule_flush_timeout")
+  end
+end
+
 local calls = {}
 local current_conn_type = "oracle"
 local handler = {
@@ -77,6 +90,7 @@ editor:on_call_state_changed({
     error = "ORA-06550: line 3, column 5:\nPLS-00103: Encountered the symbol \"END\"",
   },
 })
+flush_scheduled()
 
 local cursor = vim.api.nvim_win_get_cursor(0)
 local diagnostics = vim.diagnostic.get(bufnr, { namespace = diag_ns })
@@ -101,6 +115,7 @@ editor:on_call_state_changed({
     error = nil,
   },
 })
+flush_scheduled()
 diagnostics = vim.diagnostic.get(bufnr, { namespace = diag_ns })
 if #diagnostics ~= 0 then
   fail("archived_should_clear_diag:" .. tostring(#diagnostics))
@@ -125,6 +140,7 @@ editor:on_call_state_changed({
     error = "ORA-00000: generic failure without location",
   },
 })
+flush_scheduled()
 diagnostics = vim.diagnostic.get(bufnr, { namespace = diag_ns })
 if #diagnostics ~= 1 then
   fail("unparseable_should_fallback_diag:" .. tostring(#diagnostics))
@@ -148,6 +164,7 @@ editor:on_call_state_changed({
     error = "ORA-06512: at line 4",
   },
 })
+flush_scheduled()
 
 cursor = vim.api.nvim_win_get_cursor(0)
 diagnostics = vim.diagnostic.get(bufnr, { namespace = diag_ns })
@@ -173,6 +190,7 @@ editor:on_call_state_changed({
     error = "ORA-06550: line 3, column 0:\nPLS-00103: Encountered the symbol \"END\"",
   },
 })
+flush_scheduled()
 cursor = vim.api.nvim_win_get_cursor(0)
 diagnostics = vim.diagnostic.get(bufnr, { namespace = diag_ns })
 if #diagnostics ~= 1 then
@@ -197,6 +215,7 @@ editor:on_call_state_changed({
     error = "ORA-06550: line 3, column 999:\nPLS-00103: Encountered the symbol \"END\"",
   },
 })
+flush_scheduled()
 
 cursor = vim.api.nvim_win_get_cursor(0)
 diagnostics = vim.diagnostic.get(bufnr, { namespace = diag_ns })
@@ -241,6 +260,7 @@ editor:on_call_state_changed({
     error = "syntax error at line 3, column 5",
   },
 })
+flush_scheduled()
 cursor = vim.api.nvim_win_get_cursor(0)
 diagnostics = vim.diagnostic.get(bufnr, { namespace = diag_ns })
 if #diagnostics ~= 1 then

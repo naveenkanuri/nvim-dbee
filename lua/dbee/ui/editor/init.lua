@@ -116,6 +116,9 @@ function EditorUI:new(handler, result, opts)
     if not o._confirm_conn_id then
       return
     end
+    if not data or data.conn_id ~= o._confirm_conn_id then
+      return
+    end
     -- Fast-return: if the event's call is still active, the connection
     -- definitely has at least one active call.  Skips the RPC entirely.
     local s = data and data.call and data.call.state
@@ -1372,25 +1375,31 @@ function EditorUI:on_call_state_changed(data)
     return
   end
 
-  vim.diagnostic.set(ns, exec_bufnr, {
-    {
-      lnum = buf_line,
-      col = buf_col,
-      severity = diag.severity,
-      message = diag.message,
-      source = "dbee",
-    },
-  })
-  self:track_diag_buffer(conn_id, exec_bufnr)
-
-  -- Jump cursor to first diagnostic location when note buffer is visible.
-  for _, win in ipairs(vim.api.nvim_list_wins()) do
-    if vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_buf(win) == exec_bufnr then
-      vim.api.nvim_set_current_win(win)
-      vim.api.nvim_win_set_cursor(win, { buf_line + 1, cursor_col })
-      break
+  vim.schedule(function()
+    if not vim.api.nvim_buf_is_valid(exec_bufnr) then
+      return
     end
-  end
+
+    vim.diagnostic.set(ns, exec_bufnr, {
+      {
+        lnum = buf_line,
+        col = buf_col,
+        severity = diag.severity,
+        message = diag.message,
+        source = "dbee",
+      },
+    })
+    self:track_diag_buffer(conn_id, exec_bufnr)
+
+    -- Jump cursor to first diagnostic location when note buffer is visible.
+    for _, win in ipairs(vim.api.nvim_list_wins()) do
+      if vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_buf(win) == exec_bufnr then
+        vim.api.nvim_set_current_win(win)
+        vim.api.nvim_win_set_cursor(win, { buf_line + 1, cursor_col })
+        break
+      end
+    end
+  end)
 end
 
 return EditorUI

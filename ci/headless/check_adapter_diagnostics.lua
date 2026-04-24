@@ -50,6 +50,19 @@ local function assert_eq(name, got, want)
   end
 end
 
+local function flush_scheduled()
+  local drained = false
+  vim.schedule(function()
+    drained = true
+  end)
+  local ok = vim.wait(200, function()
+    return drained
+  end, 10)
+  if not ok then
+    fail("schedule_flush_timeout")
+  end
+end
+
 local handler = {
   register_event_listener = function() end,
   get_current_connection = function()
@@ -131,6 +144,7 @@ local function emit(call_id, state, err, err_kind)
       error_kind = err_kind or "unknown",
     },
   })
+  flush_scheduled()
 end
 
 local function get_diags(conn_id, bufnr)
@@ -298,12 +312,23 @@ local alias_diag = diagnostics.build_diagnostic(
 )
 assert_true("mssql_alias_diag", alias_diag ~= nil)
 assert_eq("mssql_alias_line", alias_diag.line, 4)
+assert_true("duckdb_alias_sql", diagnostics.is_sql_adapter("duckdb"))
+local duckdb_alias_diag = diagnostics.build_diagnostic(
+  "duckdb",
+  "syntax error",
+  { resolved_query = "SELECT 1", start_line = 2, start_col = 3 }
+)
+assert_true("duckdb_alias_diag", duckdb_alias_diag ~= nil)
+assert_eq("duckdb_alias_line", duckdb_alias_diag.line, 2)
+assert_eq("duckdb_alias_col", duckdb_alias_diag.col, 3)
+assert_true("duckdb_alias_msg", duckdb_alias_diag.message:find("[duck]", 1, true) ~= nil)
 local duplicate_alias_ok = pcall(diagnostics.register_parser, "pg", function() end, { sql = true })
 assert_true("duplicate_alias_guard", not duplicate_alias_ok)
 
 print("ADPT02_POSTGRES_CTX_OK=true")
 print("ADPT02_START_COL_OK=true")
 print("ADPT02_ALIAS_MAP_OK=true")
+print("ADPT02_DUCKDB_ALIAS_OK=true")
 print("ADPT02_SQLITE_FALLBACK_OK=true")
 
 -- Lifecycle clears: rerun start, explicit clear, note switch, note removal.

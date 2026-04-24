@@ -12,6 +12,19 @@ local function fail(msg)
   vim.cmd("cquit 1")
 end
 
+local function flush_scheduled()
+  local drained = false
+  vim.schedule(function()
+    drained = true
+  end)
+  local ok = vim.wait(200, function()
+    return drained
+  end, 10)
+  if not ok then
+    fail("schedule_flush_timeout")
+  end
+end
+
 local calls = {}
 local handler = {
   register_event_listener = function(_, _, _) end,
@@ -119,6 +132,7 @@ editor:on_call_state_changed({
     error = "ORA-06550: line 2, column 3:\nPLS-00103: Encountered the symbol \"END\"",
   },
 })
+flush_scheduled()
 
 local note1_diags = vim.diagnostic.get(note1_buf, { namespace = diag_ns })
 local note2_diags = vim.diagnostic.get(note2_buf, { namespace = diag_ns })
@@ -154,6 +168,7 @@ editor:on_call_state_changed({
     error = "ORA-06550: line 2, column 3:\nPLS-00103: Encountered the symbol \"END\"",
   },
 })
+flush_scheduled()
 note2_diags = vim.diagnostic.get(note2_buf, { namespace = diag_ns })
 if #note2_diags ~= 1 or note2_diags[1].message ~= "stale" then
   fail("unknown_call_should_not_touch_note2")
@@ -168,6 +183,7 @@ editor:on_call_state_changed({
     error = "ORA-06550: line 2, column 4:\nPLS-00103: Encountered the symbol \"END\"",
   },
 })
+flush_scheduled()
 note2_diags = vim.diagnostic.get(note2_buf, { namespace = diag_ns })
 if #note2_diags ~= 1 then
   fail("call2_note2_diag_count:" .. tostring(#note2_diags))
@@ -192,6 +208,7 @@ editor:on_call_state_changed({
     error = nil,
   },
 })
+flush_scheduled()
 note2_diags = vim.diagnostic.get(note2_buf, { namespace = diag_ns })
 if #note2_diags ~= 0 then
   fail("call2_archived_should_clear_note2_diag:" .. tostring(#note2_diags))
@@ -240,6 +257,7 @@ editor:on_call_state_changed({
     error = "ORA-06550: line 2, column 5",
   },
 })
+flush_scheduled()
 note2_diags = vim.diagnostic.get(note2_buf, { namespace = diag_ns })
 if #note2_diags ~= 1 or note2_diags[1].message ~= "latest_stale" then
   fail("stale_call2_event_should_not_apply")

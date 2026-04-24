@@ -52,14 +52,9 @@ local function position_to_line_col(position, resolved_query)
   end
 
   local prefix = resolved_query:sub(1, position - 1)
-  local line = 1
-  local last_newline = 0
-  for idx = 1, #prefix do
-    if prefix:sub(idx, idx) == "\n" then
-      line = line + 1
-      last_newline = idx
-    end
-  end
+  local _, newline_count = prefix:gsub("\n", "\n")
+  local line = newline_count + 1
+  local last_newline = prefix:match(".*()\n") or 0
 
   local col = (#prefix - last_newline) + 1
   return line, col
@@ -229,7 +224,7 @@ M.register_parser("mysql", mysql_parser, { sql = true })
 M.register_parser("sqlite", nil, { sql = true, aliases = { "sqlite3" } })
 M.register_parser("sqlserver", sqlserver_parser, { sql = true, aliases = { "mssql" } })
 M.register_parser("oracle", oracle_parser, { sql = true })
-M.register_parser("duck", nil, { sql = true })
+M.register_parser("duck", nil, { sql = true, aliases = { "duckdb" } })
 M.register_parser("bigquery", nil, { sql = true })
 M.register_parser("clickhouse", nil, { sql = true })
 M.register_parser("databricks", nil, { sql = true })
