@@ -1,11 +1,11 @@
-# Requirements: nvim-dbee QoL Improvements
+# Requirements: nvim-dbee Connection UX & Performance Improvements
 
 **Defined:** 2026-03-05
 **Core Value:** Every user action should give clear, immediate feedback — no silent failures, no missing affordances, no dead ends.
 
-## v1 Requirements
+## v1.0 Requirements
 
-Requirements for this milestone. Each maps to roadmap phases.
+Completed requirements from the v1.0 QoL milestone. Each maps to roadmap phases.
 
 ### Notifications
 
@@ -20,9 +20,9 @@ Requirements for this milestone. Each maps to roadmap phases.
 ### Clipboard & Navigation
 
 - [x] **CLIP-01**: User can copy query text from call log entries to clipboard
-- [ ] **CLIP-02**: User can copy qualified database object names from drawer to clipboard
+- [x] **CLIP-02**: User can copy qualified database object names from drawer to clipboard
 - [x] **NAV-01**: User can cycle to next/previous note with keybindings without leaving editor
-- [ ] **NAV-02**: User can jump between panes (editor/result/drawer/call_log) with dedicated keybindings
+- [x] **NAV-02**: User can jump between panes (editor/result/drawer/call_log) with dedicated keybindings
 
 ### Call Log Enhancements
 
@@ -36,15 +36,36 @@ Requirements for this milestone. Each maps to roadmap phases.
 ### Adapter Features
 
 - [x] **ADPT-01**: User can execute Explain Plan on current query with per-adapter EXPLAIN syntax wrapping
-- [ ] **ADPT-02**: User sees inline error diagnostics (line/column markers) for all adapters, not just Oracle
+- [x] **ADPT-02**: User sees inline error diagnostics (line/column markers) for all adapters, not just Oracle
 
 ### Drawer
 
-- [ ] **DRAW-01**: User can search/filter searchable database objects in the drawer to find objects in large schemas
+- [x] **DRAW-01**: User can search/filter searchable database objects in the drawer to find objects in large schemas
 
 ### Connection Management
 
-- [ ] **CONN-01**: User sees an auto-reconnect prompt when a connection is lost (similar to cancel-confirm)
+- [x] **CONN-01**: User sees an auto-reconnect prompt when a connection is lost (similar to cancel-confirm)
+
+## v1.1 Requirements
+
+Requirements for the Drawer Connection Config + Structure Perf + Notes UX milestone.
+
+### Drawer Connection Config
+
+- [ ] **DCFG-01**: User can manage saved connections from a connection-only drawer tree with add, edit, delete, test, activate, reload-structure, expand/collapse, and filter controls
+- [ ] **DCFG-02**: User can add or edit Oracle and Postgres connections through type-aware forms that round-trip existing URL formats, test the real driver connection before save, and persist atomically to FileSource-backed JSON
+
+### Structure Browser Performance
+
+- [ ] **STRUCT-01**: User can expand schemas/tables without blocking Neovim because structure data loads one level at a time with cache-backed, scheduled, bounded results and explicit reload invalidation
+
+### Notes Picker
+
+- [ ] **NOTES-01**: User can open a single-select notes picker that visually separates global notes from current-connection local notes and tags each item with its source
+
+### Drawer Performance Harness
+
+- [ ] **PERF-01**: User can rely on DRAW-01 release readiness because headless performance tests load real `nui.nvim` from `RUNNER_TEMP/nui.nvim` and enforce realistic frame-budget metrics instead of stub-only smoke evidence
 
 ## v2 Requirements
 
@@ -72,6 +93,9 @@ Explicitly excluded. Documented to prevent scope creep.
 | Connection pooling / keep-alive | Auto-reconnect prompt (#CONN-01) handles user-facing concern |
 | Query formatting / beautifier | Separate concern — sql-formatter.nvim and conform.nvim handle this |
 | Breaking API changes | All improvements must be additive/backward-compatible |
+| Bulk connection import/export UI | Single-connection CRUD addresses the dominant pain point first |
+| Wizard support for every adapter type | v1.1 focuses on Oracle and Postgres because those are the observed real configurations |
+| Notes CRUD redesign | v1.1 moves note discovery to picker sections but leaves note creation/rename/delete flows unchanged unless required by drawer extraction |
 
 ## Traceability
 
@@ -87,22 +111,27 @@ Which phases cover which requirements. Updated during roadmap creation.
 | NOTIF-06 | Phase 1 | Complete |
 | NOTIF-07 | Phase 1 | Complete |
 | CLIP-01 | Phase 2 | Complete |
-| CLIP-02 | Phase 4 | Pending |
+| CLIP-02 | Phase 4 | Complete |
 | NAV-01 | Phase 3 | Complete |
-| NAV-02 | Phase 4 | Pending |
+| NAV-02 | Phase 4 | Complete |
 | CLOG-01 | Phase 2 | Complete |
 | CLOG-02 | Phase 2 | Complete |
 | RSLT-01 | Phase 3 | Complete |
 | ADPT-01 | Phase 3 | Complete |
-| ADPT-02 | Phase 5 | Pending |
-| DRAW-01 | Phase 4 | Pending |
-| CONN-01 | Phase 5 | Pending |
+| ADPT-02 | Phase 5 | Complete |
+| DRAW-01 | Phase 4 | Complete |
+| CONN-01 | Phase 5 | Complete |
+| DCFG-01 | Phase 7 | Pending |
+| DCFG-02 | Phase 8 | Pending |
+| STRUCT-01 | Phase 6 | Pending |
+| NOTES-01 | Phase 6 | Pending |
+| PERF-01 | Phase 9 | Pending |
 
 **Coverage:**
-- v1 requirements: 18 total
-- Mapped to phases: 18
+- v1.0 requirements: 18 total, 18 complete
+- v1.1 requirements: 5 total, 5 mapped
 - Unmapped: 0
 
 ---
 *Requirements defined: 2026-03-05*
-*Last updated: 2026-03-05 after roadmap creation*
+*Last updated: 2026-04-27 after v1.1 milestone definition*

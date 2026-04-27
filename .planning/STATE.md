@@ -1,36 +1,36 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.0
-milestone_name: milestone
-status: "milestone v1.0 COMPLETE"
-stopped_at: Closed milestone v1.0 after Phase 5 verification, summaries, and roadmap/state updates
-last_updated: "2026-04-24T00:00:00Z"
-last_activity: 2026-04-24
+milestone: v1.1
+milestone_name: Drawer Connection Config + Structure Perf + Notes UX
+status: "milestone v1.1 in_progress"
+stopped_at: Milestone v1.1 requirements and roadmap initialized; ready for Phase 6 discussion
+last_updated: "2026-04-27T00:00:00Z"
+last_activity: 2026-04-27
 progress:
-  total_phases: 5
-  completed_phases: 5
-  total_plans: 10
-  completed_plans: 10
-  percent: 100
+  total_phases: 4
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # Project State
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-03-23)
+See: .planning/PROJECT.md (updated 2026-04-27)
 
 **Core value:** Every user action should give clear, immediate feedback -- no silent failures, no missing affordances, no dead ends.
-**Current focus:** Milestone v1.0 complete; ready for next-milestone definition
+**Current focus:** Milestone v1.1 initialized; next step is Phase 6 discussion
 
 ## Current Position
 
-Phase: 5 of 5 (resilience & diagnostics complete)
-Plan: 05-02 complete
-Status: milestone v1.0 COMPLETE
-Last activity: 2026-04-24
+Phase: 6 of 9 (not started)
+Plan: —
+Status: Defining Phase 6 context
+Last activity: 2026-04-27
 
-Progress: [██████████] 100%
+Progress: [----------] 0%
 
 ## Performance Metrics
 
@@ -53,7 +53,7 @@ Progress: [██████████] 100%
 **Recent Trend:**
 
 - Last 5 plans: 03-02, 04-01, 04-02, 05-01, 05-02
-- Trend: milestone complete
+- Trend: v1.0 milestone complete; v1.1 roadmap initialized
 
 *Updated after each plan completion*
 
@@ -87,17 +87,20 @@ Recent decisions affecting current work:
 - 03-02: Shared extract_query_from_context() DRYs query extraction between execute_context and explain_plan
 - 03-02: Oracle explain uses singleton listener + pending map (no callback leak)
 - 03-02: Separate explain_plan/explain_plan_visual actions with is_visual flag for visual mode
+- v1.1: Phase numbering continues at Phase 6 because `$gsd-new-milestone` was run without `--reset-phase-numbers`
+- v1.1: FileSource scope is hardening existing CRUD (`create/update/delete`) with atomic writes and richer preservation, not adding CRUD from zero
+- v1.1: Drawer notes move out of drawer and into the existing public `pick_notes` path
 
 ### Pending Todos
 
-None yet.
+- Discuss Phase 6 context: STRUCT-01 + NOTES-01
 
 ### Blockers/Concerns
 
-None - milestone v1.0 closed cleanly after Phase 5 verification.
+- Product gray areas remain for DCFG-02 password persistence, Oracle wallet service fallback, and whether source-file editing stays reachable outside the drawer.
 
 ## Session Continuity
 
-Last session: 2026-04-24T00:00:00Z
-Stopped at: Closed milestone v1.0 after Phase 5 verification and summaries
+Last session: 2026-04-27T00:00:00Z
+Stopped at: Initialized milestone v1.1 requirements and roadmap
 Resume file: .planning/ROADMAP.md
