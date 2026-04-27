@@ -304,6 +304,10 @@ end
 
 ---Toggle the drawer panel (for MinimalLayout).
 function dbee.toggle_drawer()
+  if not dbee.is_open() then
+    utils.log("warn", "Dbee is not open")
+    return
+  end
   local layout = api.current_config().window_layout
   if layout and type(layout.toggle_drawer) == "function" then
     layout:toggle_drawer()
@@ -354,6 +358,10 @@ end
 
 ---Open notes picker using snacks.nvim.
 function dbee.pick_notes()
+  if not dbee.is_open() then
+    utils.log("warn", "Dbee is not open")
+    return
+  end
   if not api.ui.is_loaded() then
     utils.log("warn", "Dbee not loaded")
     return
@@ -401,6 +409,10 @@ end
 
 ---Open connections picker using snacks.nvim.
 function dbee.pick_connections()
+  if not dbee.is_open() then
+    utils.log("warn", "Dbee is not open")
+    return
+  end
   if not api.core.is_loaded() then
     utils.log("warn", "Dbee not loaded")
     return
@@ -467,6 +479,10 @@ end
 
 ---Open call history picker using snacks.nvim.
 function dbee.pick_history()
+  if not dbee.is_open() then
+    utils.log("warn", "Dbee is not open")
+    return
+  end
   if not api.core.is_loaded() then
     utils.log("warn", "Dbee not loaded")
     return
