@@ -77,19 +77,13 @@ config.default = {
     disable_help = false,
     -- mappings for the buffer
     mappings = {
-      -- manually refresh drawer
-      { key = "r", mode = "n", action = "refresh" },
-      -- actions perform different stuff depending on the node:
-      -- action_1 opens a note or executes a helper
-      { key = "<CR>", mode = "n", action = "action_1" },
-      -- action_2 renames a note or sets the connection as active manually
-      { key = "cw", mode = "n", action = "action_2" },
-      -- action_3 deletes a note or connection (removes connection from the file if you configured it like so)
-      { key = "dd", mode = "n", action = "action_3" },
-      -- these are self-explanatory:
-      -- { key = "c", mode = "n", action = "collapse" },
-      -- { key = "e", mode = "n", action = "expand" },
-      { key = "o", mode = "n", action = "toggle" },
+      { key = "a", mode = "n", action = "add_connection" },
+      { key = "e", mode = "n", action = "edit_connection" },
+      { key = "dd", mode = "n", action = "delete_connection" },
+      { key = "t", mode = "n", action = "test_connection" },
+      { key = "<C-CR>", mode = "n", action = "activate_connection" },
+      { key = "R", mode = "n", action = "refresh" },
+      { key = "<CR>", mode = "n", action = "toggle" },
       -- generate call template for procedure/function
       { key = "gC", mode = "n", action = "generate_call" },
       -- yank qualified name to clipboard

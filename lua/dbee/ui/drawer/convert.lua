@@ -172,7 +172,7 @@ end
 
 ---@param node DrawerUINode|table
 ---@param handler Handler
----@param source_meta { id: string, can_update: boolean, can_delete: boolean }
+---@param source_meta { id: string, name?: string, can_create?: boolean, can_update: boolean, can_delete: boolean, file?: string|nil }
 ---@param conn_id string
 --- INVARIANT: source_meta.id MUST equal source:name().
 function M.decorate_connection_node(node, handler, source_meta, conn_id)
@@ -234,15 +234,48 @@ function M.decorate_connection_node(node, handler, source_meta, conn_id)
   return node
 end
 
+---@param source Source
+---@param source_id string
+---@return { id: string, name: string, can_create: boolean, can_update: boolean, can_delete: boolean, file: string|nil }
+local function build_source_meta(source, source_id)
+  local source_file = nil
+  if type(source.file) == "function" then
+    local ok, file_or_err = pcall(source.file, source)
+    if ok then
+      source_file = file_or_err
+    else
+      utils.log("warn", "Failed reading source file metadata: " .. tostring(file_or_err))
+    end
+  end
+
+  return {
+    id = source_id,
+    name = source_id,
+    can_create = type(source.create) == "function",
+    can_update = type(source.update) == "function",
+    can_delete = type(source.delete) == "function",
+    file = source_file,
+  }
+end
+
+---@param conn ConnectionParams
+---@param source_meta { name?: string, id: string }
+---@return string
+local function connection_display_name(conn, source_meta)
+  local source_name = source_meta.name or source_meta.id
+  return string.format("%s  [%s]", tostring(conn.name or conn.id), tostring(source_name or ""))
+end
+
 ---@param handler Handler
 ---@param conn ConnectionParams
 ---@param result ResultUI
 ---@param structure_cache table
 ---@param opts? { connection_children?: fun(conn: ConnectionParams, source_meta: table): DrawerUINode[] }
+---@param source_meta? table
 ---@return DrawerUINode[]
-local function connection_nodes(handler, conn, result, structure_cache, opts)
+local function connection_nodes(handler, conn, result, structure_cache, opts, source_meta)
   if opts and type(opts.connection_children) == "function" then
-    return opts.connection_children(conn)
+    return opts.connection_children(conn, source_meta)
   end
 
   ---@param structs DBStructure[]
@@ -326,7 +359,7 @@ end
 ---@param handler Handler
 ---@param result ResultUI
 ---@param structure_cache table
----@param opts? { connection_children?: fun(conn: ConnectionParams): DrawerUINode[] }
+---@param opts? { connection_children?: fun(conn: ConnectionParams, source_meta: table): DrawerUINode[] }
 ---@return DrawerUINode[]
 local function handler_real_nodes(handler, result, structure_cache, opts)
   ---@type DrawerUINode[]
@@ -334,95 +367,21 @@ local function handler_real_nodes(handler, result, structure_cache, opts)
 
   for _, source in ipairs(handler:get_sources()) do
     local source_id = source:name()
-
-    ---@type DrawerUINode[]
-    local children = {}
-
-    -- source can add connections
-    if type(source.create) == "function" then
-      table.insert(
-        children,
-        NuiTree.Node {
-          id = "__source_add_connection__" .. source_id,
-          name = "add",
-          type = "add",
-          action_1 = function(cb)
-            local prompt = {
-              { key = "name" },
-              { key = "type" },
-              { key = "url" },
-            }
-            common.float_prompt(prompt, {
-              title = "Add Connection",
-              callback = function(res)
-                local spec = {
-                  name = res.name,
-                  url = res.url,
-                  type = res.type,
-                }
-                local ok, err = pcall(handler.source_add_connection, handler, source_id, spec)
-                if not ok then
-                  utils.log("error", "Failed to add connection: " .. tostring(err))
-                end
-                cb()
-              end,
-            })
-          end,
-        } --[[@as DrawerUINode]]
-      )
-    end
-
-    -- source has an editable source file
-    if type(source.file) == "function" then
-      table.insert(
-        children,
-        NuiTree.Node {
-          id = "__source_edit_connections__" .. source_id,
-          name = "edit source",
-          type = "edit",
-          action_1 = function(cb)
-            common.float_editor(source:file(), {
-              title = "Add Connection",
-              callback = function()
-                handler:source_reload(source_id)
-                cb()
-              end,
-            })
-          end,
-        } --[[@as DrawerUINode]]
-      )
-    end
+    local source_meta = build_source_meta(source, source_id)
 
     -- get connections of that source
     for _, conn in ipairs(handler:source_get_connections(source_id)) do
       local node = NuiTree.Node {
         id = conn.id,
-        name = conn.name,
+        name = connection_display_name(conn, source_meta),
+        raw_name = conn.name,
         type = "connection",
         lazy_children = function()
-          return connection_nodes(handler, conn, result, structure_cache, opts)
+          return connection_nodes(handler, conn, result, structure_cache, opts, source_meta)
         end,
       } --[[@as DrawerUINode]]
 
-      M.decorate_connection_node(node, handler, {
-        id = source_id,
-        can_update = type(source.update) == "function",
-        can_delete = type(source.delete) == "function",
-      }, conn.id)
-
-      table.insert(children, node)
-    end
-
-    if #children > 0 then
-      local node = NuiTree.Node({
-        id = "__source__" .. source_id,
-        name = source_id,
-        type = "source",
-      }, children) --[[@as DrawerUINode]]
-
-      if utils.once("handler_expand_once_id" .. source_id) then
-        node:expand()
-      end
+      M.decorate_connection_node(node, handler, source_meta, conn.id)
 
       table.insert(nodes, node)
     end
@@ -460,7 +419,7 @@ end
 ---@param handler Handler
 ---@param result ResultUI
 ---@param structure_cache table
----@param opts? { connection_children?: fun(conn: ConnectionParams): DrawerUINode[] }
+---@param opts? { connection_children?: fun(conn: ConnectionParams, source_meta: table): DrawerUINode[] }
 ---@return DrawerUINode[]
 function M.handler_nodes(handler, result, structure_cache, opts)
   -- in case there are no sources defined, return helper nodes

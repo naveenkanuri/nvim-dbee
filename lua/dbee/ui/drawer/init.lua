@@ -2134,15 +2134,12 @@ function DrawerUI:refresh()
     return out
   end
 
-  local nodes = {}
-  vim.list_extend(nodes, convert.editor_nodes(self.editor, current_conn_id, function()
-    self:refresh()
-  end))
-  table.insert(nodes, convert.separator_node())
-  vim.list_extend(nodes, hydrate(render_model))
+  local nodes = hydrate(render_model)
 
   if not self.disable_help then
-    table.insert(nodes, convert.separator_node())
+    if #nodes > 0 then
+      table.insert(nodes, convert.separator_node())
+    end
     table.insert(nodes, convert.help_node(self.mappings))
   end
 

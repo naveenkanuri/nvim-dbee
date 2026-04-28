@@ -131,6 +131,12 @@
 ---@field new_conn_ids connection_id[]
 ---@field authoritative_root_epoch integer?
 
+---Failure detail returned by the `DbeeConnectionTest(conn_id)` RPC and the
+---Lua `handler:connection_test(conn_id)` wrapper.
+---@class ConnectionTestFailure
+---@field error_kind '"auth"'|'"network"'|'"driver"'|'"unknown"'
+---@field message string
+
 ---Snapshot entry used by bootstrap consumers to reconcile source-owned
 ---connections before switching to live `connection_invalidated` events.
 ---@class ConnectionStateSnapshotSource

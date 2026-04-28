@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/neovim/go-client/nvim"
 
@@ -130,6 +131,29 @@ func parseQueryExecuteOptions(raw any) (*core.QueryExecuteOptions, error) {
 	return &core.QueryExecuteOptions{Binds: binds}, nil
 }
 
+func classifyConnectionTestError(err error) string {
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "password"),
+		strings.Contains(msg, "access denied"),
+		strings.Contains(msg, "authentication"),
+		strings.Contains(msg, "auth"):
+		return "auth"
+	case strings.Contains(msg, "timeout"),
+		strings.Contains(msg, "refused"),
+		strings.Contains(msg, "unreachable"),
+		strings.Contains(msg, "network"),
+		strings.Contains(msg, "dial"):
+		return "network"
+	case strings.Contains(msg, "driver"),
+		strings.Contains(msg, "adapter"),
+		strings.Contains(msg, "unsupported"):
+		return "driver"
+	default:
+		return "unknown"
+	}
+}
+
 func mountEndpoints(p *plugin.Plugin, h *handler.Handler) {
 	p.RegisterEndpoint(
 		"DbeeCreateConnection",
@@ -246,6 +270,23 @@ func mountEndpoints(p *plugin.Plugin, h *handler.Handler) {
 		) (any, error) {
 			params, err := h.ConnectionGetParams(args.ID)
 			return handler.WrapConnectionParams(params), err
+		})
+
+	p.RegisterEndpoint(
+		"DbeeConnectionTest",
+		func(args *struct {
+			ID core.ConnectionID `msgpack:",array"`
+		},
+		) (any, error) {
+			err := h.ConnectionTest(args.ID)
+			if err == nil {
+				return nil, nil
+			}
+
+			return map[string]any{
+				"error_kind": classifyConnectionTestError(err),
+				"message":    err.Error(),
+			}, nil
 		})
 
 	p.RegisterEndpoint(

@@ -215,6 +215,21 @@ func (h *Handler) ConnectionGetParams(connID core.ConnectionID) (*core.Connectio
 	return c.GetParams(), nil
 }
 
+func (h *Handler) ConnectionTest(connID core.ConnectionID) error {
+	c, ok := h.lookupConnection[connID]
+	if !ok {
+		return fmt.Errorf("unknown connection with id: %q", connID)
+	}
+
+	temp, err := adapters.NewConnection(c.GetParams())
+	if err != nil {
+		return fmt.Errorf("adapters.NewConnection: %w", err)
+	}
+	temp.Close()
+
+	return nil
+}
+
 func (h *Handler) ConnectionGetStructure(connID core.ConnectionID) ([]*core.Structure, error) {
 	c, ok := h.lookupConnection[connID]
 	if !ok {

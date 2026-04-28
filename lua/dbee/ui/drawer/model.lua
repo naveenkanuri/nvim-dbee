@@ -130,6 +130,28 @@ local function build_search_struct_nodes(structs, parent_id)
   return nodes
 end
 
+---@param conn ConnectionParams
+---@param source_meta { id: string, name: string, can_create: boolean, can_update: boolean, can_delete: boolean, file: string|nil }
+---@return string
+local function search_connection_name(conn, source_meta)
+  return string.format("%s  [%s]", tostring(conn.name or conn.id), tostring(source_meta.name or source_meta.id))
+end
+
+---@param source Source
+---@return string|nil
+local function search_source_file(source)
+  if type(source.file) ~= "function" then
+    return nil
+  end
+
+  local ok, file_or_err = pcall(source.file, source)
+  if ok then
+    return file_or_err
+  end
+
+  return nil
+end
+
 ---@param handler Handler
 ---@param structure_cache table
 ---@return table[] search_model
@@ -140,33 +162,28 @@ function M.build_search_model(handler, structure_cache)
 
   for _, source in ipairs(handler:get_sources()) do
     local source_id = source:name()
-    local source_children = {}
+    local source_meta = {
+      id = source_id,
+      name = source_id,
+      can_create = type(source.create) == "function",
+      can_update = type(source.update) == "function",
+      can_delete = type(source.delete) == "function",
+      file = search_source_file(source),
+    }
 
     for _, conn in ipairs(handler:source_get_connections(source_id)) do
       local cached = structure_cache and structure_cache.root and structure_cache.root[conn.id] or structure_cache and structure_cache[conn.id]
       if cached and not cached.error then
-        table.insert(source_children, {
+        table.insert(search_model, {
           id = conn.id,
-          name = conn.name,
+          name = search_connection_name(conn, source_meta),
+          raw_name = conn.name,
           type = "connection",
           conn_id = conn.id,
-          source_meta = {
-            id = source_id,
-            can_update = type(source.update) == "function",
-            can_delete = type(source.delete) == "function",
-          },
+          source_meta = source_meta,
           children = build_search_struct_nodes(cached.structures, conn.id),
         })
       end
-    end
-
-    if #source_children > 0 then
-      table.insert(search_model, {
-        id = "__source__" .. source_id,
-        name = source_id,
-        type = "source",
-        children = source_children,
-      })
     end
   end
 
