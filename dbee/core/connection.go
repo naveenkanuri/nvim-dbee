@@ -33,6 +33,7 @@ type (
 		Query(ctx context.Context, query string) (ResultStream, error)
 		Structure() ([]*Structure, error)
 		Columns(opts *TableOptions) ([]*Column, error)
+		Ping(ctx context.Context) error
 		Close()
 	}
 
@@ -109,6 +110,14 @@ func (c *Connection) GetURL() string {
 // GetParams returns the original source for this connection
 func (c *Connection) GetParams() *ConnectionParams {
 	return c.unexpandedParams
+}
+
+func (c *Connection) Ping(ctx context.Context) error {
+	if err := c.driver.Ping(ctx); err != nil {
+		return fmt.Errorf("c.driver.Ping: %w", err)
+	}
+
+	return nil
 }
 
 func (c *Connection) Execute(query string, onEvent func(CallState, *Call)) *Call {

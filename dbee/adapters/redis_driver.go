@@ -55,6 +55,10 @@ func (c *redisDriver) Query(ctx context.Context, query string) (core.ResultStrea
 	return result, err
 }
 
+func (c *redisDriver) Ping(ctx context.Context) error {
+	return c.redis.Ping(ctx).Err()
+}
+
 func (c *redisDriver) Columns(opts *core.TableOptions) ([]*core.Column, error) {
 	return []*core.Column{
 		{

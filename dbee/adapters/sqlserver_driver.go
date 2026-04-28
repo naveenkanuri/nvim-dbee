@@ -26,6 +26,10 @@ func (c *sqlServerDriver) Query(ctx context.Context, query string) (core.ResultS
 	return c.c.QueryUntilNotEmpty(ctx, query, "select @@ROWCOUNT as 'Rows Affected'")
 }
 
+func (c *sqlServerDriver) Ping(ctx context.Context) error {
+	return c.c.PingContext(ctx)
+}
+
 func (c *sqlServerDriver) Columns(opts *core.TableOptions) ([]*core.Column, error) {
 	return c.c.ColumnsFromQuery(`
 		SELECT

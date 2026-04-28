@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +20,7 @@ import (
 )
 
 const callLogFileName = "/tmp/dbee-calllog.json"
+const connectionTestTimeout = 5 * time.Second
 
 type Handler struct {
 	vim    *nvim.Nvim
@@ -229,7 +231,14 @@ func (h *Handler) ConnectionTest(connID core.ConnectionID) error {
 	if err != nil {
 		return fmt.Errorf("adapters.NewConnection: %w", err)
 	}
-	temp.Close()
+	defer temp.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), connectionTestTimeout)
+	defer cancel()
+
+	if err := temp.Ping(ctx); err != nil {
+		return fmt.Errorf("temp.Ping: %w", err)
+	}
 
 	return nil
 }

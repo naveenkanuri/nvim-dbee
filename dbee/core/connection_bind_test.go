@@ -34,6 +34,8 @@ func (*bindAwareDriver) Structure() ([]*core.Structure, error) {
 	return nil, nil
 }
 
+func (*bindAwareDriver) Ping(_ context.Context) error { return nil }
+
 func (*bindAwareDriver) Columns(_ *core.TableOptions) ([]*core.Column, error) {
 	return []*core.Column{{Name: "id", Type: "NUMBER"}}, nil
 }
@@ -52,6 +54,8 @@ func (d *basicDriver) Query(_ context.Context, _ string) (core.ResultStream, err
 func (*basicDriver) Structure() ([]*core.Structure, error) {
 	return nil, nil
 }
+
+func (*basicDriver) Ping(_ context.Context) error { return nil }
 
 func (*basicDriver) Columns(_ *core.TableOptions) ([]*core.Column, error) {
 	return []*core.Column{{Name: "id", Type: "NUMBER"}}, nil

@@ -18,6 +18,10 @@ func (c *mySQLDriver) Query(ctx context.Context, query string) (core.ResultStrea
 	return c.c.QueryUntilNotEmpty(ctx, query, "select ROW_COUNT() as 'Rows Affected'")
 }
 
+func (c *mySQLDriver) Ping(ctx context.Context) error {
+	return c.c.PingContext(ctx)
+}
+
 func (c *mySQLDriver) Columns(opts *core.TableOptions) ([]*core.Column, error) {
 	return c.c.ColumnsFromQuery("DESCRIBE `%s`.`%s`", opts.Schema, opts.Table)
 }

@@ -78,6 +78,8 @@ func (d *sessTestDriver) Open(string) (driver.Conn, error) {
 	return &sessTestConn{id: id, state: d.state}, nil
 }
 
+func (d *sessTestDriver) Ping(context.Context) error { return nil }
+
 // ---------------------------------------------------------------------------
 // Fake driver.Conn
 // ---------------------------------------------------------------------------

@@ -73,6 +73,16 @@ func (d *bigQueryDriver) Query(ctx context.Context, queryStr string) (core.Resul
 	return result, nil
 }
 
+func (d *bigQueryDriver) Ping(ctx context.Context) error {
+	iter := d.c.Datasets(ctx)
+	_, err := iter.Next()
+	if errors.Is(err, iterator.Done) {
+		return nil
+	}
+
+	return err
+}
+
 func (d *bigQueryDriver) Columns(opts *core.TableOptions) ([]*core.Column, error) {
 	query := fmt.Sprintf(
 		"SELECT COLUMN_NAME, DATA_TYPE FROM `%s.INFORMATION_SCHEMA.COLUMNS` WHERE TABLE_SCHEMA = '%s' AND TABLE_NAME = '%s'",

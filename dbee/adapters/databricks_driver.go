@@ -28,6 +28,10 @@ func (d *databricksDriver) Query(ctx context.Context, query string) (core.Result
 	return d.c.QueryUntilNotEmpty(ctx, query)
 }
 
+func (d *databricksDriver) Ping(ctx context.Context) error {
+	return d.c.PingContext(ctx)
+}
+
 // Columns returns the columns and their types for the given table.
 func (d *databricksDriver) Columns(opts *core.TableOptions) ([]*core.Column, error) {
 	return d.c.ColumnsFromQuery(`

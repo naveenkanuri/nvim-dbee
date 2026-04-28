@@ -34,6 +34,10 @@ func (c *Client) Close() {
 	c.db.Close()
 }
 
+func (c *Client) PingContext(ctx context.Context) error {
+	return c.db.PingContext(ctx)
+}
+
 // Swap swaps current database connection for another one
 // and closes the old one.
 func (c *Client) Swap(db *sql.DB) {

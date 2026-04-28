@@ -22,6 +22,10 @@ func (d *sqliteDriver) Query(ctx context.Context, query string) (core.ResultStre
 	return d.c.QueryUntilNotEmpty(ctx, query, "select changes() as 'Rows Affected'")
 }
 
+func (d *sqliteDriver) Ping(ctx context.Context) error {
+	return d.c.PingContext(ctx)
+}
+
 func (d *sqliteDriver) Columns(opts *core.TableOptions) ([]*core.Column, error) {
 	return d.c.ColumnsFromQuery("SELECT name, type FROM pragma_table_info('%s')", opts.Table)
 }

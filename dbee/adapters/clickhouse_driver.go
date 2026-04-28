@@ -24,6 +24,10 @@ func (c *clickhouseDriver) Query(ctx context.Context, query string) (core.Result
 	return c.c.QueryUntilNotEmpty(ctx, query, "select changes() as 'Rows Affected'")
 }
 
+func (c *clickhouseDriver) Ping(ctx context.Context) error {
+	return c.c.PingContext(ctx)
+}
+
 func (c *clickhouseDriver) Columns(opts *core.TableOptions) ([]*core.Column, error) {
 	return c.c.ColumnsFromQuery(`
 		SELECT name, type

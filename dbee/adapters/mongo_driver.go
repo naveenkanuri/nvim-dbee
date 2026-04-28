@@ -41,6 +41,10 @@ func (c *mongoDriver) getCurrentDatabase(ctx context.Context) (string, error) {
 	return c.dbName, nil
 }
 
+func (c *mongoDriver) Ping(ctx context.Context) error {
+	return c.c.Ping(ctx, nil)
+}
+
 func (c *mongoDriver) Columns(opts *core.TableOptions) ([]*core.Column, error) {
 	return []*core.Column{
 		{

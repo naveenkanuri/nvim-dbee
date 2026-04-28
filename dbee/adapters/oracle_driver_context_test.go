@@ -63,6 +63,8 @@ func (oracleQueryCtxDriver) Open(string) (driver.Conn, error) {
 	return &oracleQueryCtxConn{}, nil
 }
 
+func (oracleQueryCtxDriver) Ping(context.Context) error { return nil }
+
 type oracleQueryCtxConn struct{}
 
 func (oracleQueryCtxConn) Prepare(string) (driver.Stmt, error) {

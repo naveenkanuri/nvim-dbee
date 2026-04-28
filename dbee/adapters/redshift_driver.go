@@ -31,6 +31,10 @@ func (r *redshiftDriver) Query(ctx context.Context, query string) (core.ResultSt
 	return r.c.QueryUntilNotEmpty(ctx, query)
 }
 
+func (r *redshiftDriver) Ping(ctx context.Context) error {
+	return r.c.PingContext(ctx)
+}
+
 // Close closes the underlying sql.DB connection.
 func (r *redshiftDriver) Close() {
 	r.c.Close()

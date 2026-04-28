@@ -42,6 +42,10 @@ func (d *oracleDriver) Query(ctx context.Context, query string) (core.ResultStre
 	return d.QueryWithBinds(ctx, query, nil)
 }
 
+func (d *oracleDriver) Ping(ctx context.Context) error {
+	return d.db.PingContext(ctx)
+}
+
 func parseOracleTimestamp(value string) (time.Time, error) {
 	layouts := []string{
 		time.RFC3339Nano,

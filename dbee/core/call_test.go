@@ -30,6 +30,8 @@ func (*retrievalFailDriver) Structure() ([]*core.Structure, error) {
 	return nil, nil
 }
 
+func (*retrievalFailDriver) Ping(_ context.Context) error { return nil }
+
 func (*retrievalFailDriver) Columns(_ *core.TableOptions) ([]*core.Column, error) {
 	return []*core.Column{{Name: "id", Type: "NUMBER"}}, nil
 }

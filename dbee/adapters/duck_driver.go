@@ -14,12 +14,16 @@ var (
 )
 
 type duckDriver struct {
-	c              *builders.Client
+	c         *builders.Client
 	currentDB string
 }
 
 func (d *duckDriver) Query(ctx context.Context, query string) (core.ResultStream, error) {
 	return d.c.QueryUntilNotEmpty(ctx, query)
+}
+
+func (d *duckDriver) Ping(ctx context.Context) error {
+	return d.c.PingContext(ctx)
 }
 
 func (d *duckDriver) Columns(opts *core.TableOptions) ([]*core.Column, error) {

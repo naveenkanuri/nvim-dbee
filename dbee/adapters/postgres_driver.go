@@ -35,6 +35,10 @@ func (c *postgresDriver) Query(ctx context.Context, query string) (core.ResultSt
 	return c.c.QueryUntilNotEmpty(ctx, query)
 }
 
+func (c *postgresDriver) Ping(ctx context.Context) error {
+	return c.c.PingContext(ctx)
+}
+
 func (c *postgresDriver) Columns(opts *core.TableOptions) ([]*core.Column, error) {
 	return c.c.ColumnsFromQuery(`
 		SELECT column_name, data_type

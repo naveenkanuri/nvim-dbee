@@ -26,6 +26,10 @@ func (d *driver) Query(ctx context.Context, query string) (core.ResultStream, er
 	return NewResultStream(d.data, d.config.resultStreamOptions...), nil
 }
 
+func (d *driver) Ping(ctx context.Context) error {
+	return nil
+}
+
 func (d *driver) Structure() ([]*core.Structure, error) {
 	var structure []*core.Structure
 
