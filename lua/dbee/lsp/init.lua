@@ -74,6 +74,24 @@ local M = {
   _connection_invalidated_consumer_live = false,
 }
 
+---@param conn_id connection_id|nil
+local function clear_connection_tracking(conn_id)
+  if conn_id and conn_id ~= "" then
+    M._async_requested[conn_id] = nil
+    M._metadata_scheduled[conn_id] = nil
+    for call_id, mapped_conn_id in pairs(M._metadata_call_ids) do
+      if mapped_conn_id == conn_id then
+        M._metadata_call_ids[call_id] = nil
+      end
+    end
+    return
+  end
+
+  M._async_requested = {}
+  M._metadata_scheduled = {}
+  M._metadata_call_ids = {}
+end
+
 ---@param data ConnectionInvalidatedEvent
 ---@param snapshot_epoch table<connection_id, integer>
 ---@return boolean
@@ -485,7 +503,9 @@ function M._process_metadata_result(handler, call_id, conn_id)
 end
 
 --- Stop the dbee LSP server.
-function M.stop()
+---@param conn_id? connection_id
+function M.stop(conn_id)
+  clear_connection_tracking(conn_id)
   if state.is_core_loaded() then
     local handler = state.handler()
     handler:teardown_structure_consumer(M._bootstrap_consumer_id)

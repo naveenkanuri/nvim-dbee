@@ -580,6 +580,15 @@ local function latest_request(list, conn_id)
   end
 end
 
+local function has_structure_flight(env, conn_id, consumer)
+  for _, flight in pairs(env.handler._structure_flights or {}) do
+    if flight.conn_id == conn_id and (consumer == nil or (flight.consumer_slots or {})[consumer]) then
+      return true
+    end
+  end
+  return false
+end
+
 local function should_apply_bootstrap_event(event, snapshot_epoch)
   local affected = {}
   for _, conn_id in ipairs(event.retired_conn_ids or {}) do
@@ -1075,6 +1084,45 @@ local function run_database_switch_and_reconnect_contracts()
   env_reconnect:cleanup()
 end
 
+local function run_lsp_retarget_rewarm_contracts()
+  local env = new_env()
+  env.lsp.register_events()
+
+  env.runtime.structure_requests = {}
+  env.runtime.executed_queries = {}
+  env.lsp._try_start()
+  Harness.drain()
+  assert_true("lsp_retarget_initial_flight", has_structure_flight(env, "conn-alpha", "lsp"))
+  assert_true("lsp_retarget_initial_metadata", env.lsp._metadata_scheduled["conn-alpha"] == true)
+
+  env.handler:set_current_connection("conn-beta")
+  Harness.drain()
+  assert_eq("lsp_retarget_alpha_async_cleared", env.lsp._async_requested["conn-alpha"], nil)
+  assert_eq("lsp_retarget_alpha_metadata_cleared", env.lsp._metadata_scheduled["conn-alpha"], nil)
+
+  Harness.drain(5200)
+  env.runtime.executed_queries = {}
+  env.runtime.structure_requests = {}
+
+  env.handler:set_current_connection("conn-alpha")
+  Harness.drain()
+  assert_true("lsp_retarget_return_flight", has_structure_flight(env, "conn-alpha", "lsp"))
+  assert_true("lsp_retarget_return_metadata", env.lsp._metadata_scheduled["conn-alpha"] == true)
+
+  Harness.drain(5200)
+  local saw_alpha_metadata = false
+  for _, call in ipairs(env.runtime.executed_queries or {}) do
+    if call.conn_id == "conn-alpha" and tostring(call.query or ""):find("dbee-lsp metadata", 1, true) then
+      saw_alpha_metadata = true
+      break
+    end
+  end
+  assert_true("lsp_retarget_metadata_query", saw_alpha_metadata)
+  print("LIFECYCLE01_LSP_RETARGET_REWARM_OK=true")
+
+  env:cleanup()
+end
+
 local function run_structure_regression_guard()
   local env = new_env()
   seed_drawer_root(env, "conn-alpha", 0)
@@ -1117,6 +1165,7 @@ run_supersession_and_cleanup_contracts()
 run_consumer_rebootstrap_contracts()
 run_backpressure_and_sticky_contracts()
 run_database_switch_and_reconnect_contracts()
+run_lsp_retarget_rewarm_contracts()
 run_structure_regression_guard()
 
 print("DCFG01_COORDINATION_ALL_PASS=true")
