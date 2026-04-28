@@ -2,7 +2,7 @@
 
 ## Overview
 
-Milestone v1.0 delivered 18 quality-of-life improvements to nvim-dbee across notifications, call history, editor/result actions, drawer navigation, resilience, and diagnostics. Milestone v1.1 focuses on the next dominant usability gap: managing real connection configurations without hand-editing JSON, browsing large Oracle/Postgres structures without blocking Neovim, organizing notes outside the drawer, and promoting DRAW-01 performance evidence to release-grade real-`nui.nvim` coverage.
+Milestone v1.0 delivered 18 quality-of-life improvements to nvim-dbee across notifications, call history, editor/result actions, drawer navigation, resilience, and diagnostics. Milestone v1.1 focuses on the next dominant usability gap: managing real connection configurations without hand-editing JSON, adding drawer-local async table/view child fetch with the minimum bounded materialization needed to make it usable, organizing notes outside the drawer, and promoting DRAW-01 performance evidence to release-grade real-`nui.nvim` coverage. The remaining connection-expand `connection_list_databases()` seam and the deferred cross-module lifecycle ownership move to Phase 7 (`DCFG-01`).
 
 ## Phases
 
@@ -18,7 +18,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 3: Editor & Result Actions** - Add note cycling, file export, and explain plan execution
 - [x] **Phase 4: Drawer & Navigation** - Add drawer copy/search and dedicated pane-jumping keybindings
 - [x] **Phase 5: Resilience & Diagnostics** - Add auto-reconnect prompt and generic adapter error diagnostics
-- [ ] **Phase 6: Structure Laziness & Notes Picker** - Make structure expansion non-blocking and move note discovery into a sectioned picker
+- [ ] **Phase 6: Structure Laziness & Notes Picker** - Add drawer-local async table/view child fetch, the supporting bounded child materialization it needs, and a sectioned notes picker
 - [ ] **Phase 7: Connection-Only Drawer** - Re-scope drawer to saved connections, activation, CRUD affordances, test, reload, and structure navigation
 - [ ] **Phase 8: Type-Aware Connection Wizard** - Add Oracle/Postgres connection forms, URL round-tripping, driver ping, and atomic FileSource persistence
 - [ ] **Phase 9: Real-Nui Drawer Perf Harness** - Promote DRAW-01 perf validation from non-release smoke to real-`nui.nvim` release evidence
@@ -121,30 +121,32 @@ Note: Phases 3 and 4 depend only on Phase 1, not on Phase 2. They can execute in
 
 ## Milestone v1.1: Drawer Connection Config + Structure Perf + Notes UX
 
-**Goal:** Users can manage saved connections from the drawer, browse large structures without UI stalls, and find notes through a global/local picker.
+**Goal:** Users can manage saved connections from the drawer, get drawer-local async table/view child loading plus the supporting bounded branch materialization it needs, and find notes through a global/local picker while Phase 7 absorbs the remaining lifecycle seams.
 
 **Requirements:** DCFG-01, DCFG-02, STRUCT-01, NOTES-01, PERF-01
 
 ### Phase 6: Structure Laziness & Notes Picker
 
-**Goal**: Remove the easiest drawer contention first by making structure expansion lazy/non-blocking and moving note discovery to a dedicated picker.
+**Goal**: Remove the easiest drawer contention first by adding drawer-owned async table/view child fetch, bounded child materialization, and a dedicated notes picker without claiming the remaining connection-expand seam or reconnect continuity are solved.
 **Depends on**: Phase 5
 **Requirements**: STRUCT-01, NOTES-01
 **Success Criteria** (what must be TRUE):
-  1. Expanding a connection/schema/table shows a loading row immediately and schedules the next-level structure fetch without blocking Neovim.
-  2. Per-connection structure cache entries are keyed by connection, schema, and table, and `R` invalidates the relevant cache before reload.
-  3. Schemas with more than 1000 table-like objects render the first 1000 promptly and expose a "Load more..." sentinel for the tail.
+  1. Drawer-owned full-tree root loads are fenced by `root_epoch` plus `caller_token`, and table/view expansion uses additive async child fetch with preserved `materialization`.
+  2. Per-connection structure cache entries are keyed by connection and branch identity, `R` and `database_selected` clear only the targeted drawer cache before reload, and root/branch error state remains explicit inside `_struct_cache` rather than disappearing on later rerender.
+  3. Oversized child branches render the first 1000 nodes promptly and expose a "Load more..." sentinel for the tail.
   4. `<leader>ef` opens a snacks picker with "Global notes" above "Local notes (current connection)", tagging items as `[global]` or `[local: conn_name]`.
 **Plans**: TBD by `$gsd-plan-phase 6`
 
 **Research bullets:**
-- Reuse existing `connection_get_structure_async`, `structure_loaded(request_id)`, cache invalidation, and DRAW-01 snapshot/session contracts from Phase 4.
-- Confirm how current Go/Lua structure APIs expose one-level versus full-tree data; if the backend only returns full trees, plan a compatibility adapter before backend expansion.
+- Reuse existing `connection_get_structure_async`, `structure_loaded(request_id)`, and DRAW-01 snapshot/session contracts from Phase 4.
+- Confirm the additive table/view child-fetch path carries `materialization = struct.type` from drawer node dispatch through the Go endpoint and child event so table/view column semantics stay truthful.
+- Keep the remaining `connection_list_databases()` connection-expand seam explicitly assigned to Phase 7 (`DCFG-01`) rather than treating Phase 6 root-payload delivery as proof of end-to-end expand responsiveness.
+- Keep drawer-visible reconnect continuity explicitly assigned to Phase 7 (`DCFG-01`) rather than letting Phase 6's cache work imply a solved reconnect contract.
 - Study current `pick_notes` snacks formatting and editor namespace APIs before introducing section headers.
 
 ### Phase 7: Connection-Only Drawer
 
-**Goal**: Turn the drawer into a connection-management surface instead of a mixed tree of notes, source controls, connections, and structure.
+**Goal**: Turn the drawer into a connection-management surface instead of a mixed tree of notes, source controls, connections, and structure, and absorb the deferred cross-module lifecycle ownership that Phase 6 intentionally left out.
 **Depends on**: Phase 6
 **Requirements**: DCFG-01
 **Success Criteria** (what must be TRUE):
@@ -152,11 +154,17 @@ Note: Phases 3 and 4 depend only on Phase 1, not on Phase 2. They can execute in
   2. `<CR>` on a connection toggles expansion into schemas, tables, columns, indexes, sequences, and foreign keys using the Phase 6 lazy-loading contract.
   3. Drawer mappings expose `a`, `e`, `dd`, `t`, `<C-CR>`, `R`, and `/` for add, edit, delete, test, activate, reload structure, and filter.
   4. CRUD/test failures surface through `utils.log`/`vim.notify` with actionable messages and preserve the existing active connection when operations fail.
+  5. Source actions and public source-lifecycle methods own one canonical rerender/invalidation contract, including `connection_invalidated`, failure emit behavior, and close-vs-refresh callback dispatch, instead of hidden double-refresh or stale-tree windows.
+  6. `current_connection_changed`, manual reconnect, source reload, and current-selection retention follow one canonical cross-module contract shared by drawer, handler, reconnect, and LSP.
+  7. Drawer and LSP coordinate full-tree `connection_get_structure_async()` so same-connection root warmups are coalesced instead of duplicated.
+  8. Invalidation and expand flows are backpressured, startup invalidation is idempotent, reconnect/source-reload choreography is explicit, and the remaining synchronous `connection_list_databases()` expand seam is absorbed into the drawer rewrite rather than left as an unowned residual.
 **Plans**: TBD by `$gsd-plan-phase 7`
 
 **Research bullets:**
 - Audit `lua/dbee/ui/drawer/init.lua`, `model.lua`, `convert.lua`, and `config.lua` mapping contracts before removing editor note nodes.
 - Verify how `source_add_connection`, `source_update_connection`, `source_remove_connection`, `source_reload`, and `set_current_connection` report failures.
+- Decide the canonical ownership for source-action callbacks, `current_connection_changed`, and reload/current-selection semantics across drawer, handler, reconnect, and LSP.
+- Choose a drawer/LSP single-flight or piggyback rule for full-tree root loads and a backpressure rule for invalidation-driven rewarm.
 - Decide whether source-level "edit source" remains accessible through an action picker or is intentionally deprecated from the drawer.
 
 ### Phase 8: Type-Aware Connection Wizard

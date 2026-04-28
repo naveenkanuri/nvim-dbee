@@ -52,12 +52,12 @@ Requirements for the Drawer Connection Config + Structure Perf + Notes UX milest
 
 ### Drawer Connection Config
 
-- [ ] **DCFG-01**: User can manage saved connections from a connection-only drawer tree with add, edit, delete, test, activate, reload-structure, expand/collapse, and filter controls
+- [ ] **DCFG-01**: User can manage saved connections from a connection-only drawer tree with add, edit, delete, test, activate, reload-structure, expand/collapse, and filter controls, and Phase 7 owns the deferred cross-module lifecycle contracts for `connection_invalidated` ownership, public source-lifecycle invalidation/failure choreography, source-action close-vs-refresh dispatch, connection-selection/current-connection behavior, reconnect/source-reload coordination, reload/current-selection semantics, drawer/LSP root-load coordination, drawer-visible reconnect continuity after `connection_rewritten`, invalidation backpressure, startup invalidation safety, and the remaining `connection_list_databases()` expand seam
 - [ ] **DCFG-02**: User can add or edit Oracle and Postgres connections through type-aware forms that round-trip existing URL formats, test the real driver connection before save, and persist atomically to FileSource-backed JSON
 
 ### Structure Browser Performance
 
-- [ ] **STRUCT-01**: User can expand schemas/tables without blocking Neovim because structure data loads one level at a time with cache-backed, scheduled, bounded results and explicit reload invalidation
+- [ ] **STRUCT-01**: User gets drawer-owned async table/view child fetch with truthful `materialization = struct.type`, bounded in-drawer child materialization, and drawer-owned root fencing via `caller_token` plus `root_epoch`; reconnect continuity and the remaining `connection_list_databases()` connection-expand seam are explicitly deferred to Phase 7 (`DCFG-01`)
 
 ### Notes Picker
 
