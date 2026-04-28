@@ -9,10 +9,137 @@ local function is_invalid_channel_error(err)
   return msg:find("invalid channel", 1, true) ~= nil
 end
 
+---@param conns ConnectionParams[]?
+---@return ConnectionParams[]
+local function copy_connections(conns)
+  local copied = {}
+  for _, conn in ipairs(conns or {}) do
+    if conn and conn.id and conn.id ~= "" then
+      copied[#copied + 1] = {
+        id = conn.id,
+        name = conn.name,
+        type = conn.type,
+        url = conn.url,
+      }
+    end
+  end
+
+  table.sort(copied, function(left, right)
+    local left_name = tostring(left.name or left.id or "")
+    local right_name = tostring(right.name or right.id or "")
+    if left_name == right_name then
+      return tostring(left.id or "") < tostring(right.id or "")
+    end
+    return left_name < right_name
+  end)
+
+  return copied
+end
+
+---@param conns ConnectionParams[]
+---@return connection_id[]
+local function connection_ids(conns)
+  local ids = {}
+  for _, conn in ipairs(conns or {}) do
+    if conn and conn.id and conn.id ~= "" then
+      ids[#ids + 1] = conn.id
+    end
+  end
+  table.sort(ids)
+  return ids
+end
+
+---@param conn_id connection_id?
+---@param ids table<string, boolean>
+local function add_conn_id(conn_id, ids)
+  if conn_id and conn_id ~= "" then
+    ids[conn_id] = true
+  end
+end
+
+---@param candidates ConnectionParams[]
+---@param predicate fun(candidate: ConnectionParams): boolean
+---@return ConnectionParams|nil
+---@return boolean ambiguous
+local function find_unique_connection(candidates, predicate)
+  local match = nil
+  for _, candidate in ipairs(candidates or {}) do
+    if candidate and candidate.id and candidate.id ~= "" and predicate(candidate) then
+      if match ~= nil then
+        return nil, true
+      end
+      match = candidate
+    end
+  end
+  return match, false
+end
+
+---@param previous ConnectionParams[]
+---@param current ConnectionParams[]
+---@return { old_conn_id: connection_id, new_conn_id: connection_id }[]
+local function build_rewrites(previous, current)
+  local rewrites = {}
+  local used_new_ids = {}
+
+  for _, old in ipairs(previous or {}) do
+    local prev_id = tostring(old.id or "")
+    local prev_type = tostring(old.type or "")
+    local prev_url = tostring(old.url or "")
+    local prev_name = tostring(old.name or "")
+
+    local function unused(candidate)
+      return candidate and candidate.id and not used_new_ids[candidate.id]
+    end
+
+    local match, ambiguous = nil, false
+    if prev_id ~= "" then
+      match, ambiguous = find_unique_connection(current, function(candidate)
+        return unused(candidate)
+          and tostring(candidate.id or "") == prev_id
+          and (prev_type == "" or tostring(candidate.type or "") == prev_type)
+      end)
+    end
+
+    if not match and not ambiguous and prev_type ~= "" and prev_url ~= "" then
+      match, ambiguous = find_unique_connection(current, function(candidate)
+        return unused(candidate)
+          and tostring(candidate.type or "") == prev_type
+          and tostring(candidate.url or "") == prev_url
+      end)
+    end
+
+    if not match and not ambiguous and prev_type ~= "" and prev_name ~= "" then
+      match, ambiguous = find_unique_connection(current, function(candidate)
+        return unused(candidate)
+          and tostring(candidate.type or "") == prev_type
+          and tostring(candidate.name or "") == prev_name
+      end)
+    end
+
+    if match and match.id ~= old.id then
+      rewrites[#rewrites + 1] = {
+        old_conn_id = old.id,
+        new_conn_id = match.id,
+      }
+    end
+
+    if match then
+      used_new_ids[match.id] = true
+    end
+  end
+
+  table.sort(rewrites, function(left, right)
+    return tostring(left.old_conn_id or "") < tostring(right.old_conn_id or "")
+  end)
+
+  return rewrites
+end
+
 -- Handler is an aggregator of connections
 ---@class Handler
 ---@field private sources table<source_id, Source>
 ---@field private source_conn_lookup table<source_id, connection_id[]>
+---@field private authoritative_root_epoch table<connection_id, integer>
 local Handler = {}
 
 ---@param sources? Source[]
@@ -22,6 +149,7 @@ function Handler:new(sources)
   local o = {
     sources = {},
     source_conn_lookup = {},
+    authoritative_root_epoch = {},
   }
   setmetatable(o, self)
   self.__index = self
@@ -44,6 +172,179 @@ function Handler:register_event_listener(event, listener)
   event_bus.register(event, listener)
 end
 
+---@private
+---@return connection_id?
+function Handler:_current_connection_id()
+  local current = self:get_current_connection()
+  return current and current.id or nil
+end
+
+---@private
+---@param conn_ids connection_id[]
+---@return integer|nil
+function Handler:_bump_authoritative_root_epoch(conn_ids)
+  local unique = {}
+  for _, conn_id in ipairs(conn_ids or {}) do
+    add_conn_id(conn_id, unique)
+  end
+
+  local ordered = vim.tbl_keys(unique)
+  table.sort(ordered)
+  if #ordered == 0 then
+    return nil
+  end
+
+  local next_epoch = 0
+  for _, conn_id in ipairs(ordered) do
+    next_epoch = math.max(next_epoch, self.authoritative_root_epoch[conn_id] or 0)
+  end
+  next_epoch = next_epoch + 1
+
+  for _, conn_id in ipairs(ordered) do
+    self.authoritative_root_epoch[conn_id] = next_epoch
+  end
+
+  return next_epoch
+end
+
+---@private
+---@param result table
+---@return connection_id[]
+function Handler:_affected_reload_conn_ids(result)
+  local unique = {}
+  for _, conn_id in ipairs(result.retired_conn_ids or {}) do
+    add_conn_id(conn_id, unique)
+  end
+  for _, conn_id in ipairs(result.new_conn_ids or {}) do
+    add_conn_id(conn_id, unique)
+  end
+
+  local ids = vim.tbl_keys(unique)
+  table.sort(ids)
+  return ids
+end
+
+---@private
+---@param reason string
+---@param result table
+---@param opts? { silent?: boolean }
+function Handler:_emit_connection_invalidated(reason, result, opts)
+  opts = opts or {}
+  event_bus.trigger("connection_invalidated", {
+    reason = reason,
+    source_id = result.source_id,
+    retired_conn_ids = vim.deepcopy(result.retired_conn_ids or {}),
+    new_conn_ids = vim.deepcopy(result.new_conn_ids or {}),
+    current_conn_id_before = result.current_conn_id_before,
+    current_conn_id_after = result.current_conn_id_after,
+    silent = opts.silent == true,
+    authoritative_root_epoch = result.authoritative_root_epoch,
+  })
+end
+
+---@private
+---@param payload table
+function Handler:_emit_source_reload_failed(payload)
+  event_bus.trigger("source_reload_failed", payload)
+end
+
+---@private
+---@param source_id source_id
+---@param reason string
+---@param stage string
+---@param message any
+---@param result? table
+function Handler:_source_reload_failed_payload(source_id, reason, stage, message, result)
+  result = result or {}
+  return {
+    source_id = source_id,
+    reason = reason,
+    stage = stage,
+    error_kind = stage == "mutation" and "mutation_failed" or "reload_failed",
+    message = tostring(message),
+    current_conn_id_before = result.current_conn_id_before,
+    current_conn_id_after = result.current_conn_id_after,
+    retired_conn_ids = vim.deepcopy(result.retired_conn_ids or {}),
+    new_conn_ids = vim.deepcopy(result.new_conn_ids or {}),
+    authoritative_root_epoch = result.authoritative_root_epoch,
+  }
+end
+
+---@private
+---@param source_id source_id
+---@param opts? { eventful?: boolean }
+---@return { source_id: source_id, retired_conn_ids: connection_id[], new_conn_ids: connection_id[], current_conn_id_before: connection_id|nil, current_conn_id_after: connection_id|nil, rewrites: { old_conn_id: connection_id, new_conn_id: connection_id }[], authoritative_root_epoch: integer|nil, reload_error: { error_kind: string, message: string }|nil }
+function Handler:_source_reload_silent(source_id, opts)
+  opts = opts or {}
+
+  local source = self.sources[source_id]
+  if not source then
+    error("no source with id: " .. source_id)
+  end
+
+  local previous_connections = copy_connections(self:source_get_connections(source_id))
+  local current_conn_id_before = self:_current_connection_id()
+
+  for _, conn in ipairs(previous_connections) do
+    pcall(vim.fn.DbeeDeleteConnection, conn.id)
+  end
+
+  self.source_conn_lookup[source_id] = {}
+
+  local reload_error = nil
+  local ok_specs, specs_or_err = pcall(source.load, source)
+  if ok_specs then
+    for _, spec in ipairs(specs_or_err or {}) do
+      if not spec.id or spec.id == "" then
+        reload_error = {
+          error_kind = "reload_failed",
+          message = string.format(
+            'connection without an id: { name: "%s", type: %s, url: %s } ',
+            spec.name,
+            spec.type,
+            spec.url
+          ),
+        }
+        break
+      end
+
+      local ok_create, conn_id_or_err = pcall(vim.fn.DbeeCreateConnection, spec)
+      if not ok_create then
+        reload_error = {
+          error_kind = "reload_failed",
+          message = tostring(conn_id_or_err),
+        }
+        break
+      end
+
+      self.source_conn_lookup[source_id][#self.source_conn_lookup[source_id] + 1] = conn_id_or_err
+    end
+  else
+    reload_error = {
+      error_kind = "reload_failed",
+      message = tostring(specs_or_err),
+    }
+  end
+
+  local current_connections = copy_connections(self:source_get_connections(source_id))
+  local result = {
+    source_id = source_id,
+    retired_conn_ids = connection_ids(previous_connections),
+    new_conn_ids = connection_ids(current_connections),
+    current_conn_id_before = current_conn_id_before,
+    current_conn_id_after = self:_current_connection_id(),
+    rewrites = build_rewrites(previous_connections, current_connections),
+    authoritative_root_epoch = nil,
+    reload_error = reload_error,
+  }
+
+  if opts.eventful then
+    result.authoritative_root_epoch = self:_bump_authoritative_root_epoch(self:_affected_reload_conn_ids(result))
+  end
+
+  return result
+end
+
 -- add new source and load connections from it
 ---@param source Source
 function Handler:add_source(source)
@@ -52,7 +353,10 @@ function Handler:add_source(source)
   -- keep the old source if present
   self.sources[id] = self.sources[id] or source
 
-  self:source_reload(id)
+  local result = self:_source_reload_silent(id, { eventful = false })
+  if result.reload_error then
+    error(result.reload_error.message)
+  end
 end
 
 ---@return Source[]
@@ -68,27 +372,18 @@ end
 ---and loads new ones.
 ---@param id source_id
 function Handler:source_reload(id)
-  local source = self.sources[id]
-  if not source then
-    error("no source with id: " .. id)
-  end
+  local result = self:_source_reload_silent(id, { eventful = true })
+  self:_emit_connection_invalidated("source_reload", result)
 
-  -- close old connections
-  for _, c in ipairs(self:source_get_connections(id)) do
-    pcall(vim.fn.DbeeDeleteConnection, c.id)
-  end
-
-  -- create new ones
-  self.source_conn_lookup[id] = {}
-  for _, spec in ipairs(source:load()) do
-    if not spec.id or spec.id == "" then
-      error(
-        string.format('connection without an id: { name: "%s", type: %s, url: %s } ', spec.name, spec.type, spec.url)
-      )
-    end
-
-    local conn_id = vim.fn.DbeeCreateConnection(spec)
-    table.insert(self.source_conn_lookup[id], conn_id)
+  if result.reload_error then
+    self:_emit_source_reload_failed(self:_source_reload_failed_payload(
+      id,
+      "source_reload",
+      "reload",
+      result.reload_error.message,
+      result
+    ))
+    error(result.reload_error.message)
   end
 end
 
@@ -109,10 +404,32 @@ function Handler:source_add_connection(id, details)
     error("source does not support adding connections")
   end
 
-  local conn_id = source:create(details)
-  self:source_reload(id)
+  local ok_create, conn_id_or_err = pcall(source.create, source, details)
+  if not ok_create then
+    self:_emit_source_reload_failed(self:_source_reload_failed_payload(
+      id,
+      "source_add",
+      "mutation",
+      conn_id_or_err
+    ))
+    error(conn_id_or_err)
+  end
 
-  return conn_id
+  local result = self:_source_reload_silent(id, { eventful = true })
+  self:_emit_connection_invalidated("source_add", result)
+
+  if result.reload_error then
+    self:_emit_source_reload_failed(self:_source_reload_failed_payload(
+      id,
+      "source_add",
+      "reload",
+      result.reload_error.message,
+      result
+    ))
+    error(result.reload_error.message)
+  end
+
+  return conn_id_or_err
 end
 
 ---@param id source_id
@@ -131,8 +448,30 @@ function Handler:source_remove_connection(id, conn_id)
     error("source does not support removing connections")
   end
 
-  source:delete(conn_id)
-  self:source_reload(id)
+  local ok_delete, delete_err = pcall(source.delete, source, conn_id)
+  if not ok_delete then
+    self:_emit_source_reload_failed(self:_source_reload_failed_payload(
+      id,
+      "source_delete",
+      "mutation",
+      delete_err
+    ))
+    error(delete_err)
+  end
+
+  local result = self:_source_reload_silent(id, { eventful = true })
+  self:_emit_connection_invalidated("source_delete", result)
+
+  if result.reload_error then
+    self:_emit_source_reload_failed(self:_source_reload_failed_payload(
+      id,
+      "source_delete",
+      "reload",
+      result.reload_error.message,
+      result
+    ))
+    error(result.reload_error.message)
+  end
 end
 
 ---@param id source_id
@@ -156,8 +495,30 @@ function Handler:source_update_connection(id, conn_id, details)
     error("source does not support updating connections")
   end
 
-  source:update(conn_id, details)
-  self:source_reload(id)
+  local ok_update, update_err = pcall(source.update, source, conn_id, details)
+  if not ok_update then
+    self:_emit_source_reload_failed(self:_source_reload_failed_payload(
+      id,
+      "source_update",
+      "mutation",
+      update_err
+    ))
+    error(update_err)
+  end
+
+  local result = self:_source_reload_silent(id, { eventful = true })
+  self:_emit_connection_invalidated("source_update", result)
+
+  if result.reload_error then
+    self:_emit_source_reload_failed(self:_source_reload_failed_payload(
+      id,
+      "source_update",
+      "reload",
+      result.reload_error.message,
+      result
+    ))
+    error(result.reload_error.message)
+  end
 end
 
 ---@param id source_id

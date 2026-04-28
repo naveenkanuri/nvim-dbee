@@ -106,6 +106,31 @@
 ---@field schema string? parent schema
 ---@field children DBStructure[]? child layout nodes
 
+---Lifecycle invalidation emitted after user-driven source reload, add, update,
+---or delete flows finish their silent bookkeeping.
+---@class ConnectionInvalidatedEvent
+---@field reason string
+---@field source_id source_id?
+---@field retired_conn_ids connection_id[]
+---@field new_conn_ids connection_id[]
+---@field current_conn_id_before connection_id?
+---@field current_conn_id_after connection_id?
+---@field silent boolean?
+---@field authoritative_root_epoch integer?
+
+---User-visible failure emitted only from eventful source lifecycle wrappers.
+---@class SourceReloadFailedEvent
+---@field source_id source_id
+---@field reason string
+---@field stage '"mutation"'|'"reload"'
+---@field error_kind '"mutation_failed"'|'"reload_failed"'
+---@field message string
+---@field current_conn_id_before connection_id?
+---@field current_conn_id_after connection_id?
+---@field retired_conn_ids connection_id[]
+---@field new_conn_ids connection_id[]
+---@field authoritative_root_epoch integer?
+
 ---@divider -
 ---@tag dbee.ref.types.events
 ---@brief [[
@@ -115,8 +140,10 @@
 ---Avaliable core events.
 ---@alias core_event_name
 ---| '"call_state_changed"' {conn_id, call={id,query,state,time_taken_us,timestamp_us,error,error_kind}}
+---| '"connection_invalidated"' ConnectionInvalidatedEvent
 ---| '"current_connection_changed"' {conn_id}
 ---| '"database_selected"' {conn_id, database_name}
+---| '"source_reload_failed"' SourceReloadFailedEvent
 ---| '"structure_loaded"' {conn_id, request_id, root_epoch?, caller_token?, structures, error}
 ---| '"structure_children_loaded"' {conn_id, request_id, branch_id, root_epoch, kind = "columns", columns, error}
 
