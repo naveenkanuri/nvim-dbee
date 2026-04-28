@@ -357,6 +357,47 @@ function dbee.focus_pane(name)
 end
 
 ---Open notes picker using snacks.nvim.
+local function append_note_picker_row(items, row)
+  local index = #items + 1
+  row.idx = index
+  row.score = index
+  table.insert(items, row)
+end
+
+---@param items table[]
+---@param title string
+---@param notes note_details[]
+---@param tag string
+---@param empty_hint? string
+local function append_note_picker_section(items, title, notes, tag, empty_hint)
+  if #notes == 0 and not empty_hint then
+    return
+  end
+
+  append_note_picker_row(items, {
+    kind = "header",
+    text = title,
+  })
+
+  if #notes == 0 then
+    append_note_picker_row(items, {
+      kind = "hint",
+      text = empty_hint,
+    })
+    return
+  end
+
+  for _, note in ipairs(notes) do
+    append_note_picker_row(items, {
+      kind = "note",
+      text = note.name,
+      note_id = note.id,
+      file = note.file,
+      tag = tag,
+    })
+  end
+end
+
 function dbee.pick_notes()
   if not dbee.is_open() then
     utils.log("warn", "Dbee is not open")
@@ -367,42 +408,62 @@ function dbee.pick_notes()
     return
   end
 
-  local notes = api.ui.editor_get_all_notes()
-  if #notes == 0 then
+  local sections = api.ui.editor_get_note_picker_sections()
+  local global_notes = sections.global_notes or {}
+  local local_notes = sections.local_notes or {}
+  local current_connection = sections.current_connection
+  if #global_notes == 0 and #local_notes == 0 then
     utils.log("info", "No notes found")
     return
   end
 
   local items = {}
-  local max_ns_len = 0
-  for _, note in ipairs(notes) do
-    max_ns_len = math.max(max_ns_len, #note.namespace)
+  if #global_notes > 0 then
+    append_note_picker_section(items, "Global notes", global_notes, "[global]")
   end
 
-  for i, note in ipairs(notes) do
-    table.insert(items, {
-      idx = i,
-      score = i,
-      text = note.name,
-      ns = note.namespace,
-      id = note.id,
-      file = note.file,
-    })
+  if current_connection then
+    append_note_picker_section(
+      items,
+      ("Local notes (%s)"):format(current_connection.name),
+      local_notes,
+      ("[local: %s]"):format(current_connection.name),
+      #local_notes == 0 and ("No local notes for %s"):format(current_connection.name) or nil
+    )
+  end
+
+  local max_tag_len = 0
+  for _, item in ipairs(items) do
+    max_tag_len = math.max(max_tag_len, #(item.tag or ""))
   end
 
   require("snacks").picker({
     title = "Dbee Notes",
     items = items,
     format = function(item)
+      if item.kind == "header" then
+        return {
+          { item.text, "SnacksPickerTitle" },
+        }
+      end
+      if item.kind == "hint" then
+        return {
+          { item.text, "SnacksPickerComment" },
+        }
+      end
       return {
-        { ("[%-" .. max_ns_len .. "s]"):format(item.ns), "SnacksPickerLabel" },
+        { ("%-" .. max_tag_len .. "s"):format(item.tag or ""), "SnacksPickerLabel" },
         { "  " },
         { item.text, "SnacksPickerFile" },
       }
     end,
     confirm = function(picker, item)
+      if not item or item.kind ~= "note" or not item.note_id then
+        utils.log("warn", "Select a note row")
+        return
+      end
       picker:close()
-      api.ui.editor_set_current_note(item.id)
+      api.ui.editor_set_current_note(item.note_id)
     end,
   })
 end

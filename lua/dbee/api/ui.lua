@@ -249,6 +249,39 @@ end
 --- Get all notes from all namespaces.
 --- Returns a flat list with namespace info included.
 ---@return { id: note_id, name: string, namespace: namespace_id, file: string?, bufnr: integer? }[]
+---@class NotePickerSections
+---@field current_connection { id: string, name: string }|nil
+---@field global_notes note_details[]
+---@field local_notes note_details[]
+
+--- Get picker-specific note sections without changing the flat helper contract.
+---@return NotePickerSections
+function ui.editor_get_note_picker_sections()
+  local editor = state.editor()
+  local sections = {
+    current_connection = nil,
+    global_notes = editor:namespace_get_notes("global"),
+    local_notes = {},
+  }
+
+  local conn = state.handler():get_current_connection()
+  if not (conn and conn.id ~= nil) then
+    return sections
+  end
+
+  local conn_id = tostring(conn.id)
+  sections.current_connection = {
+    id = conn_id,
+    name = conn.name or conn_id,
+  }
+  sections.local_notes = editor:namespace_get_notes(conn_id)
+
+  return sections
+end
+
+--- Get all notes from all namespaces.
+--- Returns a flat list with namespace info included.
+---@return { id: note_id, name: string, namespace: namespace_id, file: string?, bufnr: integer? }[]
 function ui.editor_get_all_notes()
   local editor = state.editor()
   local all_notes = {}
