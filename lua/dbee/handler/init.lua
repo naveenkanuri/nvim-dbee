@@ -191,7 +191,7 @@ end
 ---@field private source_conn_lookup table<source_id, connection_id[]>
 ---@field private authoritative_root_epoch table<connection_id, integer>
 ---@field private _next_singleflight_request_id integer
----@field private _structure_flights table<string, { conn_id: connection_id, epoch: integer, request_id: integer, waiters: table[], consumer_slots: table<string, true> }>
+---@field private _structure_flights table<string, { conn_id: connection_id, epoch: integer, request_id: integer, waiters: table[], consumer_slots: table<string, true>, alias_conn_ids?: table<string, true> }>
 ---@field private _structure_request_lookup table<integer, string>
 ---@field private _connection_invalidated_consumers table<string, { listener: event_listener, state: string, generation: integer, buffer?: { events: table[], last_drain_size: integer }, consecutive_overflows: integer, warning?: table }>
 local Handler = {}
@@ -599,6 +599,57 @@ function Handler:teardown_structure_consumer(consumer)
   end
 end
 
+---@param old_conn_id connection_id
+---@param new_conn_id connection_id
+function Handler:migrate_structure_flights(old_conn_id, new_conn_id)
+  if not old_conn_id or not new_conn_id or old_conn_id == new_conn_id then
+    return
+  end
+
+  local old_epoch = self.authoritative_root_epoch[old_conn_id]
+  if old_epoch ~= nil then
+    local new_epoch = self.authoritative_root_epoch[new_conn_id]
+    if new_epoch == nil then
+      self.authoritative_root_epoch[new_conn_id] = old_epoch
+    else
+      self.authoritative_root_epoch[new_conn_id] = math.max(new_epoch, old_epoch)
+    end
+    self.authoritative_root_epoch[old_conn_id] = nil
+  end
+
+  local migrated = {}
+  for key, flight in pairs(self._structure_flights) do
+    if flight.conn_id == old_conn_id then
+      self._structure_flights[key] = nil
+      local new_key = singleflight_key(new_conn_id, flight.epoch)
+      local existing = self._structure_flights[new_key]
+      flight.alias_conn_ids = flight.alias_conn_ids or {}
+      flight.alias_conn_ids[old_conn_id] = true
+      flight.conn_id = new_conn_id
+      self._structure_request_lookup[flight.request_id] = new_key
+      if existing then
+        existing.alias_conn_ids = existing.alias_conn_ids or {}
+        existing.alias_conn_ids[old_conn_id] = true
+        for alias_conn_id in pairs(flight.alias_conn_ids or {}) do
+          existing.alias_conn_ids[alias_conn_id] = true
+        end
+        for _, waiter in ipairs(flight.waiters or {}) do
+          existing.waiters[#existing.waiters + 1] = waiter
+          if waiter.consumer then
+            existing.consumer_slots[waiter.consumer] = true
+          end
+        end
+      else
+        migrated[new_key] = flight
+      end
+    end
+  end
+
+  for key, flight in pairs(migrated) do
+    self._structure_flights[key] = flight
+  end
+end
+
 ---@private
 ---@param data { conn_id?: connection_id, request_id?: integer, root_epoch?: integer, caller_token?: string, structures?: DBStructure[], error?: any }
 function Handler:_on_singleflight_structure_loaded(data)
@@ -619,13 +670,17 @@ function Handler:_on_singleflight_structure_loaded(data)
   self._structure_flights[key] = nil
 
   local payload_root_epoch = tonumber(data.root_epoch) or 0
-  if flight.conn_id ~= data.conn_id or flight.epoch ~= payload_root_epoch then
+  local conn_id_matches = flight.conn_id == data.conn_id
+  if not conn_id_matches and flight.alias_conn_ids then
+    conn_id_matches = flight.alias_conn_ids[data.conn_id] == true
+  end
+  if not conn_id_matches or flight.epoch ~= payload_root_epoch then
     return
   end
 
   for _, waiter in ipairs(flight.waiters or {}) do
     self:_notify_structure_waiter(waiter, {
-      conn_id = data.conn_id,
+      conn_id = flight.conn_id,
       request_id = waiter.request_id,
       root_epoch = payload_root_epoch,
       caller_token = waiter.caller_token,
@@ -1200,6 +1255,13 @@ function Handler:connection_list_databases(id)
   end
 
   return unpack(ret)
+end
+
+---@param id connection_id
+---@param request_id integer
+---@param root_epoch integer
+function Handler:connection_list_databases_async(id, request_id, root_epoch)
+  vim.fn.DbeeConnectionListDatabasesAsync(id, request_id, root_epoch)
 end
 
 ---@param id connection_id

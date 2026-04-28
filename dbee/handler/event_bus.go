@@ -149,6 +149,35 @@ func (eb *eventBus) StructureChildrenLoaded(
 	eb.callLua("structure_children_loaded", data)
 }
 
+func (eb *eventBus) ConnectionDatabasesLoaded(
+	id core.ConnectionID,
+	requestID int,
+	rootEpoch int,
+	current string,
+	available []string,
+	loadErr error,
+) {
+	errMsg := "nil"
+	if loadErr != nil {
+		errMsg = luaStringLiteral(loadErr.Error())
+	}
+
+	databasesLua := "nil"
+	if loadErr == nil {
+		databasesLua = fmt.Sprintf(`{ current = %q, available = %s }`, current, stringsToLua(available))
+	}
+
+	data := fmt.Sprintf(`{
+		conn_id = %q,
+		request_id = %d,
+		root_epoch = %d,
+		databases = %s,
+		error = %s,
+	}`, id, requestID, rootEpoch, databasesLua, errMsg)
+
+	eb.callLua("connection_databases_loaded", data)
+}
+
 // structuresToLua serializes []*core.Structure to a Lua table literal.
 func structuresToLua(structures []*core.Structure) string {
 	var b strings.Builder
@@ -172,6 +201,19 @@ func columnsToLua(columns []*core.Column) string {
 			b.WriteString(",")
 		}
 		b.WriteString(fmt.Sprintf(`{name=%q,type=%q}`, c.Name, c.Type))
+	}
+	b.WriteString("}")
+	return b.String()
+}
+
+func stringsToLua(values []string) string {
+	var b strings.Builder
+	b.WriteString("{")
+	for i, value := range values {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		b.WriteString(fmt.Sprintf("%q", value))
 	}
 	b.WriteString("}")
 	return b.String()

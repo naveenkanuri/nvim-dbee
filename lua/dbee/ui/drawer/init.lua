@@ -5,6 +5,7 @@ local menu = require("dbee.ui.drawer.menu")
 local convert = require("dbee.ui.drawer.convert")
 local drawer_model = require("dbee.ui.drawer.model")
 local expansion = require("dbee.ui.drawer.expansion")
+local reconnect = require("dbee.reconnect")
 local utils = require("dbee.utils")
 
 -- action function of drawer nodes
@@ -62,6 +63,8 @@ local utils = require("dbee.utils")
 ---@field private _connection_invalidated_consumer_id string
 ---@field private _pending_connection_invalidations table<string, ConnectionInvalidatedEvent>
 ---@field private _connection_invalidation_flush_scheduled boolean
+---@field private _database_switch_state table<string, { loading: boolean, token?: { conn_id: string, request_id: integer, root_epoch: integer }, current?: string, available?: string[], error?: any }>
+---@field private _next_database_switch_request_id integer
 ---@field private _struct_cache DrawerStructureCache
 ---@field private filter_text string current filter string
 ---@field private pre_filter_expansion table<string, boolean>? saved expansion before filter
@@ -92,6 +95,7 @@ local SEARCHABLE_TYPES = drawer_model.SEARCHABLE_TYPES or {
 local SNAPSHOT_ID_SEP = "\x1f"
 local ID_SEP = convert.ID_SEP or "\x1f"
 local LOAD_MORE_SUFFIX = convert.LOAD_MORE_SUFFIX or (ID_SEP .. "__load_more__")
+local DATABASE_SWITCH_SUFFIX = "_database_switch__"
 local COLUMNS_KIND = "columns"
 local STRUCTURES_KIND = "structures"
 local CHILD_CHUNK_SIZE = 1000
@@ -256,6 +260,47 @@ end
 ---@return string
 local function load_more_node_id(branch_id)
   return branch_id .. LOAD_MORE_SUFFIX
+end
+
+---@param conn_id string
+---@return string
+local function database_switch_node_id(conn_id)
+  return conn_id .. DATABASE_SWITCH_SUFFIX
+end
+
+---@param node_id string
+---@param old_conn_id string
+---@param new_conn_id string
+---@return string
+local function rewrite_conn_scoped_node_id(node_id, old_conn_id, new_conn_id)
+  if node_id == old_conn_id then
+    return new_conn_id
+  end
+
+  if node_id == database_switch_node_id(old_conn_id) then
+    return database_switch_node_id(new_conn_id)
+  end
+
+  local prefix = old_conn_id .. ID_SEP
+  if node_id:sub(1, #prefix) == prefix then
+    return new_conn_id .. node_id:sub(#old_conn_id + 1)
+  end
+
+  return node_id
+end
+
+---@param ids table<string, boolean>?
+---@param old_conn_id string
+---@param new_conn_id string
+---@return table<string, boolean>
+local function rewrite_conn_scoped_ids(ids, old_conn_id, new_conn_id)
+  local rewritten = {}
+  for node_id, enabled in pairs(ids or {}) do
+    if enabled then
+      rewritten[rewrite_conn_scoped_node_id(node_id, old_conn_id, new_conn_id)] = true
+    end
+  end
+  return rewritten
 end
 
 ---@param snapshot_nodes DrawerRenderSnapshotNode[]?
@@ -786,31 +831,9 @@ local function build_connection_children(ui, conn, opts)
   cached_branch.raw = sorted_struct_children(cached_root.structures)
   nodes = build_branch_nodes(ui, conn.id, conn.id, STRUCTURES_KIND)
 
-  local ok_dbs, current_db, available_dbs = pcall(ui.handler.connection_list_databases, ui.handler, conn.id)
-  if not ok_dbs then
-    vim.notify(
-      ("Failed to list databases for %s: %s"):format(conn.id, tostring(current_db)),
-      vim.log.levels.DEBUG,
-      { title = "nvim-dbee" }
-    )
-    return nodes
-  end
-
-  if current_db ~= "" and #available_dbs > 0 then
-    table.insert(nodes, 1, NuiTree.Node({
-      id = conn.id .. "_database_switch__",
-      name = current_db,
-      type = "database_switch",
-      action_1 = function(_, select)
-        select {
-          title = "Select a Database",
-          items = available_dbs,
-          on_confirm = function(selection)
-            ui.handler:connection_select_database(conn.id, selection)
-          end,
-        }
-      end,
-    }) --[[@as DrawerUINode]])
+  local database_switch_node = ui:_build_database_switch_node(conn.id)
+  if database_switch_node then
+    table.insert(nodes, 1, database_switch_node)
   end
 
   return nodes
@@ -1000,6 +1023,115 @@ function DrawerUI:_prune_loaded_lazy_ids(conn_id)
   end
 end
 
+---@private
+---@param conn_id string
+---@return { conn_id: string, request_id: integer, root_epoch: integer }
+function DrawerUI:_next_database_switch_token(conn_id)
+  self._next_database_switch_request_id = self._next_database_switch_request_id + 1
+  return {
+    conn_id = conn_id,
+    request_id = self._next_database_switch_request_id,
+    root_epoch = current_root_epoch(self, conn_id),
+  }
+end
+
+---@private
+---@param conn_id string
+function DrawerUI:_clear_database_switch_state(conn_id)
+  self._database_switch_state[conn_id] = nil
+end
+
+---@private
+---@param conn_id string
+---@param carried? { current?: string, available?: string[], error?: any }
+---@return { loading: boolean, token: { conn_id: string, request_id: integer, root_epoch: integer }, current?: string, available?: string[], error?: any }
+function DrawerUI:_start_database_switch_load(conn_id, carried)
+  local token = self:_next_database_switch_token(conn_id)
+  local state = {
+    loading = true,
+    token = token,
+    current = carried and carried.current or nil,
+    available = carried and vim.deepcopy(carried.available or {}) or nil,
+    error = nil,
+  }
+  self._database_switch_state[conn_id] = state
+  self.handler:connection_list_databases_async(conn_id, token.request_id, token.root_epoch)
+  return state
+end
+
+---@private
+---@param conn_id string
+---@return DrawerUINode|nil
+function DrawerUI:_build_database_switch_node(conn_id)
+  local state = self._database_switch_state[conn_id]
+  if not state then
+    state = self:_start_database_switch_load(conn_id)
+  end
+
+  local node = NuiTree.Node({
+    id = database_switch_node_id(conn_id),
+    name = "loading databases...",
+    type = "database_switch",
+  }) --[[@as DrawerUINode]]
+
+  if state.loading then
+    local current_name = tostring(state.current or "")
+    if current_name ~= "" then
+      node.name = current_name .. " (loading databases...)"
+    end
+    return node
+  end
+
+  if state.error then
+    node.name = "database switch unavailable: " .. tostring(state.error)
+    return node
+  end
+
+  local current_name = tostring(state.current or "")
+  local available = vim.deepcopy(state.available or {})
+  if current_name == "" or #available == 0 then
+    return nil
+  end
+
+  node.name = current_name
+  node.action_1 = function(_, select)
+    select {
+      title = "Select a Database",
+      items = available,
+      on_confirm = function(selection)
+        self.handler:connection_select_database(conn_id, selection)
+      end,
+    }
+  end
+
+  return node
+end
+
+---@private
+---@param old_conn_id string
+---@param new_conn_id string
+function DrawerUI:_migrate_database_switch_state(old_conn_id, new_conn_id)
+  local state = self._database_switch_state[old_conn_id]
+  if not state then
+    return
+  end
+
+  self._database_switch_state[old_conn_id] = nil
+
+  if state.loading then
+    self:_start_database_switch_load(new_conn_id, {
+      current = state.current,
+      available = state.available,
+    })
+    return
+  end
+
+  if state.token then
+    state.token = vim.tbl_extend("force", state.token, { conn_id = new_conn_id })
+  end
+  self._database_switch_state[new_conn_id] = state
+end
+
 ---@param branch_id string
 ---@return connection_id
 local function branch_owner_conn_id(branch_id)
@@ -1102,6 +1234,8 @@ function DrawerUI:new(handler, editor, result, opts)
     _connection_invalidated_consumer_id = "drawer",
     _pending_connection_invalidations = {},
     _connection_invalidation_flush_scheduled = false,
+    _database_switch_state = {},
+    _next_database_switch_request_id = 0,
     _struct_cache = {
       root = {},
       root_gen = {},
@@ -1168,8 +1302,16 @@ function DrawerUI:new(handler, editor, result, opts)
     o:on_database_selected(data)
   end)
 
+  handler:register_event_listener("connection_databases_loaded", function(data)
+    o:on_connection_databases_loaded(data)
+  end)
+
   handler:register_event_listener("call_state_changed", function(data)
     o:on_call_state_changed(data)
+  end)
+
+  reconnect.register_connection_rewritten_listener("drawer", function(old_conn_id, new_conn_id)
+    o:on_connection_rewritten(old_conn_id, new_conn_id)
   end)
 
   o:_bootstrap_connection_invalidated_consumer()
@@ -1315,6 +1457,7 @@ function DrawerUI:_flush_connection_invalidations()
       end
 
       self._manual_refresh_conns[conn_id] = nil
+      self:_clear_database_switch_state(conn_id)
       self:_prune_loaded_lazy_ids(conn_id)
       self._struct_cache.root[conn_id] = nil
       self._struct_cache.branches[conn_id] = nil
@@ -1353,6 +1496,84 @@ function DrawerUI:on_connection_invalidated(data)
   vim.schedule(function()
     self:_flush_connection_invalidations()
   end)
+end
+
+---@private
+---@param old_conn_id string
+---@param new_conn_id string
+function DrawerUI:on_connection_rewritten(old_conn_id, new_conn_id)
+  if not old_conn_id or not new_conn_id or old_conn_id == new_conn_id then
+    return
+  end
+
+  if self.filter_restore_snapshot or self.filter_input then
+    self:interrupt_filter("Drawer reconnect rewrite changed connection ids; closing filter before patch")
+  end
+
+  local old_node = self.tree and self.tree:get_node(old_conn_id)
+  local was_expanded = old_node and old_node:is_expanded() or false
+  if was_expanded then
+    self:_capture_container_expansions(old_conn_id)
+  end
+
+  local replay = self._replay_container_expansions[old_conn_id]
+  if replay then
+    self._replay_container_expansions[new_conn_id] = rewrite_conn_scoped_ids(replay, old_conn_id, new_conn_id)
+    self._replay_container_expansions[old_conn_id] = nil
+  end
+
+  if self._manual_refresh_conns[old_conn_id] then
+    self._manual_refresh_conns[new_conn_id] = true
+    self._manual_refresh_conns[old_conn_id] = nil
+  end
+
+  if self._struct_cache.root[old_conn_id] ~= nil then
+    self._struct_cache.root[new_conn_id] = self._struct_cache.root[old_conn_id]
+  end
+  if self._struct_cache.root_gen[old_conn_id] ~= nil then
+    self._struct_cache.root_gen[new_conn_id] = self._struct_cache.root_gen[old_conn_id]
+  end
+  if self._struct_cache.root_applied[old_conn_id] ~= nil then
+    self._struct_cache.root_applied[new_conn_id] = self._struct_cache.root_applied[old_conn_id]
+  end
+  if self._struct_cache.root_epoch[old_conn_id] ~= nil then
+    self._struct_cache.root_epoch[new_conn_id] = self._struct_cache.root_epoch[old_conn_id]
+  elseif self._struct_cache.root_epoch[new_conn_id] == nil then
+    self._struct_cache.root_epoch[new_conn_id] = self.handler:get_authoritative_root_epoch(new_conn_id)
+  end
+
+  self._struct_cache.root[old_conn_id] = nil
+  self._struct_cache.root_gen[old_conn_id] = nil
+  self._struct_cache.root_applied[old_conn_id] = nil
+  self._struct_cache.root_epoch[old_conn_id] = nil
+  self._struct_cache.branches[old_conn_id] = nil
+  self:_prune_loaded_lazy_ids(old_conn_id)
+  self:_migrate_database_switch_state(old_conn_id, new_conn_id)
+
+  if self.current_conn_id == old_conn_id then
+    self.current_conn_id = new_conn_id
+  end
+
+  invalidate_authoritative_caches(self)
+
+  if not self.tree then
+    return
+  end
+
+  self:refresh()
+
+  local new_node = self.tree:get_node(new_conn_id)
+  if not new_node then
+    return
+  end
+
+  if was_expanded then
+    new_node:expand()
+  end
+  self:_patch_connection_subtree(new_conn_id, {
+    suppress_root_request = self._struct_cache.root[new_conn_id] == nil,
+    restore_container_expansions = was_expanded,
+  })
 end
 
 -- event listener for current note change
@@ -1446,6 +1667,7 @@ function DrawerUI:on_database_selected(data)
   end
 
   self:_capture_container_expansions(data.conn_id)
+  self:_clear_database_switch_state(data.conn_id)
   self:_prune_loaded_lazy_ids(data.conn_id)
   self._struct_cache.root[data.conn_id] = nil
   self._struct_cache.branches[data.conn_id] = nil
@@ -1454,6 +1676,51 @@ function DrawerUI:on_database_selected(data)
   invalidate_authoritative_caches(self)
   self:_patch_connection_subtree(data.conn_id, { suppress_root_request = true })
   self:request_structure_reload(data.conn_id, { force_new = true })
+end
+
+---@private
+---@param data { conn_id: string, request_id?: integer, root_epoch?: integer, databases?: { current?: string, available?: string[] }, error?: any }
+function DrawerUI:on_connection_databases_loaded(data)
+  if not data or not data.conn_id then
+    return
+  end
+
+  local state = self._database_switch_state[data.conn_id]
+  local token = state and state.token
+  if not token then
+    return
+  end
+
+  local payload_request_id = tonumber(data.request_id) or 0
+  local payload_root_epoch = normalize_root_epoch(data.root_epoch)
+  if token.conn_id ~= data.conn_id or token.request_id ~= payload_request_id or token.root_epoch ~= payload_root_epoch then
+    return
+  end
+
+  state.loading = false
+  state.token = nil
+  state.error = data.error
+
+  local databases = data.databases or {}
+  if not data.error then
+    state.current = tostring(databases.current or "")
+    state.available = vim.deepcopy(databases.available or {})
+  else
+    state.current = tostring(state.current or "")
+    state.available = vim.deepcopy(state.available or {})
+  end
+
+  invalidate_render_snapshot(self)
+
+  if self.filter_restore_snapshot or self.filter_input then
+    return
+  end
+
+  if self._struct_cache.root[data.conn_id] == nil then
+    return
+  end
+
+  self:_patch_connection_subtree(data.conn_id, { suppress_root_request = true })
 end
 
 ---@private
@@ -1877,6 +2144,15 @@ function DrawerUI:prepare_close()
     input:unmount()
   end
 
+  if self.handler then
+    if type(self.handler.teardown_structure_consumer) == "function" then
+      self.handler:teardown_structure_consumer(self._connection_invalidated_consumer_id)
+    end
+    if type(self.handler.teardown_connection_invalidated_consumer) == "function" then
+      self.handler:teardown_connection_invalidated_consumer(self._connection_invalidated_consumer_id)
+    end
+  end
+
   clear_filter_state(self)
   self.winid = nil
 end
@@ -2081,6 +2357,7 @@ function DrawerUI:get_actions()
 
       self._manual_refresh_conns = { [conn_id] = true }
       self:_capture_container_expansions(conn_id)
+      self:_clear_database_switch_state(conn_id)
       self:_prune_loaded_lazy_ids(conn_id)
       self._struct_cache.root[conn_id] = nil
       self._struct_cache.branches[conn_id] = nil

@@ -92,7 +92,11 @@ func (h *Handler) CreateConnection(params *core.ConnectionParams) (core.Connecti
 	}
 
 	h.lookupConnection[c.GetID()] = c
-	_ = h.SetCurrentConnection(c.GetID())
+	// Keep initial startup behavior, but do not auto-select unrelated survivors
+	// after a reload deleted the previous logical current connection.
+	if h.currentConnectionID == "" {
+		_ = h.SetCurrentConnection(c.GetID())
+	}
 
 	return c.GetID(), nil
 }
@@ -348,6 +352,46 @@ func (h *Handler) ConnectionListDatabases(connID core.ConnectionID) (current str
 	}
 
 	return currentDB, availableDBs, nil
+}
+
+func (h *Handler) ConnectionListDatabasesAsync(connID core.ConnectionID, requestID int, rootEpoch int) {
+	if requestID <= 0 {
+		requestID = int(h.nextStructureReqID.Add(1))
+	}
+
+	c, ok := h.lookupConnection[connID]
+	if !ok {
+		h.events.ConnectionDatabasesLoaded(
+			connID,
+			requestID,
+			rootEpoch,
+			"",
+			nil,
+			fmt.Errorf("unknown connection with id: %q", connID),
+		)
+		return
+	}
+
+	go func() {
+		currentDB, availableDBs, err := c.ListDatabases()
+		if err != nil {
+			if errors.Is(err, core.ErrDatabaseSwitchingNotSupported) {
+				h.events.ConnectionDatabasesLoaded(connID, requestID, rootEpoch, "", []string{}, nil)
+				return
+			}
+			h.events.ConnectionDatabasesLoaded(
+				connID,
+				requestID,
+				rootEpoch,
+				"",
+				nil,
+				fmt.Errorf("c.ListDatabases: %w", err),
+			)
+			return
+		}
+
+		h.events.ConnectionDatabasesLoaded(connID, requestID, rootEpoch, currentDB, availableDBs, nil)
+	}()
 }
 
 func (h *Handler) ConnectionSelectDatabase(connID core.ConnectionID, database string) error {

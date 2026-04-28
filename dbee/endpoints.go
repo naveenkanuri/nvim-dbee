@@ -375,6 +375,18 @@ func mountEndpoints(p *plugin.Plugin, h *handler.Handler) {
 		})
 
 	p.RegisterEndpoint(
+		"DbeeConnectionListDatabasesAsync",
+		func(args *struct {
+			ID        core.ConnectionID `msgpack:",array"`
+			RequestID int
+			RootEpoch int
+		},
+		) (any, error) {
+			h.ConnectionListDatabasesAsync(args.ID, args.RequestID, args.RootEpoch)
+			return nil, nil
+		})
+
+	p.RegisterEndpoint(
 		"DbeeConnectionSelectDatabase",
 		func(args *struct {
 			ID       core.ConnectionID `msgpack:",array"`

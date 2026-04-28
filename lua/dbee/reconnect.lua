@@ -556,6 +556,9 @@ function M.reconnect_connection(conn_id, opts)
   reload_result.current_conn_id_after = current_after
 
   if reloaded_conn.id ~= conn_id then
+    if type(handler.migrate_structure_flights) == "function" then
+      handler:migrate_structure_flights(conn_id, reloaded_conn.id)
+    end
     handler:emit_connection_invalidated_silent("reconnect_rewrite", reload_result)
   end
 

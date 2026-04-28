@@ -150,6 +150,15 @@
 ---@field current_connection ConnectionParams?
 ---@field snapshot_authoritative_epoch table<connection_id, integer>
 
+---Async database-switch payload emitted back to Lua after
+---`connection_list_databases_async(conn_id, request_id, root_epoch)`.
+---@class ConnectionDatabasesLoadedEvent
+---@field conn_id connection_id
+---@field request_id integer
+---@field root_epoch integer
+---@field databases? { current?: string, available?: string[] }
+---@field error? string
+
 ---@divider -
 ---@tag dbee.ref.types.events
 ---@brief [[
@@ -159,6 +168,7 @@
 ---Avaliable core events.
 ---@alias core_event_name
 ---| '"call_state_changed"' {conn_id, call={id,query,state,time_taken_us,timestamp_us,error,error_kind}}
+---| '"connection_databases_loaded"' ConnectionDatabasesLoadedEvent
 ---| '"connection_invalidated"' ConnectionInvalidatedEvent
 ---| '"current_connection_changed"' {conn_id}
 ---| '"database_selected"' {conn_id, database_name}
