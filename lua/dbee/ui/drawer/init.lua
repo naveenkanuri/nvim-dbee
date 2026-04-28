@@ -42,7 +42,7 @@ local utils = require("dbee.utils")
 ---@field root_applied table<string, integer>
 ---@field root_epoch table<string, integer>
 ---@field loaded_lazy_ids table<string, boolean>
----@field branches table<string, table<string, { raw?: Column[], error?: any, built_count: integer, render_limit: integer, request_gen: integer, applied_gen: integer, loading: boolean }>>
+---@field branches table<string, table<string, { raw?: any[], error?: any, built_count: integer, render_limit: integer, request_gen: integer, applied_gen: integer, loading: boolean }>>
 
 ---@class DrawerUI
 ---@field private tree NuiTree
@@ -90,6 +90,7 @@ local SNAPSHOT_ID_SEP = "\x1f"
 local ID_SEP = convert.ID_SEP or "\x1f"
 local LOAD_MORE_SUFFIX = convert.LOAD_MORE_SUFFIX or (ID_SEP .. "__load_more__")
 local COLUMNS_KIND = "columns"
+local STRUCTURES_KIND = "structures"
 local CHILD_CHUNK_SIZE = 1000
 local TABLE_LIKE_TYPES = {
   table = true,
@@ -197,7 +198,7 @@ end
 ---@param branch_id string
 ---@param kind? string
 ---@param create? boolean
----@return { raw?: Column[], error?: any, built_count: integer, render_limit: integer, request_gen: integer, applied_gen: integer, loading: boolean }?
+---@return { raw?: any[], error?: any, built_count: integer, render_limit: integer, request_gen: integer, applied_gen: integer, loading: boolean }?
 local function branch_state(ui, conn_id, branch_id, kind, create)
   local conn_branches = ui._struct_cache.branches[conn_id]
   if not conn_branches and create then
@@ -609,7 +610,15 @@ local function build_branch_nodes(ui, conn_id, branch_id, kind)
     chunk[#chunk + 1] = raw[index]
   end
 
-  local nodes = convert.column_nodes(branch_id, chunk)
+  local nodes = {}
+  if kind == STRUCTURES_KIND then
+    for _, struct in ipairs(chunk) do
+      nodes[#nodes + 1] = ui:_build_structure_node(conn_id, branch_id, struct)
+    end
+  else
+    nodes = convert.column_nodes(branch_id, chunk)
+  end
+
   if built_count < #raw then
     nodes[#nodes + 1] = convert.load_more_node(branch_id, kind or COLUMNS_KIND)
   end
@@ -637,9 +646,11 @@ local function build_connection_children(ui, conn, opts)
     return nodes
   end
 
-  for _, struct in ipairs(sorted_struct_children(cached_root.structures)) do
-    nodes[#nodes + 1] = ui:_build_structure_node(conn.id, conn.id, struct)
-  end
+  local cached_branch = branch_state(ui, conn.id, conn.id, STRUCTURES_KIND, true)
+  cached_branch.loading = false
+  cached_branch.error = nil
+  cached_branch.raw = sorted_struct_children(cached_root.structures)
+  nodes = build_branch_nodes(ui, conn.id, conn.id, STRUCTURES_KIND)
 
   local ok_dbs, current_db, available_dbs = pcall(ui.handler.connection_list_databases, ui.handler, conn.id)
   if not ok_dbs then
@@ -691,12 +702,12 @@ local function resolve_connection_ancestor(tree, node)
   return nil
 end
 
-function DrawerUI:_build_structure_children(conn_id, parent_id, structs)
-  local nodes = {}
-  for _, struct in ipairs(sorted_struct_children(structs)) do
-    nodes[#nodes + 1] = self:_build_structure_node(conn_id, parent_id, struct)
-  end
-  return nodes
+function DrawerUI:_materialize_cached_structure_branch(conn_id, branch_id, structs)
+  local cached = branch_state(self, conn_id, branch_id, STRUCTURES_KIND, true)
+  cached.loading = false
+  cached.error = nil
+  cached.raw = sorted_struct_children(structs)
+  return build_branch_nodes(self, conn_id, branch_id, STRUCTURES_KIND)
 end
 
 function DrawerUI:_materialize_table_like_branch(conn_id, node_id, struct)
@@ -740,11 +751,16 @@ function DrawerUI:_build_structure_node(conn_id, parent_id, struct)
   else
     local children = normalize_children(struct.children)
     if #children > 0 then
+      local cached_branch = branch_state(self, conn_id, node_id, STRUCTURES_KIND, false)
       if self._struct_cache.loaded_lazy_ids[node_id] == true then
-        built_children = self:_build_structure_children(conn_id, node_id, children)
+        if cached_branch and cached_branch.raw ~= nil then
+          built_children = build_branch_nodes(self, conn_id, node_id, STRUCTURES_KIND)
+        else
+          built_children = self:_materialize_cached_structure_branch(conn_id, node_id, children)
+        end
       end
       lazy_children_factory = function()
-        return self:_build_structure_children(conn_id, node_id, children)
+        return self:_materialize_cached_structure_branch(conn_id, node_id, children)
       end
     end
   end
@@ -893,7 +909,12 @@ function DrawerUI:structure_load_more(branch_id, kind)
 
   self.tree:remove_node(sentinel_id)
   for index = state.built_count + 1, next_built do
-    self.tree:add_node(convert.column_nodes(branch_id, { raw[index] })[1], branch_id)
+    local nodes = kind == STRUCTURES_KIND
+        and { self:_build_structure_node(conn_id, branch_id, raw[index]) }
+      or convert.column_nodes(branch_id, { raw[index] })
+    for _, child in ipairs(nodes) do
+      self.tree:add_node(child, branch_id)
+    end
   end
   state.built_count = next_built
 

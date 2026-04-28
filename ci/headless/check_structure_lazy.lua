@@ -354,6 +354,7 @@ local DrawerUI = require("dbee.ui.drawer")
 
 local SOURCE_ID = "__source__source1"
 local BIG_COLUMN_COUNT = 3205
+local BIG_STRUCT_COUNT = 2205
 
 local BIG_COLUMNS = {}
 for index = 1, BIG_COLUMN_COUNT do
@@ -362,6 +363,34 @@ for index = 1, BIG_COLUMN_COUNT do
     type = "NUMBER",
   }
 end
+
+local BIG_ROOT_STRUCTURES = {}
+for index = 1, BIG_STRUCT_COUNT do
+  BIG_ROOT_STRUCTURES[#BIG_ROOT_STRUCTURES + 1] = {
+    type = "schema",
+    name = string.format("schema_%04d", index),
+    schema = string.format("schema_%04d", index),
+    children = {},
+  }
+end
+
+local BIG_SCHEMA_CHILDREN = {}
+for index = 1, BIG_STRUCT_COUNT do
+  BIG_SCHEMA_CHILDREN[#BIG_SCHEMA_CHILDREN + 1] = {
+    type = "table",
+    name = string.format("wide_table_%04d", index),
+    schema = "warehouse",
+  }
+end
+
+local ROOT_STRUCTURES_WIDE_SCHEMA = {
+  {
+    type = "schema",
+    name = "warehouse",
+    schema = "warehouse",
+    children = BIG_SCHEMA_CHILDREN,
+  },
+}
 
 local ROOT_STRUCTURES_READY = {
   {
@@ -790,9 +819,10 @@ local function new_fixture(opts)
     }, payload))
   end
 
-  function fixture:branch_state(branch_id)
-    local key = branch_cache_key(branch_id)
-    return self.drawer._struct_cache.branches[self.ids.conn_ready] and self.drawer._struct_cache.branches[self.ids.conn_ready][key] or nil
+  function fixture:branch_state(branch_id, kind, conn_id)
+    local key = branch_id .. convert.ID_SEP .. (kind or "columns")
+    local owner = conn_id or self.ids.conn_ready
+    return self.drawer._struct_cache.branches[owner] and self.drawer._struct_cache.branches[owner][key] or nil
   end
 
   function fixture:cleanup()
@@ -1251,6 +1281,84 @@ do
   print("STRUCT01_RENDER_SNAPSHOT_INVALIDATION_OK=true")
   print("STRUCT01_REAL_RENDER_PATH_OK=true")
   fixture:cleanup()
+end
+
+do
+  local root_fixture = new_fixture({
+    seed_root = {
+      ["conn-ready"] = { structures = vim.deepcopy(BIG_ROOT_STRUCTURES) },
+      ["conn-alt"] = { structures = vim.deepcopy(ROOT_STRUCTURES_ALT) },
+    },
+  })
+  expand_source(root_fixture)
+  set_current_node(root_fixture.winid, root_fixture.drawer.tree, root_fixture.ids.conn_ready)
+  root_fixture.drawer:get_actions().expand()
+  local root_state = root_fixture:branch_state(root_fixture.ids.conn_ready, "structures", root_fixture.ids.conn_ready)
+  local root_sentinel = convert.load_more_node_id(root_fixture.ids.conn_ready)
+  local root_children = root_fixture.drawer.tree:get_nodes(root_fixture.ids.conn_ready)
+  assert_not_nil("large_root_branch_state", root_state)
+  assert_eq("large_root_initial_built_count", root_state.built_count, 1000)
+  assert_eq("large_root_child_count", #root_children, 1002)
+  assert_eq("large_root_first_child_type", root_children[1].type, "database_switch")
+  assert_eq("large_root_last_name", root_children[#root_children].name, "Load more...")
+  assert_not_nil("large_root_sentinel_visible", root_fixture.drawer.tree:get_node(root_sentinel))
+  root_fixture.drawer.tree.op_log = {}
+  root_fixture.drawer.cached_render_snapshot = { { id = "snapshot" } }
+  set_current_node(root_fixture.winid, root_fixture.drawer.tree, root_sentinel)
+  root_fixture.drawer:get_actions().action_1()
+  root_children = root_fixture.drawer.tree:get_nodes(root_fixture.ids.conn_ready)
+  assert_eq("large_root_built_count_after_load_more", root_state.built_count, 2000)
+  assert_eq("large_root_child_count_after_load_more", #root_children, 2002)
+  assert_eq("large_root_snapshot_invalidated", root_fixture.drawer.cached_render_snapshot, nil)
+  assert_eq("large_root_no_refresh", root_fixture.drawer.refresh_count, 0)
+  assert_eq("large_root_first_op_remove", root_fixture.drawer.tree.op_log[1].op, "remove_node")
+  assert_eq("large_root_first_op_parent", root_fixture.drawer.tree.op_log[1].parent_id, root_fixture.ids.conn_ready)
+  assert_eq("large_root_last_op_parent", root_fixture.drawer.tree.op_log[#root_fixture.drawer.tree.op_log].parent_id, root_fixture.ids.conn_ready)
+  root_fixture.drawer:refresh()
+  assert_eq("large_root_refresh_preserves_chunk", #root_fixture.drawer.tree:get_nodes(root_fixture.ids.conn_ready), 2002)
+
+  local schema_fixture = new_fixture({
+    seed_root = {
+      ["conn-ready"] = { structures = vim.deepcopy(ROOT_STRUCTURES_WIDE_SCHEMA) },
+      ["conn-alt"] = { structures = vim.deepcopy(ROOT_STRUCTURES_ALT) },
+    },
+  })
+  expand_source(schema_fixture)
+  set_current_node(schema_fixture.winid, schema_fixture.drawer.tree, schema_fixture.ids.conn_ready)
+  schema_fixture.drawer:get_actions().expand()
+  local warehouse_schema = convert.structure_node_id(schema_fixture.ids.conn_ready, {
+    type = "schema",
+    name = "warehouse",
+    schema = "warehouse",
+  })
+  local schema_sentinel = convert.load_more_node_id(warehouse_schema)
+  set_current_node(schema_fixture.winid, schema_fixture.drawer.tree, warehouse_schema)
+  schema_fixture.drawer:get_actions().expand()
+  local schema_state = schema_fixture:branch_state(warehouse_schema, "structures")
+  local schema_children = schema_fixture.drawer.tree:get_nodes(warehouse_schema)
+  assert_not_nil("large_schema_branch_state", schema_state)
+  assert_eq("large_schema_initial_built_count", schema_state.built_count, 1000)
+  assert_eq("large_schema_child_count", #schema_children, 1001)
+  assert_eq("large_schema_last_name", schema_children[#schema_children].name, "Load more...")
+  assert_not_nil("large_schema_sentinel_visible", schema_fixture.drawer.tree:get_node(schema_sentinel))
+  schema_fixture.drawer.tree.op_log = {}
+  schema_fixture.drawer.cached_render_snapshot = { { id = "snapshot" } }
+  set_current_node(schema_fixture.winid, schema_fixture.drawer.tree, schema_sentinel)
+  schema_fixture.drawer:get_actions().action_1()
+  schema_children = schema_fixture.drawer.tree:get_nodes(warehouse_schema)
+  assert_eq("large_schema_built_count_after_load_more", schema_state.built_count, 2000)
+  assert_eq("large_schema_child_count_after_load_more", #schema_children, 2001)
+  assert_eq("large_schema_snapshot_invalidated", schema_fixture.drawer.cached_render_snapshot, nil)
+  assert_eq("large_schema_no_refresh", schema_fixture.drawer.refresh_count, 0)
+  assert_eq("large_schema_first_op_remove", schema_fixture.drawer.tree.op_log[1].op, "remove_node")
+  assert_eq("large_schema_first_op_parent", schema_fixture.drawer.tree.op_log[1].parent_id, warehouse_schema)
+  assert_eq("large_schema_last_op_parent", schema_fixture.drawer.tree.op_log[#schema_fixture.drawer.tree.op_log].parent_id, warehouse_schema)
+  schema_fixture.drawer:refresh()
+  assert_eq("large_schema_refresh_preserves_chunk", #schema_fixture.drawer.tree:get_nodes(warehouse_schema), 2001)
+
+  print("STRUCT01_LARGE_CACHED_BRANCH_BOUND_OK=true")
+  root_fixture:cleanup()
+  schema_fixture:cleanup()
 end
 
 do
