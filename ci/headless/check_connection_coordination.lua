@@ -824,6 +824,32 @@ local function run_consumer_rebootstrap_contracts()
   assert_true("drawer_reopen_snapshot_applied", env.drawer.tree:get_node("conn-beta") == nil)
   print("DCFG01_DRAWER_REBOOTSTRAP_OK=true")
 
+  local stale_env = new_env()
+  local stale_reopen_winid = stale_env.winid
+  seed_drawer_root(stale_env, "conn-beta", stale_env.handler:get_authoritative_root_epoch("conn-beta"))
+  expand_connection(stale_env, "conn-beta")
+  assert_true("reopen_stale_cache_seeded", stale_env.drawer._struct_cache.root["conn-beta"] ~= nil)
+  stale_env.drawer:prepare_close()
+  local original_reopen_snapshot = stale_env.handler.get_connection_state_snapshot
+  local replayed_invalidation = false
+  stale_env.handler.get_connection_state_snapshot = function(self, ...)
+    local snapshot = original_reopen_snapshot(self, ...)
+    if not replayed_invalidation then
+      replayed_invalidation = true
+      self:source_remove_connection("source1", "conn-beta")
+    end
+    return snapshot
+  end
+  stale_env.drawer:show(stale_reopen_winid)
+  Harness.drain()
+  stale_env.handler.get_connection_state_snapshot = original_reopen_snapshot
+  assert_eq("reopen_stale_cache_root_cleared", stale_env.drawer._struct_cache.root["conn-beta"], nil)
+  assert_eq("reopen_stale_cache_branches_cleared", stale_env.drawer._struct_cache.branches["conn-beta"], nil)
+  assert_true("reopen_stale_cache_tree_pruned", stale_env.drawer.tree:get_node("conn-beta") == nil)
+  print("DCFG01_REOPEN_STALE_CACHE_PURGE_OK=true")
+
+  stale_env:cleanup()
+
   local original_snapshot = env.handler.get_connection_state_snapshot
   local drawer_overflow_bursts = 4
   env.drawer:prepare_close()

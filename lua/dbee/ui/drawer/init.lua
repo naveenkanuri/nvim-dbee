@@ -176,6 +176,16 @@ local function clear_connection_invalidations(ui)
   ui._connection_invalidation_flush_scheduled = false
 end
 
+---@param ui DrawerUI
+---@param data ConnectionInvalidatedEvent
+local function queue_connection_invalidation(ui, data)
+  local key = table.concat({
+    tostring(data.reason or ""),
+    tostring(data.source_id or ""),
+  }, "\x1f")
+  ui._pending_connection_invalidations[key] = data
+end
+
 ---@param value any
 ---@return integer
 local function normalize_root_epoch(value)
@@ -1459,6 +1469,14 @@ function DrawerUI:_bootstrap_connection_invalidated_consumer()
   while true do
     local snapshot = self.handler:get_connection_state_snapshot()
     self.current_conn_id = snapshot.current_connection and snapshot.current_connection.id or nil
+    local replay_events = {}
+    local function collect_replay(events)
+      for _, event in ipairs(events or {}) do
+        if should_apply_bootstrap_invalidation(event, snapshot.snapshot_authoritative_epoch or {}) then
+          replay_events[#replay_events + 1] = event
+        end
+      end
+    end
 
     local drained = self.handler:drain_connection_invalidated_bootstrap(consumer_id, generation)
     if drained.kind == "restart" then
@@ -1473,13 +1491,7 @@ function DrawerUI:_bootstrap_connection_invalidated_consumer()
       utils.log("error", drained.message or "[dbee] bootstrap unavailable")
       return false, drained.kind
     else
-      local should_refresh = false
-      for _, event in ipairs(drained.events or {}) do
-        if should_apply_bootstrap_invalidation(event, snapshot.snapshot_authoritative_epoch or {}) then
-          should_refresh = true
-          break
-        end
-      end
+      collect_replay(drained.events)
 
       local promoted = self.handler:promote_to_live(consumer_id, generation)
       if promoted.kind == "restart" then
@@ -1494,18 +1506,14 @@ function DrawerUI:_bootstrap_connection_invalidated_consumer()
         utils.log("error", promoted.message or "[dbee] bootstrap unavailable")
         return false, promoted.kind
       else
-        for _, event in ipairs(promoted.events or {}) do
-          if should_apply_bootstrap_invalidation(event, snapshot.snapshot_authoritative_epoch or {}) then
-            should_refresh = true
-            break
-          end
-        end
+        collect_replay(promoted.events)
 
         self._connection_invalidated_consumer_live = true
-        if should_refresh then
-          self:on_connection_invalidated({
-            reason = "bootstrap_replay",
-          })
+        for _, event in ipairs(replay_events) do
+          queue_connection_invalidation(self, event)
+        end
+        if next(self._pending_connection_invalidations) ~= nil then
+          self:_flush_connection_invalidations()
         end
         return true
       end
@@ -1613,11 +1621,7 @@ function DrawerUI:on_connection_invalidated(data)
     return
   end
 
-  local key = table.concat({
-    tostring(data.reason or ""),
-    tostring(data.source_id or ""),
-  }, "\x1f")
-  self._pending_connection_invalidations[key] = data
+  queue_connection_invalidation(self, data)
   if self._connection_invalidation_flush_scheduled then
     return
   end
