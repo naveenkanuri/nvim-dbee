@@ -281,6 +281,10 @@ function Handler:_bump_authoritative_root_epoch(conn_ids)
     self.authoritative_root_epoch[conn_id] = next_epoch
   end
 
+  for _, conn_id in ipairs(ordered) do
+    self:_supersede_structure_flights(conn_id, next_epoch)
+  end
+
   return next_epoch
 end
 
@@ -559,8 +563,6 @@ function Handler:connection_get_structure_singleflight(opts)
       joined = true,
     }
   end
-
-  self:_supersede_structure_flights(opts.conn_id, epoch)
 
   self._next_singleflight_request_id = self._next_singleflight_request_id + 1
   local internal_request_id = self._next_singleflight_request_id

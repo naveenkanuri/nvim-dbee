@@ -58,6 +58,7 @@ METADATA_QUERIES["mssql"] = METADATA_QUERIES.sqlserver
 ---@field private _bootstrap_consumer_id string
 ---@field private _pending_connection_invalidations table<string, ConnectionInvalidatedEvent>
 ---@field private _connection_invalidation_flush_scheduled boolean
+---@field private _connection_invalidated_consumer_live boolean
 local M = {
   _client_id = nil,
   _cache = nil,
@@ -70,6 +71,7 @@ local M = {
   _bootstrap_consumer_id = "lsp",
   _pending_connection_invalidations = {},
   _connection_invalidation_flush_scheduled = false,
+  _connection_invalidated_consumer_live = false,
 }
 
 ---@param data ConnectionInvalidatedEvent
@@ -193,6 +195,15 @@ function M._on_structure_loaded(handler, data)
     return
   end
 
+  if data.caller_token ~= "lsp" then
+    return
+  end
+
+  local payload_epoch = tonumber(data.root_epoch) or 0
+  if payload_epoch < handler:get_authoritative_root_epoch(data.conn_id) then
+    return
+  end
+
   local conn = handler:get_current_connection()
   if not conn or conn.id ~= data.conn_id then
     return
@@ -221,6 +232,7 @@ function M._request_structure_refresh(handler, conn_id)
   handler:connection_get_structure_singleflight({
     conn_id = conn_id,
     consumer = M._bootstrap_consumer_id,
+    caller_token = "lsp",
     callback = function(data)
       M._on_structure_loaded(handler, data)
     end,
@@ -240,6 +252,7 @@ function M._handle_connection_invalidated_consumer_event(data)
   end
 
   if data.kind == "storm" then
+    M._connection_invalidated_consumer_live = false
     utils.log("error", data.message, "lsp")
     return
   end
@@ -249,7 +262,10 @@ end
 
 ---@private
 ---@param handler Handler
+---@return boolean ok
+---@return string? reason
 function M._bootstrap_connection_invalidated(handler)
+  M._connection_invalidated_consumer_live = false
   local generation = handler:begin_connection_invalidated_bootstrap(M._bootstrap_consumer_id, function(data)
     M._handle_connection_invalidated_consumer_event(data)
   end)
@@ -266,7 +282,10 @@ function M._bootstrap_connection_invalidated(handler)
       generation = drained.generation or generation
     elseif drained.kind == "storm" then
       utils.log("error", drained.message or "[dbee] bootstrap_overflow_storm", "lsp")
-      return
+      return false, "storm"
+    elseif drained.kind ~= "ok" then
+      utils.log("error", drained.message or "[dbee] bootstrap unavailable", "lsp")
+      return false, drained.kind
     else
       local should_refresh = false
       for _, event in ipairs(drained.events or {}) do
@@ -284,7 +303,10 @@ function M._bootstrap_connection_invalidated(handler)
         generation = promoted.generation or generation
       elseif promoted.kind == "storm" then
         utils.log("error", promoted.message or "[dbee] bootstrap_overflow_storm", "lsp")
-        return
+        return false, "storm"
+      elseif promoted.kind ~= "ok" then
+        utils.log("error", promoted.message or "[dbee] bootstrap unavailable", "lsp")
+        return false, promoted.kind
       else
         for _, event in ipairs(promoted.events or {}) do
           if should_apply_bootstrap_invalidation(event, snapshot.snapshot_authoritative_epoch or {}) then
@@ -293,13 +315,51 @@ function M._bootstrap_connection_invalidated(handler)
           end
         end
 
+        M._connection_invalidated_consumer_live = true
         if should_refresh and current_conn and current_conn.id then
           M._request_structure_refresh(handler, current_conn.id)
         end
-        return
+        return true
       end
     end
   end
+end
+
+---@private
+---@param handler Handler
+---@return boolean
+function M._ensure_connection_invalidated_consumer(handler)
+  if M._connection_invalidated_consumer_live then
+    return true
+  end
+
+  if type(handler.begin_connection_invalidated_bootstrap) ~= "function"
+    or type(handler.drain_connection_invalidated_bootstrap) ~= "function"
+    or type(handler.promote_to_live) ~= "function"
+  then
+    M._connection_invalidated_consumer_live = true
+    return true
+  end
+
+  for attempt = 1, 2 do
+    local ok, reason = M._bootstrap_connection_invalidated(handler)
+    if ok then
+      return true
+    end
+
+    if type(handler.teardown_connection_invalidated_consumer) == "function" then
+      handler:teardown_connection_invalidated_consumer(M._bootstrap_consumer_id)
+    end
+    M._pending_connection_invalidations = {}
+    M._connection_invalidation_flush_scheduled = false
+
+    if reason ~= "storm" then
+      break
+    end
+  end
+
+  utils.log("error", "[dbee] bootstrap_unavailable", "lsp")
+  return false
 end
 
 --- Try to start the LSP — disk cache first, then trigger async load.
@@ -316,6 +376,9 @@ function M._try_start()
   end
 
   local handler = state.handler()
+  if not M._ensure_connection_invalidated_consumer(handler) then
+    return
+  end
   local conn = handler:get_current_connection()
   if not conn then
     return
@@ -424,8 +487,15 @@ end
 --- Stop the dbee LSP server.
 function M.stop()
   if state.is_core_loaded() then
-    state.handler():teardown_structure_consumer(M._bootstrap_consumer_id)
+    local handler = state.handler()
+    handler:teardown_structure_consumer(M._bootstrap_consumer_id)
+    if type(handler.teardown_connection_invalidated_consumer) == "function" then
+      handler:teardown_connection_invalidated_consumer(M._bootstrap_consumer_id)
+    end
   end
+  M._connection_invalidated_consumer_live = false
+  M._pending_connection_invalidations = {}
+  M._connection_invalidation_flush_scheduled = false
   if M._client_id then
     local client = vim.lsp.get_client_by_id(M._client_id)
     if client then
@@ -461,7 +531,7 @@ end
 function M._flush_connection_invalidations()
   M._connection_invalidation_flush_scheduled = false
 
-  if not state.is_core_loaded() then
+  if not state.is_core_loaded() or not M._connection_invalidated_consumer_live then
     M._pending_connection_invalidations = {}
     return
   end
@@ -473,6 +543,10 @@ function M._flush_connection_invalidations()
   end
 
   local handler = state.handler()
+  if not M._ensure_connection_invalidated_consumer(handler) then
+    M._pending_connection_invalidations = {}
+    return
+  end
   local current = handler:get_current_connection()
   if not current or not current.id then
     return
@@ -534,7 +608,7 @@ function M.register_events()
   end
 
   local handler = state.handler()
-  M._bootstrap_connection_invalidated(handler)
+  M._ensure_connection_invalidated_consumer(handler)
 
   -- Handle metadata query completion.
   -- When our internal metadata SQL query reaches "archived" state,
