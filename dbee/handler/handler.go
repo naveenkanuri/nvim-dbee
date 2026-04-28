@@ -159,7 +159,18 @@ func (h *Handler) SetCurrentConnection(connID core.ConnectionID) error {
 
 	// update connection and trigger event
 	h.currentConnectionID = connID
-	h.events.CurrentConnectionChanged(connID)
+	h.events.CurrentConnectionChanged(&connID, false)
+
+	return nil
+}
+
+func (h *Handler) ClearCurrentConnection() error {
+	if h.currentConnectionID == "" {
+		return nil
+	}
+
+	h.currentConnectionID = ""
+	h.events.CurrentConnectionChanged(nil, true)
 
 	return nil
 }

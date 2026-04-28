@@ -880,12 +880,28 @@ function Handler:_source_reload_silent(source_id, opts)
   local rewrites = build_rewrites(previous_connections, current_connections)
   local sticky_target, sticky_warning =
     self:_resolve_sticky_current_connection(source_id, previous_connections, current_connections, previous_current, rewrites)
+  local current_missing_after_reload = current_conn_id_before ~= nil
+    and not self:_connection_still_exists(current_conn_id_before)
   if sticky_target and sticky_target ~= self:_current_connection_id() then
     local ok_set, set_err = pcall(self.set_current_connection, self, sticky_target)
     if not ok_set then
       utils.log("warn", "Failed restoring sticky current connection: " .. tostring(set_err), "core")
     end
-  elseif sticky_warning then
+  elseif current_missing_after_reload then
+    local ok_clear, clear_err = pcall(self.connection_clear_current, self)
+    if not ok_clear then
+      utils.log("warn", "Failed clearing sticky current connection: " .. tostring(clear_err), "core")
+    end
+  end
+
+  if current_missing_after_reload and not sticky_warning and previous_current then
+    sticky_warning = string.format(
+      'Sticky current connection for "%s" vanished after reload',
+      tostring(previous_current.name or current_conn_id_before)
+    )
+  end
+
+  if sticky_warning then
     utils.log("warn", sticky_warning, "core")
   end
 
@@ -1166,6 +1182,10 @@ end
 ---@param id connection_id
 function Handler:set_current_connection(id)
   vim.fn.DbeeSetCurrentConnection(id)
+end
+
+function Handler:connection_clear_current()
+  vim.fn.DbeeClearCurrentConnection()
 end
 
 ---@param id connection_id

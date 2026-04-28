@@ -21,6 +21,7 @@ return function()
     { type = "function", name = "DbeeCallCancel", sync = true, opts = vim.empty_dict() },
     { type = "function", name = "DbeeCallDisplayResult", sync = true, opts = vim.empty_dict() },
     { type = "function", name = "DbeeCallStoreResult", sync = true, opts = vim.empty_dict() },
+    { type = "function", name = "DbeeClearCurrentConnection", sync = true, opts = vim.empty_dict() },
     { type = "function", name = "DbeeConnectionExecute", sync = true, opts = vim.empty_dict() },
     { type = "function", name = "DbeeConnectionGetCalls", sync = true, opts = vim.empty_dict() },
     { type = "function", name = "DbeeConnectionGetColumns", sync = true, opts = vim.empty_dict() },

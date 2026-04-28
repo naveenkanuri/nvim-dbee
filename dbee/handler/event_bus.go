@@ -20,9 +20,15 @@ func luaStringLiteral(value string) string {
 }
 
 func (eb *eventBus) callLua(event string, data string) {
+	if eb == nil || eb.vim == nil {
+		return
+	}
+
 	err := eb.vim.ExecLua(fmt.Sprintf(`require("dbee.handler.__events").trigger(%q, %s)`, event, data), nil)
 	if err != nil {
-		eb.log.Infof("eb.vim.ExecLua: %s", err)
+		if eb.log != nil {
+			eb.log.Infof("eb.vim.ExecLua: %s", err)
+		}
 	}
 }
 
@@ -55,10 +61,16 @@ func (eb *eventBus) CallStateChanged(connID core.ConnectionID, call *core.Call) 
 	eb.callLua("call_state_changed", data)
 }
 
-func (eb *eventBus) CurrentConnectionChanged(id core.ConnectionID) {
+func (eb *eventBus) CurrentConnectionChanged(id *core.ConnectionID, cleared bool) {
+	connIDLua := "nil"
+	if id != nil && *id != "" {
+		connIDLua = luaStringLiteral(string(*id))
+	}
+
 	data := fmt.Sprintf(`{
-		conn_id = %q,
-	}`, id)
+			conn_id = %s,
+			cleared = %t,
+		}`, connIDLua, cleared)
 
 	eb.callLua("current_connection_changed", data)
 }

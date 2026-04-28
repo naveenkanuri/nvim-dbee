@@ -170,7 +170,7 @@
 ---| '"call_state_changed"' {conn_id, call={id,query,state,time_taken_us,timestamp_us,error,error_kind}}
 ---| '"connection_databases_loaded"' ConnectionDatabasesLoadedEvent
 ---| '"connection_invalidated"' ConnectionInvalidatedEvent
----| '"current_connection_changed"' {conn_id}
+---| '"current_connection_changed"' {conn_id?, cleared?}
 ---| '"database_selected"' {conn_id, database_name}
 ---| '"source_reload_failed"' SourceReloadFailedEvent
 ---| '"structure_loaded"' {conn_id, request_id, root_epoch?, caller_token?, structures, error}

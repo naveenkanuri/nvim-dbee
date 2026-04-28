@@ -166,6 +166,15 @@ local function install_dbee_functions(runtime)
     runtime.current_conn_id = conn_id
     events.trigger("current_connection_changed", {
       conn_id = conn_id,
+      cleared = false,
+    })
+  end
+
+  vim.fn.DbeeClearCurrentConnection = function()
+    runtime.current_conn_id = nil
+    events.trigger("current_connection_changed", {
+      conn_id = vim.NIL,
+      cleared = true,
     })
   end
 
@@ -898,8 +907,22 @@ local function run_backpressure_and_sticky_contracts()
   assert_eq("batched_rewarm_conn", env.runtime.structure_requests[1].conn_id, "conn-alpha")
   print("DCFG01_BACKPRESSURE_OK=true")
 
+  env:cleanup()
+
+  local sticky_env = new_env()
+  sticky_env.lsp.register_events()
+  sticky_env.runtime.structure_requests = {}
+  sticky_env.lsp._request_structure_refresh(sticky_env.handler, "conn-alpha")
+  local lsp_request = latest_request(sticky_env.runtime.structure_requests, "conn-alpha")
+  assert_true("sticky_lsp_request_present", lsp_request ~= nil)
+  emit_structure_loaded(sticky_env, lsp_request, {
+    caller_token = "__singleflight",
+  })
+  Harness.drain()
+  assert_true("sticky_lsp_started", sticky_env.lsp.status().running == true)
+
   clear_notifications()
-  env.source._specs = {
+  sticky_env.source._specs = {
     {
       id = "conn-other-1",
       name = "Alpha Rewrite A",
@@ -913,13 +936,16 @@ local function run_backpressure_and_sticky_contracts()
       url = "postgres://shared",
     },
   }
-  env.handler:source_reload("source1")
+  sticky_env.handler:source_reload("source1")
   Harness.drain()
-  assert_eq("sticky_selection_nil", env.handler:get_current_connection(), nil)
+  assert_eq("sticky_selection_nil", sticky_env.handler:get_current_connection(), nil)
+  assert_eq("sticky_runtime_current_cleared", sticky_env.runtime.current_conn_id, nil)
+  assert_eq("sticky_lsp_stopped_on_clear", sticky_env.runtime.lsp.stops, 1)
+  assert_eq("sticky_lsp_running_after_clear", sticky_env.lsp.status().running, false)
   assert_true("sticky_warning_logged", has_notification("ambiguous or vanished", vim.log.levels.WARN))
   print("DCFG01_STICKY_SELECTION_OK=true")
 
-  env:cleanup()
+  sticky_env:cleanup()
 end
 
 local function run_database_switch_and_reconnect_contracts()

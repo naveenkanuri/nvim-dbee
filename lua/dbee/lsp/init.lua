@@ -639,11 +639,16 @@ function M.register_events()
   end)
 
   handler:register_event_listener("current_connection_changed", function(data)
-    if not data or not data.conn_id then
+    if not data then
       return
     end
-    -- stop current LSP, restart for new connection
+
     M.stop()
+    if data.cleared == true or not data.conn_id then
+      return
+    end
+
+    -- stop current LSP, restart for new connection
     M._try_start()
   end)
 

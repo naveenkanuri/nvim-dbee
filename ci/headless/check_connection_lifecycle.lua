@@ -200,6 +200,15 @@ local function install_dbee_functions(runtime)
     runtime.current_conn_id = conn_id
     events.trigger("current_connection_changed", {
       conn_id = conn_id,
+      cleared = false,
+    })
+  end
+
+  vim.fn.DbeeClearCurrentConnection = function()
+    runtime.current_conn_id = nil
+    events.trigger("current_connection_changed", {
+      conn_id = vim.NIL,
+      cleared = true,
     })
   end
 

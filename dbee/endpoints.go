@@ -230,6 +230,12 @@ func mountEndpoints(p *plugin.Plugin, h *handler.Handler) {
 		})
 
 	p.RegisterEndpoint(
+		"DbeeClearCurrentConnection",
+		func() error {
+			return h.ClearCurrentConnection()
+		})
+
+	p.RegisterEndpoint(
 		"DbeeGetCurrentConnection",
 		func() (any, error) {
 			conn, err := h.GetCurrentConnection()
