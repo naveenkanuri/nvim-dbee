@@ -383,36 +383,68 @@ end
 
 ---@param picker table?
 local function install_note_picker_nonselectable_rows(picker)
-  if not picker or not picker.list or type(picker.list.move) ~= "function" then
+  if not picker or not picker.list then
     return
   end
 
   local list = picker.list
-  local original_move = list.move
-  list.move = function(self, to, absolute, render)
+  local original_move = type(list.move) == "function" and list.move or nil
+  local original__move = type(list._move) == "function" and list._move or nil
+  if original_move == nil and original__move == nil then
+    return
+  end
+
+  local applying_skip = false
+  local function skip_disabled_rows(self, move_impl, to, absolute, render)
+    if applying_skip then
+      return move_impl(self, to, absolute, render)
+    end
+
+    local count = type(self.count) == "function" and self:count() or 0
+    if count == 0 or type(self.current) ~= "function" then
+      return move_impl(self, to, absolute, render)
+    end
+
+    applying_skip = true
     local previous = self.cursor
-    original_move(self, to, absolute, render)
-    if note_picker_item_selectable(type(self.current) == "function" and self:current() or nil) then
+    move_impl(self, to, absolute, render)
+    if note_picker_item_selectable(self:current()) then
+      applying_skip = false
       return
     end
 
-    local step = absolute and 1 or (to < 0 and -1 or 1)
+    local step = absolute and ((type(previous) == "number" and to < previous) and -1 or 1) or (to < 0 and -1 or 1)
     if step == 0 then
       step = 1
     end
 
-    for _ = 1, type(self.count) == "function" and self:count() or 0 do
+    local fallback_move = original__move or original_move
+    for _ = 1, count do
       local before = self.cursor
-      original_move(self, step, false, render)
+      fallback_move(self, step, false, render)
       if self.cursor == before then
         break
       end
-      if note_picker_item_selectable(type(self.current) == "function" and self:current() or nil) then
+      if note_picker_item_selectable(self:current()) then
+        applying_skip = false
         return
       end
     end
 
-    original_move(self, previous, true, render)
+    fallback_move(self, previous, true, render)
+    applying_skip = false
+  end
+
+  if original__move ~= nil then
+    list._move = function(self, to, absolute, render)
+      return skip_disabled_rows(self, original__move, to, absolute, render)
+    end
+  end
+
+  if original_move ~= nil then
+    list.move = function(self, to, absolute, render)
+      return skip_disabled_rows(self, original_move, to, absolute, render)
+    end
   end
 
   focus_first_selectable_note_picker_item(picker)

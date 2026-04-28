@@ -143,29 +143,46 @@ package.loaded["dbee.variables"] = {
 
 package.loaded["snacks"] = {
   picker = function(opts)
-    local picker = {
+    local picker
+    local list = {
+      items = opts.items,
+      cursor = 1,
+      render_calls = 0,
+      count = function(self)
+        return #self.items
+      end,
+      current = function(self)
+        return self.items[self.cursor]
+      end,
+      _move = function(self, to, absolute)
+        if absolute then
+          self.cursor = to
+        else
+          self.cursor = self.cursor + to
+        end
+        if picker.resolved_layout.cycle and #self.items > 0 then
+          self.cursor = (self.cursor - 1) % #self.items + 1
+        else
+          self.cursor = math.max(1, math.min(#self.items, self.cursor))
+        end
+      end,
+      move = function(self, to, absolute)
+        self:_move(to, absolute)
+      end,
+      select = function() end,
+      unselect = function()
+        return false
+      end,
+      render = function(self)
+        self.render_calls = self.render_calls + 1
+      end,
+    }
+    picker = {
       opts = opts,
-      list = {
-        items = opts.items,
-        cursor = 1,
-        render_calls = 0,
-        count = function(self)
-          return #self.items
-        end,
-        current = function(self)
-          return self.items[self.cursor]
-        end,
-        move = function(self, to, absolute)
-          if absolute then
-            self.cursor = math.max(1, math.min(#self.items, to))
-          else
-            self.cursor = math.max(1, math.min(#self.items, self.cursor + to))
-          end
-        end,
-        render = function(self)
-          self.render_calls = self.render_calls + 1
-        end,
+      resolved_layout = {
+        cycle = true,
       },
+      list = list,
     }
     runtime.picker_calls[#runtime.picker_calls + 1] = picker
     return picker
@@ -243,6 +260,16 @@ local function confirm_with(item)
   local fake_picker = new_fake_picker()
   picker.opts.confirm(fake_picker, item)
   return fake_picker
+end
+
+local function select_and_next(picker)
+  picker.list:select()
+  picker.list:_move(1, false)
+end
+
+local function select_and_prev(picker)
+  picker.list:select()
+  picker.list:_move(-1, false)
 end
 
 local global_note = {
@@ -407,11 +434,54 @@ do
     local_notes = { local_note },
   })
   dbee.pick_notes()
+  local both_sections_picker = current_picker()
+  assert_eq("tab_start_first_note", picker_current_item().text, "global-note.sql")
+  select_and_next(both_sections_picker)
+  assert_eq("tab_skips_section_header", picker_current_item().text, "local-note.sql")
+
+  both_sections_picker.list.cursor = 2
+  select_and_prev(both_sections_picker)
+  assert_eq("shift_tab_wraps_to_last_selectable", picker_current_item().text, "local-note.sql")
+
+  set_notes({
+    global_notes = { global_note },
+  })
+  dbee.pick_notes()
+  local global_only_picker = current_picker()
+  assert_eq("global_only_tab_start", picker_current_item().text, "global-note.sql")
+  select_and_next(global_only_picker)
+  assert_eq("global_only_tab_stays_on_note", picker_current_item().text, "global-note.sql")
+
+  set_notes({
+    current_connection = {
+      id = "conn-ready",
+      name = "Ready Connection",
+    },
+    global_notes = {},
+    local_notes = { local_note },
+  })
+  dbee.pick_notes()
+  local local_only_picker = current_picker()
+  assert_eq("local_only_shift_tab_start", picker_current_item().text, "local-note.sql")
+  select_and_prev(local_only_picker)
+  assert_eq("local_only_shift_tab_stays_on_note", picker_current_item().text, "local-note.sql")
+
+  clear_notifications()
+  set_notes({
+    current_connection = {
+      id = "conn-ready",
+      name = "Ready Connection",
+    },
+    global_notes = { global_note },
+    local_notes = { local_note },
+  })
+  dbee.pick_notes()
   local note_picker = confirm_with(picker_items()[2])
   assert_eq("note_confirm_close_calls", note_picker.close_calls, 1)
   assert_eq("note_confirm_set_note_calls", #runtime.set_current_note_calls, 1)
   assert_eq("note_confirm_note_id", runtime.set_current_note_calls[1], global_note.id)
   print("NOTES01_HEADER_GUARD_OK=true")
+  print("NOTES01_NONSELECTABLE_NAV_OK=true")
 end
 
 do
