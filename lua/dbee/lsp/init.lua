@@ -55,6 +55,7 @@ METADATA_QUERIES["mssql"] = METADATA_QUERIES.sqlserver
 ---@field private _async_requested table<connection_id, boolean>
 ---@field private _metadata_scheduled table<connection_id, boolean>
 ---@field private _metadata_call_ids table<call_id, connection_id>
+---@field private _bootstrap_consumer_id string
 local M = {
   _client_id = nil,
   _cache = nil,
@@ -64,7 +65,44 @@ local M = {
   _async_requested = {},
   _metadata_scheduled = {},
   _metadata_call_ids = {},
+  _bootstrap_consumer_id = "lsp",
 }
+
+---@param data ConnectionInvalidatedEvent
+---@param snapshot_epoch table<connection_id, integer>
+---@return boolean
+local function should_apply_bootstrap_invalidation(data, snapshot_epoch)
+  local event_epoch = tonumber(data and data.authoritative_root_epoch) or 0
+  if event_epoch <= 0 then
+    return false
+  end
+
+  local affected = {}
+  for _, conn_id in ipairs(data and data.retired_conn_ids or {}) do
+    affected[conn_id] = true
+  end
+  for _, conn_id in ipairs(data and data.new_conn_ids or {}) do
+    affected[conn_id] = true
+  end
+  if data and data.current_conn_id_before then
+    affected[data.current_conn_id_before] = true
+  end
+  if data and data.current_conn_id_after then
+    affected[data.current_conn_id_after] = true
+  end
+
+  if next(affected) == nil then
+    return true
+  end
+
+  for conn_id in pairs(affected) do
+    if event_epoch > (snapshot_epoch[conn_id] or 0) then
+      return true
+    end
+  end
+
+  return false
+end
 
 --- Queue a buffer for LSP attachment.
 ---@param bufnr integer
@@ -124,6 +162,123 @@ function M._start_lsp(cache, conn_id)
   return true
 end
 
+---@private
+---@param handler Handler
+---@param data table
+function M._on_structure_loaded(handler, data)
+  if not data or not data.conn_id or data.error_kind == "superseded" then
+    return
+  end
+
+  local conn = handler:get_current_connection()
+  if not conn or conn.id ~= data.conn_id then
+    return
+  end
+
+  if not data.structures then
+    return
+  end
+
+  if M._client_id and M._cache then
+    M._cache:build_from_structure(data.structures)
+    M._cache:save_to_disk()
+  else
+    local cache = SchemaCache:new(handler, data.conn_id)
+    cache:build_from_structure(data.structures)
+    cache:save_to_disk()
+    M._start_lsp(cache, data.conn_id)
+  end
+end
+
+---@private
+---@param handler Handler
+---@param conn_id connection_id
+function M._request_structure_refresh(handler, conn_id)
+  M._async_requested[conn_id] = true
+  handler:connection_get_structure_singleflight({
+    conn_id = conn_id,
+    consumer = M._bootstrap_consumer_id,
+    callback = function(data)
+      M._on_structure_loaded(handler, data)
+    end,
+  })
+end
+
+---@private
+---@param data any
+function M._handle_connection_invalidated_consumer_event(data)
+  if not data then
+    return
+  end
+
+  if data.kind == "overflow" then
+    utils.log("warn", data.message, "lsp")
+    return
+  end
+
+  if data.kind == "storm" then
+    utils.log("error", data.message, "lsp")
+    return
+  end
+
+  M._on_connection_invalidated(data)
+end
+
+---@private
+---@param handler Handler
+function M._bootstrap_connection_invalidated(handler)
+  local generation = handler:begin_connection_invalidated_bootstrap(M._bootstrap_consumer_id, function(data)
+    M._handle_connection_invalidated_consumer_event(data)
+  end)
+
+  while true do
+    local snapshot = handler:get_connection_state_snapshot()
+    local current_conn = snapshot.current_connection
+
+    local drained = handler:drain_connection_invalidated_bootstrap(M._bootstrap_consumer_id, generation)
+    if drained.kind == "restart" then
+      if drained.warning and drained.warning.message then
+        utils.log("warn", drained.warning.message, "lsp")
+      end
+      generation = drained.generation or generation
+    elseif drained.kind == "storm" then
+      utils.log("error", drained.message or "[dbee] bootstrap_overflow_storm", "lsp")
+      return
+    else
+      local should_refresh = false
+      for _, event in ipairs(drained.events or {}) do
+        if should_apply_bootstrap_invalidation(event, snapshot.snapshot_authoritative_epoch or {}) then
+          should_refresh = true
+          break
+        end
+      end
+
+      local promoted = handler:promote_to_live(M._bootstrap_consumer_id, generation)
+      if promoted.kind == "restart" then
+        if promoted.warning and promoted.warning.message then
+          utils.log("warn", promoted.warning.message, "lsp")
+        end
+        generation = promoted.generation or generation
+      elseif promoted.kind == "storm" then
+        utils.log("error", promoted.message or "[dbee] bootstrap_overflow_storm", "lsp")
+        return
+      else
+        for _, event in ipairs(promoted.events or {}) do
+          if should_apply_bootstrap_invalidation(event, snapshot.snapshot_authoritative_epoch or {}) then
+            should_refresh = true
+            break
+          end
+        end
+
+        if should_refresh and current_conn and current_conn.id then
+          M._request_structure_refresh(handler, current_conn.id)
+        end
+        return
+      end
+    end
+  end
+end
+
 --- Try to start the LSP — disk cache first, then trigger async load.
 --- For large databases where structure_loaded can't deliver, a metadata SQL
 --- query fires after a short delay as a fallback.
@@ -149,8 +304,7 @@ function M._try_start()
     M._start_lsp(cache, conn.id)
     -- also trigger async refresh in background to keep cache fresh
     if not M._async_requested[conn.id] then
-      M._async_requested[conn.id] = true
-      handler:connection_get_structure_async(conn.id)
+      M._request_structure_refresh(handler, conn.id)
     end
     return
   end
@@ -158,8 +312,7 @@ function M._try_start()
   -- 2. No disk cache — trigger async structure load (non-blocking).
   --    LSP will start when structure_loaded event fires.
   if not M._async_requested[conn.id] then
-    M._async_requested[conn.id] = true
-    handler:connection_get_structure_async(conn.id)
+    M._request_structure_refresh(handler, conn.id)
   end
 
   -- 3. Schedule metadata query fallback.
@@ -247,6 +400,9 @@ end
 
 --- Stop the dbee LSP server.
 function M.stop()
+  if state.is_core_loaded() then
+    state.handler():teardown_structure_consumer(M._bootstrap_consumer_id)
+  end
   if M._client_id then
     local client = vim.lsp.get_client_by_id(M._client_id)
     if client then
@@ -273,8 +429,43 @@ function M.refresh()
   local handler = state.handler()
   local conn = handler:get_current_connection()
   if conn then
-    M._async_requested[conn.id] = true
-    handler:connection_get_structure_async(conn.id)
+    M._request_structure_refresh(handler, conn.id)
+  end
+end
+
+---@private
+---@param data ConnectionInvalidatedEvent
+function M._on_connection_invalidated(data)
+  if data and data.silent == true then
+    return
+  end
+
+  if not state.is_core_loaded() then
+    return
+  end
+
+  local handler = state.handler()
+  local current = handler:get_current_connection()
+  if not current or not current.id then
+    return
+  end
+
+  local affected = {}
+  for _, conn_id in ipairs(data and data.retired_conn_ids or {}) do
+    affected[conn_id] = true
+  end
+  for _, conn_id in ipairs(data and data.new_conn_ids or {}) do
+    affected[conn_id] = true
+  end
+  if data and data.current_conn_id_before then
+    affected[data.current_conn_id_before] = true
+  end
+  if data and data.current_conn_id_after then
+    affected[data.current_conn_id_after] = true
+  end
+
+  if next(affected) == nil or affected[current.id] then
+    M._request_structure_refresh(handler, current.id)
   end
 end
 
@@ -302,35 +493,7 @@ function M.register_events()
   end
 
   local handler = state.handler()
-
-  -- structure_loaded carries data.structures — use it directly.
-  -- Also save to disk for instant load next session.
-  handler:register_event_listener("structure_loaded", function(data)
-    if not data or not data.conn_id then
-      return
-    end
-
-    local conn = handler:get_current_connection()
-    if not conn or conn.id ~= data.conn_id then
-      return
-    end
-
-    if not data.structures then
-      return
-    end
-
-    if M._client_id and M._cache then
-      -- LSP already running (from disk cache or metadata query) — refresh with structure data
-      M._cache:build_from_structure(data.structures)
-      M._cache:save_to_disk()
-    else
-      -- first start: build cache from event data, save to disk, start LSP
-      local cache = SchemaCache:new(handler, data.conn_id)
-      cache:build_from_structure(data.structures)
-      cache:save_to_disk()
-      M._start_lsp(cache, data.conn_id)
-    end
-  end)
+  M._bootstrap_connection_invalidated(handler)
 
   -- Handle metadata query completion.
   -- When our internal metadata SQL query reaches "archived" state,
@@ -376,8 +539,7 @@ function M.register_events()
     if M._conn_id == data.conn_id and M._cache then
       M._cache:invalidate()
       -- trigger fresh structure load
-      M._async_requested[data.conn_id] = true
-      handler:connection_get_structure_async(data.conn_id)
+      M._request_structure_refresh(handler, data.conn_id)
     end
   end)
 end

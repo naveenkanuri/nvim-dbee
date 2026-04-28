@@ -2,6 +2,10 @@ local event_bus = require("dbee.handler.__events")
 local utils = require("dbee.utils")
 local register_remote_plugin = require("dbee.api.__register")
 
+local SINGLEFLIGHT_CALLER_TOKEN = "__singleflight"
+local BOOTSTRAP_BUFFER_LIMIT = 64
+local BOOTSTRAP_OVERFLOW_MAX = 3
+
 ---@param err any
 ---@return boolean
 local function is_invalid_channel_error(err)
@@ -135,11 +139,31 @@ local function build_rewrites(previous, current)
   return rewrites
 end
 
+---@param conn_id connection_id
+---@param epoch integer
+---@return string
+local function singleflight_key(conn_id, epoch)
+  return tostring(conn_id or "") .. "\x1f" .. tostring(epoch or 0)
+end
+
+---@param payload any
+---@return any
+local function copy_payload(payload)
+  if payload == nil or payload == vim.NIL then
+    return nil
+  end
+  return vim.deepcopy(payload)
+end
+
 -- Handler is an aggregator of connections
 ---@class Handler
 ---@field private sources table<source_id, Source>
 ---@field private source_conn_lookup table<source_id, connection_id[]>
 ---@field private authoritative_root_epoch table<connection_id, integer>
+---@field private _next_singleflight_request_id integer
+---@field private _structure_flights table<string, { conn_id: connection_id, epoch: integer, request_id: integer, waiters: table[], consumer_slots: table<string, true> }>
+---@field private _structure_request_lookup table<integer, string>
+---@field private _connection_invalidated_consumers table<string, { listener: event_listener, state: string, generation: integer, buffer?: { events: table[], last_drain_size: integer }, consecutive_overflows: integer, warning?: table }>
 local Handler = {}
 
 ---@param sources? Source[]
@@ -150,9 +174,20 @@ function Handler:new(sources)
     sources = {},
     source_conn_lookup = {},
     authoritative_root_epoch = {},
+    _next_singleflight_request_id = 0,
+    _structure_flights = {},
+    _structure_request_lookup = {},
+    _connection_invalidated_consumers = {},
   }
   setmetatable(o, self)
   self.__index = self
+
+  event_bus.register("structure_loaded", function(data)
+    o:_on_singleflight_structure_loaded(data)
+  end)
+  event_bus.register("connection_invalidated", function(data)
+    o:_dispatch_connection_invalidated(data)
+  end)
 
   -- initialize the sources
   sources = sources or {}
@@ -170,6 +205,18 @@ end
 ---@param listener event_listener
 function Handler:register_event_listener(event, listener)
   event_bus.register(event, listener)
+end
+
+---@param conn_id connection_id
+---@return integer
+function Handler:get_authoritative_root_epoch(conn_id)
+  return self.authoritative_root_epoch[conn_id] or 0
+end
+
+---@param conn_ids connection_id[]
+---@return integer|nil
+function Handler:bump_authoritative_root_epoch(conn_ids)
+  return self:_bump_authoritative_root_epoch(conn_ids)
 end
 
 ---@private
@@ -205,6 +252,357 @@ function Handler:_bump_authoritative_root_epoch(conn_ids)
   end
 
   return next_epoch
+end
+
+---@private
+---@param consumer table
+---@param payload table
+function Handler:_notify_connection_invalidated_consumer(consumer, payload)
+  if type(consumer.listener) ~= "function" then
+    return
+  end
+
+  local ok, err = pcall(consumer.listener, copy_payload(payload))
+  if not ok then
+    utils.log("error", "connection invalidated consumer failed: " .. tostring(err), "core")
+  end
+end
+
+---@param consumer_id string
+---@param listener event_listener
+---@return integer generation
+function Handler:begin_connection_invalidated_bootstrap(consumer_id, listener)
+  if not consumer_id or consumer_id == "" then
+    error("missing consumer_id")
+  end
+  if type(listener) ~= "function" then
+    error("missing connection_invalidated bootstrap listener")
+  end
+
+  local previous = self._connection_invalidated_consumers[consumer_id]
+  local generation = previous and (previous.generation + 1) or 0
+  self._connection_invalidated_consumers[consumer_id] = {
+    listener = listener,
+    state = "bootstrap",
+    generation = generation,
+    buffer = {
+      events = {},
+      last_drain_size = 0,
+    },
+    consecutive_overflows = 0,
+    warning = nil,
+  }
+
+  return generation
+end
+
+---@param consumer_id string
+---@param generation integer
+---@return { kind: string, generation?: integer, events?: table[], warning?: table, message?: string }
+function Handler:drain_connection_invalidated_bootstrap(consumer_id, generation)
+  local consumer = self._connection_invalidated_consumers[consumer_id]
+  if not consumer then
+    return {
+      kind = "missing",
+      message = "connection_invalidated consumer is not registered",
+    }
+  end
+
+  if consumer.state == "stormed" then
+    return {
+      kind = "storm",
+      generation = consumer.generation,
+      message = consumer.warning and consumer.warning.message or "bootstrap overflow storm",
+      warning = copy_payload(consumer.warning),
+    }
+  end
+
+  if generation ~= consumer.generation then
+    return {
+      kind = "restart",
+      generation = consumer.generation,
+      warning = copy_payload(consumer.warning),
+      message = consumer.warning and consumer.warning.message or "bootstrap generation changed",
+    }
+  end
+
+  local buffer = consumer.buffer or {
+    events = {},
+    last_drain_size = 0,
+  }
+  consumer.buffer = buffer
+  consumer.buffer.last_drain_size = #buffer.events
+  local warning = consumer.warning
+  consumer.warning = nil
+
+  return {
+    kind = "ok",
+    generation = consumer.generation,
+    events = copy_payload(buffer.events) or {},
+    warning = copy_payload(warning),
+  }
+end
+
+---@param consumer_id string
+---@param generation? integer
+---@return { kind: string, generation?: integer, events?: table[], warning?: table, message?: string }
+function Handler:promote_to_live(consumer_id, generation)
+  local consumer = self._connection_invalidated_consumers[consumer_id]
+  if not consumer then
+    return {
+      kind = "missing",
+      message = "connection_invalidated consumer is not registered",
+    }
+  end
+
+  if consumer.state == "stormed" then
+    return {
+      kind = "storm",
+      generation = consumer.generation,
+      message = consumer.warning and consumer.warning.message or "bootstrap overflow storm",
+      warning = copy_payload(consumer.warning),
+    }
+  end
+
+  local expected_generation = generation == nil and consumer.generation or generation
+  if expected_generation ~= consumer.generation then
+    return {
+      kind = "restart",
+      generation = consumer.generation,
+      warning = copy_payload(consumer.warning),
+      message = consumer.warning and consumer.warning.message or "bootstrap generation changed",
+    }
+  end
+
+  -- Neovim runs these callbacks on the main loop; because this function does not
+  -- yield, sealing the bootstrap buffer and flipping to live mode is atomic.
+  local buffer = consumer.buffer or {
+    events = {},
+    last_drain_size = 0,
+  }
+  local tail = {}
+  for index = (buffer.last_drain_size or 0) + 1, #buffer.events do
+    tail[#tail + 1] = copy_payload(buffer.events[index])
+  end
+
+  consumer.state = "live"
+  consumer.buffer = nil
+  consumer.warning = nil
+  consumer.consecutive_overflows = 0
+
+  return {
+    kind = "ok",
+    generation = consumer.generation,
+    events = tail,
+  }
+end
+
+---@param consumer_id string
+function Handler:teardown_connection_invalidated_consumer(consumer_id)
+  self._connection_invalidated_consumers[consumer_id] = nil
+end
+
+---@private
+---@param data ConnectionInvalidatedEvent
+function Handler:_dispatch_connection_invalidated(data)
+  for consumer_id, consumer in pairs(self._connection_invalidated_consumers) do
+    if consumer.state == "live" then
+      self:_notify_connection_invalidated_consumer(consumer, data)
+    elseif consumer.state == "bootstrap" then
+      local buffer = consumer.buffer or {
+        events = {},
+        last_drain_size = 0,
+      }
+      consumer.buffer = buffer
+
+      if #buffer.events < BOOTSTRAP_BUFFER_LIMIT then
+        buffer.events[#buffer.events + 1] = copy_payload(data)
+      else
+        consumer.consecutive_overflows = (consumer.consecutive_overflows or 0) + 1
+        if consumer.consecutive_overflows > BOOTSTRAP_OVERFLOW_MAX then
+          consumer.state = "stormed"
+          consumer.warning = {
+            kind = "storm",
+            consumer_id = consumer_id,
+            generation = consumer.generation,
+            message = string.format(
+              "[dbee] bootstrap_overflow_storm for %s; teardown and reinitialize before resuming",
+              consumer_id
+            ),
+          }
+          self:_notify_connection_invalidated_consumer(consumer, consumer.warning)
+        else
+          local next_generation = consumer.generation + 1
+          consumer.warning = {
+            kind = "overflow",
+            consumer_id = consumer_id,
+            previous_generation = consumer.generation,
+            generation = next_generation,
+            message = string.format(
+              "[dbee] bootstrap event buffer overflowed for %s; resyncing snapshot",
+              consumer_id
+            ),
+          }
+          consumer.generation = next_generation
+          consumer.buffer = {
+            events = {},
+            last_drain_size = 0,
+          }
+          self:_notify_connection_invalidated_consumer(consumer, consumer.warning)
+          consumer.buffer.events[#consumer.buffer.events + 1] = copy_payload(data)
+        end
+      end
+    end
+  end
+end
+
+---@private
+---@param waiter table
+---@param payload table
+function Handler:_notify_structure_waiter(waiter, payload)
+  if type(waiter.callback) ~= "function" then
+    return
+  end
+
+  local ok, err = pcall(waiter.callback, copy_payload(payload))
+  if not ok then
+    utils.log("error", "structure singleflight waiter failed: " .. tostring(err), "core")
+  end
+end
+
+---@private
+---@param conn_id connection_id
+---@param new_epoch integer
+function Handler:_supersede_structure_flights(conn_id, new_epoch)
+  local keys_to_drop = {}
+  for key, flight in pairs(self._structure_flights) do
+    if flight.conn_id == conn_id and flight.epoch < new_epoch then
+      for _, waiter in ipairs(flight.waiters or {}) do
+        self:_notify_structure_waiter(waiter, {
+          conn_id = conn_id,
+          request_id = waiter.request_id,
+          root_epoch = flight.epoch,
+          caller_token = waiter.caller_token,
+          error_kind = "superseded",
+          new_epoch = new_epoch,
+        })
+      end
+      keys_to_drop[#keys_to_drop + 1] = key
+    end
+  end
+
+  for _, key in ipairs(keys_to_drop) do
+    local flight = self._structure_flights[key]
+    if flight then
+      self._structure_request_lookup[flight.request_id] = nil
+    end
+    self._structure_flights[key] = nil
+  end
+end
+
+---@param opts { conn_id: connection_id, consumer: string, request_id?: integer, caller_token?: string, callback?: fun(payload: table) }
+---@return { epoch: integer, request_id: integer, joined: boolean }
+function Handler:connection_get_structure_singleflight(opts)
+  if not opts or not opts.conn_id or opts.conn_id == "" then
+    error("missing connection id for singleflight structure load")
+  end
+  if not opts.consumer or opts.consumer == "" then
+    error("missing structure singleflight consumer")
+  end
+
+  local epoch = self:get_authoritative_root_epoch(opts.conn_id)
+  local key = singleflight_key(opts.conn_id, epoch)
+  local waiter = {
+    consumer = opts.consumer,
+    request_id = opts.request_id or 0,
+    caller_token = opts.caller_token,
+    callback = opts.callback,
+  }
+
+  local flight = self._structure_flights[key]
+  if flight then
+    flight.waiters[#flight.waiters + 1] = waiter
+    flight.consumer_slots[opts.consumer] = true
+    return {
+      epoch = epoch,
+      request_id = waiter.request_id,
+      joined = true,
+    }
+  end
+
+  self:_supersede_structure_flights(opts.conn_id, epoch)
+
+  self._next_singleflight_request_id = self._next_singleflight_request_id + 1
+  local internal_request_id = self._next_singleflight_request_id
+  flight = {
+    conn_id = opts.conn_id,
+    epoch = epoch,
+    request_id = internal_request_id,
+    waiters = { waiter },
+    consumer_slots = {
+      [opts.consumer] = true,
+    },
+  }
+  self._structure_flights[key] = flight
+  self._structure_request_lookup[internal_request_id] = key
+
+  vim.fn.DbeeConnectionGetStructureAsync(opts.conn_id, internal_request_id, epoch, SINGLEFLIGHT_CALLER_TOKEN)
+
+  return {
+    epoch = epoch,
+    request_id = waiter.request_id,
+    joined = false,
+  }
+end
+
+---@param consumer string
+function Handler:teardown_structure_consumer(consumer)
+  for _, flight in pairs(self._structure_flights) do
+    local kept = {}
+    for _, waiter in ipairs(flight.waiters or {}) do
+      if waiter.consumer ~= consumer then
+        kept[#kept + 1] = waiter
+      end
+    end
+    flight.waiters = kept
+    flight.consumer_slots[consumer] = nil
+  end
+end
+
+---@private
+---@param data { conn_id?: connection_id, request_id?: integer, root_epoch?: integer, caller_token?: string, structures?: DBStructure[], error?: any }
+function Handler:_on_singleflight_structure_loaded(data)
+  if not data or data.caller_token ~= SINGLEFLIGHT_CALLER_TOKEN or not data.request_id then
+    return
+  end
+
+  local key = self._structure_request_lookup[data.request_id]
+  if not key then
+    return
+  end
+
+  local flight = self._structure_flights[key]
+  self._structure_request_lookup[data.request_id] = nil
+  if not flight then
+    return
+  end
+  self._structure_flights[key] = nil
+
+  local payload_root_epoch = tonumber(data.root_epoch) or 0
+  if flight.conn_id ~= data.conn_id or flight.epoch ~= payload_root_epoch then
+    return
+  end
+
+  for _, waiter in ipairs(flight.waiters or {}) do
+    self:_notify_structure_waiter(waiter, {
+      conn_id = data.conn_id,
+      request_id = waiter.request_id,
+      root_epoch = payload_root_epoch,
+      caller_token = waiter.caller_token,
+      structures = copy_payload(data.structures) or {},
+      error = data.error,
+    })
+  end
 end
 
 ---@private

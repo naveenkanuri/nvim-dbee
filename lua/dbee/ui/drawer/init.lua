@@ -59,6 +59,7 @@ local utils = require("dbee.utils")
 ---@field private pending_generated_calls table<string, { note_id: note_id, fallback_template: string }>
 ---@field private _manual_refresh_conns table<string, boolean>
 ---@field private _replay_container_expansions table<string, table<string, boolean>>
+---@field private _connection_invalidated_consumer_id string
 ---@field private _struct_cache DrawerStructureCache
 ---@field private filter_text string current filter string
 ---@field private pre_filter_expansion table<string, boolean>? saved expansion before filter
@@ -520,6 +521,42 @@ local function prompt_connection_details(title, defaults, callback)
       })
     end,
   })
+end
+
+---@param data ConnectionInvalidatedEvent
+---@param snapshot_epoch table<connection_id, integer>
+---@return boolean
+local function should_apply_bootstrap_invalidation(data, snapshot_epoch)
+  local event_epoch = tonumber(data and data.authoritative_root_epoch) or 0
+  if event_epoch <= 0 then
+    return false
+  end
+
+  local affected = {}
+  for _, conn_id in ipairs(data and data.retired_conn_ids or {}) do
+    affected[conn_id] = true
+  end
+  for _, conn_id in ipairs(data and data.new_conn_ids or {}) do
+    affected[conn_id] = true
+  end
+  if data and data.current_conn_id_before then
+    affected[data.current_conn_id_before] = true
+  end
+  if data and data.current_conn_id_after then
+    affected[data.current_conn_id_after] = true
+  end
+
+  if next(affected) == nil then
+    return true
+  end
+
+  for conn_id in pairs(affected) do
+    if event_epoch > (snapshot_epoch[conn_id] or 0) then
+      return true
+    end
+  end
+
+  return false
 end
 
 ---@param ui DrawerUI
@@ -1041,6 +1078,7 @@ function DrawerUI:new(handler, editor, result, opts)
     pending_generated_calls = {},
     _manual_refresh_conns = {},
     _replay_container_expansions = {},
+    _connection_invalidated_consumer_id = "drawer",
     _struct_cache = {
       root = {},
       root_gen = {},
@@ -1091,10 +1129,6 @@ function DrawerUI:new(handler, editor, result, opts)
     o:on_current_connection_changed(data)
   end)
 
-  handler:register_event_listener("connection_invalidated", function(data)
-    o:on_connection_invalidated(data)
-  end)
-
   editor:register_event_listener("current_note_changed", function(data)
     o:on_current_note_changed(data)
   end)
@@ -1114,6 +1148,8 @@ function DrawerUI:new(handler, editor, result, opts)
   handler:register_event_listener("call_state_changed", function(data)
     o:on_call_state_changed(data)
   end)
+
+  o:_bootstrap_connection_invalidated_consumer()
 
   return o
 end
@@ -1156,11 +1192,91 @@ function DrawerUI:on_current_connection_changed(data)
   end
 end
 
+---@private
+---@param data any
+function DrawerUI:_handle_connection_invalidated_consumer_event(data)
+  if not data then
+    return
+  end
+
+  if data.kind == "overflow" then
+    utils.log("warn", data.message)
+    return
+  end
+
+  if data.kind == "storm" then
+    utils.log("error", data.message)
+    return
+  end
+
+  self:on_connection_invalidated(data)
+end
+
+---@private
+---@return boolean
+function DrawerUI:_bootstrap_connection_invalidated_consumer()
+  local consumer_id = self._connection_invalidated_consumer_id
+  local generation = self.handler:begin_connection_invalidated_bootstrap(consumer_id, function(data)
+    self:_handle_connection_invalidated_consumer_event(data)
+  end)
+
+  while true do
+    local snapshot = self.handler:get_connection_state_snapshot()
+    self.current_conn_id = snapshot.current_connection and snapshot.current_connection.id or nil
+
+    local drained = self.handler:drain_connection_invalidated_bootstrap(consumer_id, generation)
+    if drained.kind == "restart" then
+      if drained.warning and drained.warning.message then
+        utils.log("warn", drained.warning.message)
+      end
+      generation = drained.generation or generation
+    elseif drained.kind == "storm" then
+      utils.log("error", drained.message or "[dbee] bootstrap_overflow_storm")
+      return false
+    else
+      local should_refresh = false
+      for _, event in ipairs(drained.events or {}) do
+        if should_apply_bootstrap_invalidation(event, snapshot.snapshot_authoritative_epoch or {}) then
+          should_refresh = true
+          break
+        end
+      end
+
+      local promoted = self.handler:promote_to_live(consumer_id, generation)
+      if promoted.kind == "restart" then
+        if promoted.warning and promoted.warning.message then
+          utils.log("warn", promoted.warning.message)
+        end
+        generation = promoted.generation or generation
+      elseif promoted.kind == "storm" then
+        utils.log("error", promoted.message or "[dbee] bootstrap_overflow_storm")
+        return false
+      else
+        for _, event in ipairs(promoted.events or {}) do
+          if should_apply_bootstrap_invalidation(event, snapshot.snapshot_authoritative_epoch or {}) then
+            should_refresh = true
+            break
+          end
+        end
+
+        if should_refresh then
+          self:on_connection_invalidated({
+            reason = "bootstrap_replay",
+          })
+        end
+        return true
+      end
+    end
+  end
+end
+
 -- event listener for authoritative connection lifecycle invalidation
 ---@private
 ---@param data ConnectionInvalidatedEvent
 function DrawerUI:on_connection_invalidated(data)
-  local _ = data
+  if data and data.silent == true then
+    return
+  end
   invalidate_authoritative_caches(self)
   self:refresh()
 end
@@ -1259,7 +1375,8 @@ function DrawerUI:on_database_selected(data)
   self:_prune_loaded_lazy_ids(data.conn_id)
   self._struct_cache.root[data.conn_id] = nil
   self._struct_cache.branches[data.conn_id] = nil
-  self._struct_cache.root_epoch[data.conn_id] = current_root_epoch(self, data.conn_id) + 1
+  self._struct_cache.root_epoch[data.conn_id] = self.handler:bump_authoritative_root_epoch({ data.conn_id })
+    or (current_root_epoch(self, data.conn_id) + 1)
   invalidate_authoritative_caches(self)
   self:_patch_connection_subtree(data.conn_id, { suppress_root_request = true })
   self:request_structure_reload(data.conn_id, { force_new = true })
@@ -1553,7 +1670,19 @@ function DrawerUI:request_structure_reload(conn_id, opts)
   local requested_request_id = self._struct_cache.root_gen[conn_id] or 0
   self._struct_cache.root_gen[conn_id] = math.max(requested_request_id, applied_request_id) + 1
   local request_id = self._struct_cache.root_gen[conn_id]
-  self.handler:connection_get_structure_async(conn_id, request_id, current_root_epoch(self, conn_id), "drawer")
+  self._struct_cache.root_epoch[conn_id] = self.handler:get_authoritative_root_epoch(conn_id)
+  self.handler:connection_get_structure_singleflight({
+    conn_id = conn_id,
+    consumer = self._connection_invalidated_consumer_id,
+    request_id = request_id,
+    caller_token = "drawer",
+    callback = function(data)
+      if data.error_kind == "superseded" then
+        return
+      end
+      self:on_structure_loaded(data)
+    end,
+  })
   return request_id
 end
 
@@ -1881,7 +2010,8 @@ function DrawerUI:get_actions()
       self:_prune_loaded_lazy_ids(conn_id)
       self._struct_cache.root[conn_id] = nil
       self._struct_cache.branches[conn_id] = nil
-      self._struct_cache.root_epoch[conn_id] = current_root_epoch(self, conn_id) + 1
+      self._struct_cache.root_epoch[conn_id] = self.handler:bump_authoritative_root_epoch({ conn_id })
+        or (current_root_epoch(self, conn_id) + 1)
       invalidate_authoritative_caches(self)
       self:_patch_connection_subtree(conn_id, { suppress_root_request = true })
       self:request_structure_reload(conn_id, { force_new = true })
