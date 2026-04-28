@@ -131,6 +131,19 @@
 ---@field new_conn_ids connection_id[]
 ---@field authoritative_root_epoch integer?
 
+---Snapshot entry used by bootstrap consumers to reconcile source-owned
+---connections before switching to live `connection_invalidated` events.
+---@class ConnectionStateSnapshotSource
+---@field id source_id
+---@field name string
+---@field connections ConnectionParams[]
+
+---Authoritative handler snapshot used during subscribe-first bootstrap.
+---@class ConnectionStateSnapshot
+---@field sources ConnectionStateSnapshotSource[]
+---@field current_connection ConnectionParams?
+---@field snapshot_authoritative_epoch table<connection_id, integer>
+
 ---@divider -
 ---@tag dbee.ref.types.events
 ---@brief [[

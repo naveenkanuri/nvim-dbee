@@ -542,6 +542,33 @@ function Handler:source_get_connections(id)
   return ret
 end
 
+---Return an authoritative, side-effect-free connection snapshot for bootstrap
+---consumers before they switch to live `connection_invalidated` events.
+---@return ConnectionStateSnapshot
+function Handler:get_connection_state_snapshot()
+  local snapshot = {
+    sources = {},
+    current_connection = self:get_current_connection(),
+    snapshot_authoritative_epoch = {},
+  }
+
+  for _, source in ipairs(self:get_sources()) do
+    local source_id = source:name()
+    local connections = copy_connections(self:source_get_connections(source_id))
+    snapshot.sources[#snapshot.sources + 1] = {
+      id = source_id,
+      name = source_id,
+      connections = connections,
+    }
+
+    for _, conn in ipairs(connections) do
+      snapshot.snapshot_authoritative_epoch[conn.id] = self.authoritative_root_epoch[conn.id] or 0
+    end
+  end
+
+  return snapshot
+end
+
 ---@param helpers table<string, table_helpers> extra helpers per type
 function Handler:add_helpers(helpers)
   for type, help in pairs(helpers) do
