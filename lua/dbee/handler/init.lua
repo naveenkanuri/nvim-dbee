@@ -686,7 +686,7 @@ function Handler:_on_singleflight_structure_loaded(data)
       request_id = waiter.request_id,
       root_epoch = payload_root_epoch,
       caller_token = waiter.caller_token,
-      structures = copy_payload(data.structures) or {},
+      structures = data.error and nil or copy_payload(data.structures),
       error = data.error,
     })
   end

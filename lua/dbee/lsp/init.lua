@@ -227,6 +227,10 @@ function M._on_structure_loaded(handler, data)
     return
   end
 
+  if data.error then
+    return
+  end
+
   if not data.structures then
     return
   end

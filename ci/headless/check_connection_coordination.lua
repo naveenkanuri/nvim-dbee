@@ -673,6 +673,39 @@ local function run_singleflight_contracts()
   print("DCFG01_SINGLE_FLIGHT_OK=true")
 
   env:cleanup()
+
+  local error_env = new_env()
+  error_env.lsp.register_events()
+  error_env.runtime.structure_requests = {}
+  error_env.lsp._try_start()
+  local bootstrap_request = latest_request(error_env.runtime.structure_requests, "conn-alpha")
+  assert_true("singleflight_error_bootstrap_request", bootstrap_request ~= nil)
+  emit_structure_loaded(error_env, bootstrap_request, {
+    caller_token = "__singleflight",
+  })
+  assert_true("singleflight_error_lsp_started", error_env.lsp.status().running == true)
+  local baseline_builds = #error_env.runtime.lsp.cache_builds
+  local baseline_saves = error_env.runtime.lsp.saved or 0
+  local baseline_starts = error_env.runtime.lsp.start_calls
+  local baseline_stops = error_env.runtime.lsp.stops
+
+  error_env.runtime.structure_requests = {}
+  error_env.lsp.refresh()
+  local failed_request = latest_request(error_env.runtime.structure_requests, "conn-alpha")
+  assert_true("singleflight_error_refresh_request", failed_request ~= nil)
+  emit_structure_loaded(error_env, failed_request, {
+    caller_token = "__singleflight",
+    structures = nil,
+    error = "root load failed",
+  })
+  assert_eq("singleflight_error_builds_unchanged", #error_env.runtime.lsp.cache_builds, baseline_builds)
+  assert_eq("singleflight_error_saves_unchanged", error_env.runtime.lsp.saved or 0, baseline_saves)
+  assert_eq("singleflight_error_starts_unchanged", error_env.runtime.lsp.start_calls, baseline_starts)
+  assert_eq("singleflight_error_stops_unchanged", error_env.runtime.lsp.stops, baseline_stops)
+  assert_true("singleflight_error_lsp_still_running", error_env.lsp.status().running == true)
+  print("LIFECYCLE01_SINGLEFLIGHT_ERROR_PRESERVES_LSP_OK=true")
+
+  error_env:cleanup()
 end
 
 local function run_bootstrap_contracts()
