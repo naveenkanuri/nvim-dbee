@@ -446,6 +446,82 @@ local function refresh_filter_safe(ui, reason)
   end
 end
 
+---@param source Source
+---@param source_id string
+---@return { id: string, name: string, can_create: boolean, can_update: boolean, can_delete: boolean, file: string|nil }
+local function build_source_meta(source, source_id)
+  local source_file = nil
+  if type(source.file) == "function" then
+    local ok, file_or_err = pcall(source.file, source)
+    if ok then
+      source_file = file_or_err
+    else
+      utils.log("warn", "Failed reading source file metadata: " .. tostring(file_or_err))
+    end
+  end
+
+  return {
+    id = source_id,
+    name = source_id,
+    can_create = type(source.create) == "function",
+    can_update = type(source.update) == "function",
+    can_delete = type(source.delete) == "function",
+    file = source_file,
+  }
+end
+
+---@param handler Handler
+---@param conn_id string
+---@return { id: string, name: string, can_create: boolean, can_update: boolean, can_delete: boolean, file: string|nil }|nil
+---@return ConnectionParams|nil
+local function resolve_connection_source_meta(handler, conn_id)
+  for _, source in ipairs(handler:get_sources()) do
+    local source_id = source:name()
+    local source_meta = build_source_meta(source, source_id)
+    for _, conn in ipairs(handler:source_get_connections(source_id)) do
+      if conn and conn.id == conn_id then
+        return source_meta, conn
+      end
+    end
+  end
+
+  return nil, nil
+end
+
+---@param handler Handler
+---@return { id: string, name: string, can_create: boolean, can_update: boolean, can_delete: boolean, file: string|nil }[]
+local function create_capable_sources(handler)
+  local out = {}
+  for _, source in ipairs(handler:get_sources()) do
+    local source_meta = build_source_meta(source, source:name())
+    if source_meta.can_create then
+      out[#out + 1] = source_meta
+    end
+  end
+  return out
+end
+
+---@param title string
+---@param defaults? { name?: string, type?: string, url?: string }
+---@param callback fun(spec: ConnectionParams)
+local function prompt_connection_details(title, defaults, callback)
+  defaults = defaults or {}
+  common.float_prompt({
+    { key = "name", value = defaults.name or "" },
+    { key = "type", value = defaults.type or "" },
+    { key = "url", value = defaults.url or "" },
+  }, {
+    title = title,
+    callback = function(res)
+      callback({
+        name = res.name,
+        type = res.type,
+        url = res.url,
+      })
+    end,
+  })
+end
+
 ---@param ui DrawerUI
 ---@param expansion_ids table<string, boolean>?
 ---@return table<string, boolean> unresolved_ids
@@ -1015,6 +1091,10 @@ function DrawerUI:new(handler, editor, result, opts)
     o:on_current_connection_changed(data)
   end)
 
+  handler:register_event_listener("connection_invalidated", function(data)
+    o:on_connection_invalidated(data)
+  end)
+
   editor:register_event_listener("current_note_changed", function(data)
     o:on_current_note_changed(data)
   end)
@@ -1070,12 +1150,18 @@ function DrawerUI:on_current_connection_changed(data)
     return
   end
 
-  if self.filter_restore_snapshot or self.filter_input then
-    self:interrupt_filter("Drawer data changed; closing filter before refresh")
-  end
-  invalidate_authoritative_caches(self)
-
   self.current_conn_id = data.conn_id
+  if self.tree then
+    self.tree:render()
+  end
+end
+
+-- event listener for authoritative connection lifecycle invalidation
+---@private
+---@param data ConnectionInvalidatedEvent
+function DrawerUI:on_connection_invalidated(data)
+  local _ = data
+  invalidate_authoritative_caches(self)
   self:refresh()
 end
 
@@ -1613,14 +1699,21 @@ function DrawerUI:get_actions()
     self.tree:render()
   end
 
-  local function perform_action(action)
-    if type(action) ~= "function" then
+  local function perform_action(spec)
+    if type(spec) ~= "table" or type(spec.action) ~= "function" then
       return
     end
 
-    action(function()
-      refresh_filter_safe(self, "Drawer action changed data; closing filter before refresh")()
-    end, function(opts)
+    local mode = spec.mode or "refresh_after_action"
+    local on_done = function()
+      if mode == "refresh_after_action" then
+        refresh_filter_safe(self, "Drawer action changed data; closing filter before refresh")()
+        return
+      end
+      invalidate_render_snapshot(self)
+    end
+
+    spec.action(on_done, function(opts)
       opts = opts or {}
       menu.select {
         relative_winid = self.winid,
@@ -1639,6 +1732,100 @@ function DrawerUI:get_actions()
         on_confirm = opts.on_confirm,
       }
     end)
+  end
+
+  local function perform_node_action(node, action_name)
+    if not node then
+      return
+    end
+
+    local action = node[action_name]
+    if type(action) ~= "function" then
+      return
+    end
+
+    local mode = node.type == "connection" and "close_only" or "refresh_after_action"
+    perform_action({
+      mode = mode,
+      action = action,
+    })
+  end
+
+  local function current_connection_node(action_label)
+    local node = self.tree:get_node() --[[@as DrawerUINode]]
+    if not node or node.type ~= "connection" then
+      utils.log("warn", "select a connection row to " .. action_label)
+      return nil
+    end
+    return node
+  end
+
+  local function choose_source(title, sources, on_confirm)
+    local labels = {}
+    local by_label = {}
+    for _, source_meta in ipairs(sources or {}) do
+      local label = tostring(source_meta.name or source_meta.id)
+      labels[#labels + 1] = label
+      by_label[label] = source_meta
+    end
+
+    if #labels == 0 then
+      utils.log("warn", "No sources support adding connections")
+      return
+    end
+
+    if #labels == 1 then
+      on_confirm(by_label[labels[1]])
+      return
+    end
+
+    menu.select {
+      relative_winid = self.winid,
+      title = title,
+      mappings = self.mappings,
+      items = labels,
+      on_confirm = function(selection)
+        local source_meta = by_label[selection]
+        if source_meta then
+          on_confirm(source_meta)
+        end
+      end,
+    }
+  end
+
+  local function open_add_connection(source_meta, defaults)
+    prompt_connection_details("Add Connection", defaults, function(spec)
+      local ok, err = pcall(self.handler.source_add_connection, self.handler, source_meta.id, spec)
+      if not ok then
+        utils.log("error", "Failed to add connection: " .. tostring(err))
+      end
+    end)
+  end
+
+  local function open_edit_connection(source_meta, conn_id, conn)
+    prompt_connection_details("Edit Connection", conn or {}, function(spec)
+      local ok, err = pcall(self.handler.source_update_connection, self.handler, source_meta.id, conn_id, spec)
+      if not ok then
+        utils.log("error", "Failed to update connection: " .. tostring(err))
+      end
+    end)
+  end
+
+  local function open_source_file_editor(source_meta)
+    if not source_meta.file or source_meta.file == "" then
+      utils.log("warn", "Source file editing is not available for this connection")
+      return
+    end
+
+    common.float_editor(source_meta.file, {
+      title = "Edit source file",
+      callback = function()
+        local ok, err = pcall(self.handler.source_reload, self.handler, source_meta.id)
+        if not ok then
+          utils.log("error", "Failed to reload source after editing source file: " .. tostring(err))
+        end
+      end,
+    })
   end
 
   local function move_tree_selection(delta)
@@ -1708,21 +1895,177 @@ function DrawerUI:get_actions()
         self:structure_load_more(node.structure_load_more.branch_id, node.structure_load_more.kind)
         return
       end
-      perform_action(node.action_1)
+      perform_node_action(node, "action_1")
     end,
     action_2 = function()
       local node = self.tree:get_node() --[[@as DrawerUINode]]
       if not node then
         return
       end
-      perform_action(node.action_2)
+      perform_node_action(node, "action_2")
     end,
     action_3 = function()
       local node = self.tree:get_node() --[[@as DrawerUINode]]
       if not node then
         return
       end
-      perform_action(node.action_3)
+      perform_node_action(node, "action_3")
+    end,
+    add_connection = function()
+      local current_node = self.tree:get_node() --[[@as DrawerUINode]]
+      local sources = create_capable_sources(self.handler)
+      if #sources == 0 then
+        utils.log("warn", "No sources support adding connections")
+        return
+      end
+
+      local preferred_source = nil
+      local default_spec = {}
+      if current_node and current_node.type == "connection" then
+        local source_meta, conn = resolve_connection_source_meta(self.handler, current_node:get_id())
+        if source_meta and source_meta.can_create then
+          preferred_source = source_meta
+        end
+        if conn then
+          default_spec = {
+            type = conn.type,
+          }
+        end
+      end
+
+      perform_action({
+        mode = "close_only",
+        action = function()
+          local begin_add = function(source_meta)
+            open_add_connection(source_meta, default_spec)
+          end
+
+          if preferred_source then
+            begin_add(preferred_source)
+            return
+          end
+
+          choose_source("Select a source", sources, begin_add)
+        end,
+      })
+    end,
+    edit_connection = function()
+      local node = current_connection_node("edit")
+      if not node then
+        return
+      end
+
+      local source_meta, conn = resolve_connection_source_meta(self.handler, node:get_id())
+      if not source_meta or not conn then
+        utils.log("warn", "Unable to resolve source for the selected connection")
+        return
+      end
+
+      local can_edit_connection = source_meta.can_update
+      local can_edit_source = source_meta.file ~= nil and source_meta.file ~= ""
+      if not can_edit_connection and not can_edit_source then
+        utils.log("warn", "Selected connection does not support editing")
+        return
+      end
+
+      perform_action({
+        mode = "close_only",
+        action = function(_, select)
+          local open_connection_editor = function()
+            open_edit_connection(source_meta, node:get_id(), conn)
+          end
+
+          if can_edit_connection and can_edit_source then
+            select {
+              title = "Edit Connection",
+              items = { "Edit connection", "Edit source file" },
+              on_confirm = function(selection)
+                if selection == "Edit source file" then
+                  open_source_file_editor(source_meta)
+                  return
+                end
+                open_connection_editor()
+              end,
+            }
+            return
+          end
+
+          if can_edit_source then
+            open_source_file_editor(source_meta)
+            return
+          end
+
+          open_connection_editor()
+        end,
+      })
+    end,
+    delete_connection = function()
+      local node = current_connection_node("delete")
+      if not node then
+        return
+      end
+
+      local source_meta = resolve_connection_source_meta(self.handler, node:get_id())
+      if not source_meta then
+        utils.log("warn", "Unable to resolve source for the selected connection")
+        return
+      end
+      if not source_meta.can_delete then
+        utils.log("warn", "Selected connection does not support deletion")
+        return
+      end
+
+      perform_action({
+        mode = "close_only",
+        action = function(_, select)
+          select {
+            title = "Confirm Deletion",
+            items = { "Yes", "No" },
+            on_confirm = function(selection)
+              if selection ~= "Yes" then
+                return
+              end
+              local ok, err = pcall(self.handler.source_remove_connection, self.handler, source_meta.id, node:get_id())
+              if not ok then
+                utils.log("error", "Failed to delete connection: " .. tostring(err))
+              end
+            end,
+          }
+        end,
+      })
+    end,
+    test_connection = function()
+      local node = current_connection_node("test")
+      if not node then
+        return
+      end
+
+      local conn_id = node:get_id()
+      local ok, failure_or_err = pcall(self.handler.connection_test, self.handler, conn_id)
+      if not ok then
+        utils.log("error", "Failed to test connection: " .. tostring(failure_or_err))
+        return
+      end
+
+      if failure_or_err then
+        local error_kind = tostring(failure_or_err.error_kind or "unknown")
+        local message = tostring(failure_or_err.message or "unknown error")
+        utils.log("error", ("Connection test failed (%s): %s"):format(error_kind, message))
+        return
+      end
+
+      utils.log("info", "Connection test succeeded: " .. conn_id)
+    end,
+    activate_connection = function()
+      local node = current_connection_node("activate")
+      if not node then
+        return
+      end
+
+      local ok, err = pcall(self.handler.set_current_connection, self.handler, node:get_id())
+      if not ok then
+        utils.log("error", "Failed to activate connection: " .. tostring(err))
+      end
     end,
     collapse = function()
       local node = self.tree:get_node()
@@ -1952,7 +2295,7 @@ function DrawerUI:get_actions()
                   self:structure_load_more(node.structure_load_more.branch_id, node.structure_load_more.kind)
                   return
                 end
-                perform_action(node.action_1)
+                perform_node_action(node, "action_1")
               end
             end,
           }
@@ -1988,13 +2331,13 @@ function DrawerUI:get_actions()
           maybe_add_forwarded(map, forwardable_mapping_key_for("action_2"), function()
             local node = self.tree:get_node()
             if node then
-              perform_action(node.action_2)
+              perform_node_action(node, "action_2")
             end
           end)
           maybe_add_forwarded(map, forwardable_mapping_key_for("action_3"), function()
             local node = self.tree:get_node()
             if node then
-              perform_action(node.action_3)
+              perform_node_action(node, "action_3")
             end
           end)
 

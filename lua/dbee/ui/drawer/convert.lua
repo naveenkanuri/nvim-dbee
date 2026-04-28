@@ -445,8 +445,12 @@ function M.help_node(mappings)
   -- help node
   ---@type DrawerUINode[]
   local children = {}
+  local edit_mapping = nil
   for _, km in ipairs(mappings) do
     if type(km.action) == "string" then
+      if km.action == "edit_connection" and km.mode == "n" then
+        edit_mapping = km.key
+      end
       table.insert(
         children,
         NuiTree.Node {
@@ -456,6 +460,14 @@ function M.help_node(mappings)
         }
       )
     end
+  end
+
+  if edit_mapping then
+    table.insert(children, NuiTree.Node {
+      id = "__help_source_file_edit__",
+      name = "source file = " .. edit_mapping .. " on a connection row",
+      type = "",
+    })
   end
 
   table.sort(children, function(k1, k2)
