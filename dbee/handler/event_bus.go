@@ -75,7 +75,14 @@ func (eb *eventBus) DatabaseSelected(id core.ConnectionID, dbname string) {
 }
 
 // StructureLoaded is called when async structure loading completes.
-func (eb *eventBus) StructureLoaded(id core.ConnectionID, requestID int, structures []*core.Structure, loadErr error) {
+func (eb *eventBus) StructureLoaded(
+	id core.ConnectionID,
+	requestID int,
+	rootEpoch int,
+	callerToken string,
+	structures []*core.Structure,
+	loadErr error,
+) {
 	errMsg := "nil"
 	if loadErr != nil {
 		errMsg = luaStringLiteral(loadErr.Error())
@@ -87,14 +94,59 @@ func (eb *eventBus) StructureLoaded(id core.ConnectionID, requestID int, structu
 		structLua = structuresToLua(structures)
 	}
 
+	rootEpochLua := "nil"
+	if rootEpoch > 0 {
+		rootEpochLua = fmt.Sprintf("%d", rootEpoch)
+	}
+
+	callerTokenLua := "nil"
+	if callerToken != "" {
+		callerTokenLua = luaStringLiteral(callerToken)
+	}
+
 	data := fmt.Sprintf(`{
 			conn_id = %q,
 			request_id = %d,
+			root_epoch = %s,
+			caller_token = %s,
 			structures = %s,
 			error = %s,
-		}`, id, requestID, structLua, errMsg)
+		}`, id, requestID, rootEpochLua, callerTokenLua, structLua, errMsg)
 
 	eb.callLua("structure_loaded", data)
+}
+
+// StructureChildrenLoaded is called when async child loading completes.
+func (eb *eventBus) StructureChildrenLoaded(
+	id core.ConnectionID,
+	requestID int,
+	branchID string,
+	rootEpoch int,
+	kind string,
+	columns []*core.Column,
+	loadErr error,
+) {
+	errMsg := "nil"
+	if loadErr != nil {
+		errMsg = luaStringLiteral(loadErr.Error())
+	}
+
+	columnsLua := "nil"
+	if columns != nil {
+		columnsLua = columnsToLua(columns)
+	}
+
+	data := fmt.Sprintf(`{
+		conn_id = %q,
+		request_id = %d,
+		branch_id = %q,
+		root_epoch = %d,
+		kind = %q,
+		columns = %s,
+		error = %s,
+	}`, id, requestID, branchID, rootEpoch, kind, columnsLua, errMsg)
+
+	eb.callLua("structure_children_loaded", data)
 }
 
 // structuresToLua serializes []*core.Structure to a Lua table literal.
@@ -107,6 +159,19 @@ func structuresToLua(structures []*core.Structure) string {
 		}
 		b.WriteString(fmt.Sprintf(`{name=%q,schema=%q,type=%q,children=%s}`,
 			s.Name, s.Schema, s.Type.String(), structuresToLua(s.Children)))
+	}
+	b.WriteString("}")
+	return b.String()
+}
+
+func columnsToLua(columns []*core.Column) string {
+	var b strings.Builder
+	b.WriteString("{")
+	for i, c := range columns {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		b.WriteString(fmt.Sprintf(`{name=%q,type=%q}`, c.Name, c.Type))
 	}
 	b.WriteString("}")
 	return b.String()

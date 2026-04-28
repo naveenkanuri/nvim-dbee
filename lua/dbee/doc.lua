@@ -117,6 +117,8 @@
 ---| '"call_state_changed"' {conn_id, call={id,query,state,time_taken_us,timestamp_us,error,error_kind}}
 ---| '"current_connection_changed"' {conn_id}
 ---| '"database_selected"' {conn_id, database_name}
+---| '"structure_loaded"' {conn_id, request_id, root_epoch?, caller_token?, structures, error}
+---| '"structure_children_loaded"' {conn_id, request_id, branch_id, root_epoch, kind = "columns", columns, error}
 
 ---Editor-owned SQL diagnostics are rendered inside connection-scoped namespaces
 ---named like `dbee-<conn_id>`.

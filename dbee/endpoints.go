@@ -261,11 +261,13 @@ func mountEndpoints(p *plugin.Plugin, h *handler.Handler) {
 	p.RegisterEndpoint(
 		"DbeeConnectionGetStructureAsync",
 		func(args *struct {
-			ID        core.ConnectionID `msgpack:",array"`
-			RequestID int
+			ID          core.ConnectionID `msgpack:",array"`
+			RequestID   int
+			RootEpoch   int
+			CallerToken string
 		},
 		) (any, error) {
-			h.ConnectionGetStructureAsync(args.ID, args.RequestID)
+			h.ConnectionGetStructureAsync(args.ID, args.RequestID, args.RootEpoch, args.CallerToken)
 			return nil, nil
 		})
 
@@ -284,6 +286,38 @@ func mountEndpoints(p *plugin.Plugin, h *handler.Handler) {
 			Materialization: core.StructureTypeFromString(args.Opts.Materialization),
 		})
 		return handler.WrapColumns(cols), err
+	})
+
+	p.RegisterEndpoint("DbeeConnectionGetColumnsAsync", func(args *struct {
+		ID        core.ConnectionID `msgpack:",array"`
+		RequestID int
+		BranchID  string
+		RootEpoch int
+		Opts      *struct {
+			Table           string `msgpack:"table"`
+			Schema          string `msgpack:"schema"`
+			Materialization string `msgpack:"materialization"`
+			Kind            string `msgpack:"kind"`
+		}
+	},
+	) (any, error) {
+		if args.Opts == nil {
+			return nil, fmt.Errorf("missing async column options")
+		}
+
+		h.ConnectionGetColumnsAsync(
+			args.ID,
+			args.RequestID,
+			args.BranchID,
+			args.RootEpoch,
+			args.Opts.Kind,
+			&core.TableOptions{
+				Table:           args.Opts.Table,
+				Schema:          args.Opts.Schema,
+				Materialization: core.StructureTypeFromString(args.Opts.Materialization),
+			},
+		)
+		return nil, nil
 	})
 
 	p.RegisterEndpoint(

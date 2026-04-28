@@ -229,24 +229,31 @@ func (h *Handler) ConnectionGetStructure(connID core.ConnectionID) ([]*core.Stru
 	return layout, nil
 }
 
-func (h *Handler) ConnectionGetStructureAsync(connID core.ConnectionID, requestID int) {
+func (h *Handler) ConnectionGetStructureAsync(connID core.ConnectionID, requestID int, rootEpoch int, callerToken string) {
 	if requestID <= 0 {
 		requestID = int(h.nextStructureReqID.Add(1))
 	}
 
 	c, ok := h.lookupConnection[connID]
 	if !ok {
-		h.events.StructureLoaded(connID, requestID, nil, fmt.Errorf("unknown connection with id: %q", connID))
+		h.events.StructureLoaded(
+			connID,
+			requestID,
+			rootEpoch,
+			callerToken,
+			nil,
+			fmt.Errorf("unknown connection with id: %q", connID),
+		)
 		return
 	}
 
 	go func() {
 		layout, err := c.GetStructure()
 		if err != nil {
-			h.events.StructureLoaded(connID, requestID, nil, fmt.Errorf("c.GetStructure: %w", err))
+			h.events.StructureLoaded(connID, requestID, rootEpoch, callerToken, nil, fmt.Errorf("c.GetStructure: %w", err))
 			return
 		}
-		h.events.StructureLoaded(connID, requestID, layout, nil)
+		h.events.StructureLoaded(connID, requestID, rootEpoch, callerToken, layout, nil)
 	}()
 }
 
@@ -262,6 +269,53 @@ func (h *Handler) ConnectionGetColumns(connID core.ConnectionID, opts *core.Tabl
 	}
 
 	return columns, nil
+}
+
+func (h *Handler) ConnectionGetColumnsAsync(
+	connID core.ConnectionID,
+	requestID int,
+	branchID string,
+	rootEpoch int,
+	kind string,
+	opts *core.TableOptions,
+) {
+	if requestID <= 0 {
+		requestID = int(h.nextStructureReqID.Add(1))
+	}
+	if kind == "" {
+		kind = "columns"
+	}
+
+	c, ok := h.lookupConnection[connID]
+	if !ok {
+		h.events.StructureChildrenLoaded(
+			connID,
+			requestID,
+			branchID,
+			rootEpoch,
+			kind,
+			nil,
+			fmt.Errorf("unknown connection with id: %q", connID),
+		)
+		return
+	}
+
+	go func() {
+		columns, err := c.GetColumns(opts)
+		if err != nil {
+			h.events.StructureChildrenLoaded(
+				connID,
+				requestID,
+				branchID,
+				rootEpoch,
+				kind,
+				nil,
+				fmt.Errorf("c.GetColumns: %w", err),
+			)
+			return
+		}
+		h.events.StructureChildrenLoaded(connID, requestID, branchID, rootEpoch, kind, columns, nil)
+	}()
 }
 
 func (h *Handler) ConnectionListDatabases(connID core.ConnectionID) (current string, available []string, err error) {

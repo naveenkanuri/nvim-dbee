@@ -241,12 +241,14 @@ end
 
 ---@param id connection_id
 ---@param request_id? integer
-function Handler:connection_get_structure_async(id, request_id)
-  if request_id == nil then
+---@param root_epoch? integer
+---@param caller_token? string
+function Handler:connection_get_structure_async(id, request_id, root_epoch, caller_token)
+  if request_id == nil and root_epoch == nil and caller_token == nil then
     vim.fn.DbeeConnectionGetStructureAsync(id)
     return
   end
-  vim.fn.DbeeConnectionGetStructureAsync(id, request_id)
+  vim.fn.DbeeConnectionGetStructureAsync(id, request_id or 0, root_epoch or 0, caller_token or "")
 end
 
 ---@param id connection_id
@@ -259,6 +261,20 @@ function Handler:connection_get_columns(id, opts)
   end
 
   return out
+end
+
+---@param id connection_id
+---@param request_id integer
+---@param branch_id string
+---@param root_epoch integer
+---@param opts { table: string, schema: string, materialization: string, kind?: string }
+function Handler:connection_get_columns_async(id, request_id, branch_id, root_epoch, opts)
+  vim.fn.DbeeConnectionGetColumnsAsync(id, request_id, branch_id, root_epoch, {
+    table = opts.table,
+    schema = opts.schema,
+    materialization = opts.materialization,
+    kind = opts.kind or "columns",
+  })
 end
 
 ---@param id connection_id
