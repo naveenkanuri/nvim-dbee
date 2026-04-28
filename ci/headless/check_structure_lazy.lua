@@ -516,6 +516,7 @@ local function new_fixture(opts)
   local current_db = {
     [ids.conn_ready] = "main",
   }
+  local list_database_errors = vim.deepcopy(opts.list_database_errors or {})
 
   local global_note = {
     id = ids.global_note_id,
@@ -603,6 +604,9 @@ local function new_fixture(opts)
     end,
     connection_list_databases = function(_, conn_id)
       counters.list_databases[conn_id] = (counters.list_databases[conn_id] or 0) + 1
+      if list_database_errors[conn_id] then
+        error(list_database_errors[conn_id])
+      end
       if conn_id == ids.conn_ready then
         return current_db[conn_id], { "main", "analytics" }
       end
@@ -1113,6 +1117,10 @@ do
   assert_eq("branch_error_tree_row", branch_error_fixture.drawer.tree:get_nodes(branch_error_fixture.ids.employee_view)[1].name, "branch failed")
 
   local root_error_fixture = new_fixture()
+  root_error_fixture.handler.connection_list_databases = function(_, conn_id)
+    root_error_fixture.counters.list_databases[conn_id] = (root_error_fixture.counters.list_databases[conn_id] or 0) + 1
+    error("db listing failed")
+  end
   expand_source(root_error_fixture)
   set_current_node(root_error_fixture.winid, root_error_fixture.drawer.tree, root_error_fixture.ids.conn_ready)
   root_error_fixture.drawer:get_actions().expand()
@@ -1130,12 +1138,28 @@ do
   vim.api.nvim_exec_autocmds("BufModifiedSet", { buffer = root_error_fixture.notes.local_note.bufnr })
   root_error_fixture.drawer:refresh()
   assert_eq("root_error_refresh_survives", root_error_fixture.drawer._struct_cache.root[root_error_fixture.ids.conn_ready].error, "root failed")
+  assert_eq("root_error_row_visible", root_error_fixture.drawer.tree:get_nodes(root_error_fixture.ids.conn_ready)[1].name, "root failed")
+  assert_eq("root_error_skips_db_listing", root_error_fixture.counters.list_databases[root_error_fixture.ids.conn_ready] or 0, 0)
   assert_eq("root_error_no_root_rpc_replay", root_error_fixture.counters.root_async, before_root_async)
   assert_eq("root_error_no_child_rpc_replay", root_error_fixture.counters.child_async, before_child_async)
+
+  local best_effort_fixture = new_fixture({
+    seed_root = seed_root_cache(),
+    list_database_errors = {
+      ["conn-ready"] = "db listing failed",
+    },
+  })
+  expand_source(best_effort_fixture)
+  set_current_node(best_effort_fixture.winid, best_effort_fixture.drawer.tree, best_effort_fixture.ids.conn_ready)
+  best_effort_fixture.drawer:get_actions().expand()
+  assert_true("best_effort_root_visible", best_effort_fixture.drawer.tree:get_node(best_effort_fixture.ids.hr_schema) ~= nil)
+  assert_eq("best_effort_no_db_switch_row", best_effort_fixture.drawer.tree:get_node(best_effort_fixture.ids.db_switch_id), nil)
+  assert_eq("best_effort_db_list_attempted_once", best_effort_fixture.counters.list_databases[best_effort_fixture.ids.conn_ready], 1)
 
   print("STRUCT01_ERROR_CACHE_OK=true")
   branch_error_fixture:cleanup()
   root_error_fixture:cleanup()
+  best_effort_fixture:cleanup()
 end
 
 do

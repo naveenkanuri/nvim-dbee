@@ -634,13 +634,23 @@ local function build_connection_children(ui, conn, opts)
   local nodes = {}
   if cached_root.error then
     nodes[#nodes + 1] = convert.error_node(conn.id, cached_root.error)
-  else
-    for _, struct in ipairs(sorted_struct_children(cached_root.structures)) do
-      nodes[#nodes + 1] = ui:_build_structure_node(conn.id, conn.id, struct)
-    end
+    return nodes
   end
 
-  local current_db, available_dbs = ui.handler:connection_list_databases(conn.id)
+  for _, struct in ipairs(sorted_struct_children(cached_root.structures)) do
+    nodes[#nodes + 1] = ui:_build_structure_node(conn.id, conn.id, struct)
+  end
+
+  local ok_dbs, current_db, available_dbs = pcall(ui.handler.connection_list_databases, ui.handler, conn.id)
+  if not ok_dbs then
+    vim.notify(
+      ("Failed to list databases for %s: %s"):format(conn.id, tostring(current_db)),
+      vim.log.levels.DEBUG,
+      { title = "nvim-dbee" }
+    )
+    return nodes
+  end
+
   if current_db ~= "" and #available_dbs > 0 then
     table.insert(nodes, 1, NuiTree.Node({
       id = conn.id .. "_database_switch__",
