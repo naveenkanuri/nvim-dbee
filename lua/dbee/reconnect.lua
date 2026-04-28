@@ -513,7 +513,8 @@ function M.reconnect_connection(conn_id, opts)
 
   M.reset_connection_episode(conn_id)
 
-  local ok_reload, reload_result_or_err = pcall(handler.source_reload_reconnect, handler, source_id)
+  local ok_reload, reload_result_or_err =
+    pcall(handler.source_reload_reconnect, handler, source_id, { defer_current_restore = true })
   if not ok_reload then
     return false, "failed reloading connection source: " .. tostring(reload_result_or_err), nil, nil
   end
@@ -522,6 +523,10 @@ function M.reconnect_connection(conn_id, opts)
   local reloaded_conn, resolve_err = resolve_reloaded_connection(source_id, target_conn)
   if not reloaded_conn then
     return false, resolve_err, nil, nil
+  end
+
+  if reloaded_conn.id ~= conn_id and type(handler.migrate_structure_flights) == "function" then
+    handler:migrate_structure_flights(conn_id, reloaded_conn.id)
   end
 
   local ok_set, set_err = pcall(api.core.set_current_connection, reloaded_conn.id)
@@ -568,9 +573,6 @@ function M.reconnect_connection(conn_id, opts)
   reload_result.current_conn_id_after = current_after
 
   if reloaded_conn.id ~= conn_id then
-    if type(handler.migrate_structure_flights) == "function" then
-      handler:migrate_structure_flights(conn_id, reloaded_conn.id)
-    end
     handler:emit_connection_invalidated_silent("reconnect_rewrite", reload_result)
   end
 

@@ -1108,6 +1108,48 @@ local function run_database_switch_and_reconnect_contracts()
   print("DCFG01_DATABASE_SWITCH_STALE_DROP_OK=true")
 
   env_reconnect:cleanup()
+
+  local env_reconnect_lsp = new_env()
+  env_reconnect_lsp.lsp.register_events()
+  env_reconnect_lsp.runtime.structure_requests = {}
+  env_reconnect_lsp.lsp._try_start()
+  local bootstrap_request = latest_request(env_reconnect_lsp.runtime.structure_requests, "conn-alpha")
+  assert_true("reconnect_lsp_bootstrap_request", bootstrap_request ~= nil)
+  emit_structure_loaded(env_reconnect_lsp, bootstrap_request, {
+    caller_token = "__singleflight",
+  })
+  assert_true("reconnect_lsp_started", env_reconnect_lsp.lsp.status().running == true)
+
+  env_reconnect_lsp.runtime.structure_requests = {}
+  env_reconnect_lsp.lsp.refresh()
+  local in_flight_request = latest_request(env_reconnect_lsp.runtime.structure_requests, "conn-alpha")
+  assert_true("reconnect_lsp_inflight_request", in_flight_request ~= nil)
+  assert_true("reconnect_lsp_old_flight_present", has_structure_flight(env_reconnect_lsp, "conn-alpha", "lsp"))
+
+  env_reconnect_lsp.source._specs[1] = {
+    id = "conn-alpha-new",
+    name = "Alpha",
+    type = "postgres",
+    url = "postgres://alpha",
+  }
+
+  local ok_reconnect, new_conn_id_or_err = env_reconnect_lsp.reconnect.reconnect_connection("conn-alpha")
+  assert_true("reconnect_lsp_reload_ok", ok_reconnect)
+  assert_eq("reconnect_lsp_new_conn_id", new_conn_id_or_err, "conn-alpha-new")
+  env_reconnect_lsp.reconnect.rewrite_connection_identity("conn-alpha", "conn-alpha-new", "Alpha", "postgres")
+  Harness.drain()
+
+  assert_eq("reconnect_lsp_single_underlying_request", #env_reconnect_lsp.runtime.structure_requests, 1)
+  assert_true("reconnect_lsp_new_flight_present", has_structure_flight(env_reconnect_lsp, "conn-alpha-new", "lsp"))
+
+  emit_structure_loaded(env_reconnect_lsp, in_flight_request, {
+    conn_id = "conn-alpha",
+    caller_token = "__singleflight",
+  })
+  assert_eq("reconnect_lsp_status_conn", env_reconnect_lsp.lsp.status().conn_id, "conn-alpha-new")
+  print("LIFECYCLE01_RECONNECT_LSP_NO_DOUBLE_HIT_OK=true")
+
+  env_reconnect_lsp:cleanup()
 end
 
 local function run_lsp_retarget_rewarm_contracts()

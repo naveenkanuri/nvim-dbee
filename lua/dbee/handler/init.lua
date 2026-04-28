@@ -764,9 +764,14 @@ function Handler:emit_connection_invalidated_silent(reason, result)
 end
 
 ---@param id source_id
+---@param opts? { defer_current_restore?: boolean }
 ---@return { source_id: source_id, retired_conn_ids: connection_id[], new_conn_ids: connection_id[], current_conn_id_before: connection_id|nil, current_conn_id_after: connection_id|nil, rewrites: { old_conn_id: connection_id, new_conn_id: connection_id }[], authoritative_root_epoch: integer|nil, reload_error: { error_kind: string, message: string }|nil }
-function Handler:source_reload_reconnect(id)
-  local result = self:_source_reload_silent(id, { eventful = false })
+function Handler:source_reload_reconnect(id, opts)
+  opts = opts or {}
+  local result = self:_source_reload_silent(id, {
+    eventful = false,
+    defer_current_restore = opts.defer_current_restore == true,
+  })
   if result.reload_error then
     error(result.reload_error.message)
   end
@@ -821,7 +826,7 @@ end
 
 ---@private
 ---@param source_id source_id
----@param opts? { eventful?: boolean }
+---@param opts? { eventful?: boolean, defer_current_restore?: boolean }
 ---@return { source_id: source_id, retired_conn_ids: connection_id[], new_conn_ids: connection_id[], current_conn_id_before: connection_id|nil, current_conn_id_after: connection_id|nil, rewrites: { old_conn_id: connection_id, new_conn_id: connection_id }[], authoritative_root_epoch: integer|nil, reload_error: { error_kind: string, message: string }|nil }
 function Handler:_source_reload_silent(source_id, opts)
   opts = opts or {}
@@ -883,14 +888,18 @@ function Handler:_source_reload_silent(source_id, opts)
   local current_missing_after_reload = current_conn_id_before ~= nil
     and not self:_connection_still_exists(current_conn_id_before)
   if sticky_target and sticky_target ~= self:_current_connection_id() then
-    local ok_set, set_err = pcall(self.set_current_connection, self, sticky_target)
-    if not ok_set then
-      utils.log("warn", "Failed restoring sticky current connection: " .. tostring(set_err), "core")
+    if not opts.defer_current_restore then
+      local ok_set, set_err = pcall(self.set_current_connection, self, sticky_target)
+      if not ok_set then
+        utils.log("warn", "Failed restoring sticky current connection: " .. tostring(set_err), "core")
+      end
     end
   elseif current_missing_after_reload then
-    local ok_clear, clear_err = pcall(self.connection_clear_current, self)
-    if not ok_clear then
-      utils.log("warn", "Failed clearing sticky current connection: " .. tostring(clear_err), "core")
+    if not opts.defer_current_restore then
+      local ok_clear, clear_err = pcall(self.connection_clear_current, self)
+      if not ok_clear then
+        utils.log("warn", "Failed clearing sticky current connection: " .. tostring(clear_err), "core")
+      end
     end
   end
 
