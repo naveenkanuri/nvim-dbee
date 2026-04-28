@@ -944,6 +944,59 @@ local function run_backpressure_and_sticky_contracts()
 
   env:cleanup()
 
+  local divergent_env = new_env()
+  local divergent_reopen_winid = divergent_env.winid
+  seed_drawer_root(divergent_env, "conn-alpha", divergent_env.handler:get_authoritative_root_epoch("conn-alpha"))
+  seed_drawer_root(divergent_env, "conn-beta", divergent_env.handler:get_authoritative_root_epoch("conn-beta"))
+  assert_true("divergent_samekey_alpha_seeded", divergent_env.drawer._struct_cache.root["conn-alpha"] ~= nil)
+  assert_true("divergent_samekey_beta_seeded", divergent_env.drawer._struct_cache.root["conn-beta"] ~= nil)
+  divergent_env.drawer:prepare_close()
+  local original_divergent_snapshot = divergent_env.handler.get_connection_state_snapshot
+  local replayed_divergent = false
+  divergent_env.handler.get_connection_state_snapshot = function(self, ...)
+    local snapshot = original_divergent_snapshot(self, ...)
+    if not replayed_divergent then
+      replayed_divergent = true
+      self:_dispatch_connection_invalidated(new_invalidation(2, {
+        reason = "source_update",
+        retired_conn_ids = { "conn-alpha" },
+        new_conn_ids = { "conn-beta" },
+      }))
+      self:_dispatch_connection_invalidated(new_invalidation(3, {
+        reason = "source_update",
+        retired_conn_ids = { "conn-beta" },
+        new_conn_ids = { "conn-gamma" },
+      }))
+    end
+    return snapshot
+  end
+  divergent_env.drawer:show(divergent_reopen_winid)
+  Harness.drain()
+  divergent_env.handler.get_connection_state_snapshot = original_divergent_snapshot
+  assert_eq("divergent_samekey_alpha_cleared", divergent_env.drawer._struct_cache.root["conn-alpha"], nil)
+  assert_eq("divergent_samekey_beta_cleared", divergent_env.drawer._struct_cache.root["conn-beta"], nil)
+  divergent_env:cleanup()
+
+  local divergent_lsp_env = new_env()
+  divergent_lsp_env.lsp.register_events()
+  divergent_lsp_env.runtime.structure_requests = {}
+  divergent_lsp_env.events.trigger("connection_invalidated", new_invalidation(2, {
+    reason = "source_update",
+    retired_conn_ids = { "conn-alpha" },
+    new_conn_ids = { "conn-beta" },
+  }))
+  divergent_lsp_env.events.trigger("connection_invalidated", new_invalidation(3, {
+    reason = "source_update",
+    retired_conn_ids = { "conn-beta" },
+    new_conn_ids = { "conn-gamma" },
+  }))
+  Harness.drain()
+  assert_eq("divergent_samekey_lsp_request_count", #divergent_lsp_env.runtime.structure_requests, 1)
+  assert_eq("divergent_samekey_lsp_request_conn", divergent_lsp_env.runtime.structure_requests[1].conn_id, "conn-alpha")
+  print("DCFG01_DIVERGENT_SAMEKEY_REPLAY_OK=true")
+
+  divergent_lsp_env:cleanup()
+
   local sticky_env = new_env()
   sticky_env.lsp.register_events()
   sticky_env.runtime.structure_requests = {}

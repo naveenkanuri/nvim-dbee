@@ -62,7 +62,7 @@ local utils = require("dbee.utils")
 ---@field private _replay_container_expansions table<string, table<string, boolean>>
 ---@field private _reconnect_listener_id string
 ---@field private _connection_invalidated_consumer_id string
----@field private _pending_connection_invalidations table<string, ConnectionInvalidatedEvent>
+---@field private _pending_connection_invalidations ConnectionInvalidatedEvent[]
 ---@field private _connection_invalidation_flush_scheduled boolean
 ---@field private _connection_invalidated_consumer_live boolean
 ---@field private _database_switch_state table<string, { loading: boolean, token?: { conn_id: string, request_id: integer, root_epoch: integer }, current?: string, available?: string[], error?: any }>
@@ -179,11 +179,7 @@ end
 ---@param ui DrawerUI
 ---@param data ConnectionInvalidatedEvent
 local function queue_connection_invalidation(ui, data)
-  local key = table.concat({
-    tostring(data.reason or ""),
-    tostring(data.source_id or ""),
-  }, "\x1f")
-  ui._pending_connection_invalidations[key] = data
+  ui._pending_connection_invalidations[#ui._pending_connection_invalidations + 1] = data
 end
 
 ---@param value any
@@ -1587,7 +1583,7 @@ function DrawerUI:_flush_connection_invalidations()
   end
 
   local rewarm_conn_ids = {}
-  for _, event in pairs(batched) do
+  for _, event in ipairs(batched) do
     local affected = affected_connection_ids(event)
     for conn_id in pairs(affected) do
       local node = self.tree and self.tree:get_node(conn_id)

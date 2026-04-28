@@ -56,7 +56,7 @@ METADATA_QUERIES["mssql"] = METADATA_QUERIES.sqlserver
 ---@field private _metadata_scheduled table<connection_id, boolean>
 ---@field private _metadata_call_ids table<call_id, connection_id>
 ---@field private _bootstrap_consumer_id string
----@field private _pending_connection_invalidations table<string, ConnectionInvalidatedEvent>
+---@field private _pending_connection_invalidations ConnectionInvalidatedEvent[]
 ---@field private _connection_invalidation_flush_scheduled boolean
 ---@field private _connection_invalidated_consumer_live boolean
 local M = {
@@ -573,7 +573,7 @@ function M._flush_connection_invalidations()
   end
 
   local should_rewarm = false
-  for _, event in pairs(batched) do
+  for _, event in ipairs(batched) do
     local affected = affected_connection_ids(event)
     if next(affected) == nil or affected[current.id] then
       should_rewarm = true
@@ -591,11 +591,7 @@ function M._on_connection_invalidated(data)
     return
   end
 
-  local key = table.concat({
-    tostring(data.reason or ""),
-    tostring(data.source_id or ""),
-  }, "\x1f")
-  M._pending_connection_invalidations[key] = data
+  M._pending_connection_invalidations[#M._pending_connection_invalidations + 1] = data
   if M._connection_invalidation_flush_scheduled then
     return
   end
