@@ -56,6 +56,8 @@ METADATA_QUERIES["mssql"] = METADATA_QUERIES.sqlserver
 ---@field private _metadata_scheduled table<connection_id, boolean>
 ---@field private _metadata_call_ids table<call_id, connection_id>
 ---@field private _bootstrap_consumer_id string
+---@field private _pending_connection_invalidations table<string, ConnectionInvalidatedEvent>
+---@field private _connection_invalidation_flush_scheduled boolean
 local M = {
   _client_id = nil,
   _cache = nil,
@@ -66,6 +68,8 @@ local M = {
   _metadata_scheduled = {},
   _metadata_call_ids = {},
   _bootstrap_consumer_id = "lsp",
+  _pending_connection_invalidations = {},
+  _connection_invalidation_flush_scheduled = false,
 }
 
 ---@param data ConnectionInvalidatedEvent
@@ -102,6 +106,25 @@ local function should_apply_bootstrap_invalidation(data, snapshot_epoch)
   end
 
   return false
+end
+
+---@param data ConnectionInvalidatedEvent
+---@return table<string, boolean>
+local function affected_connection_ids(data)
+  local affected = {}
+  for _, conn_id in ipairs(data and data.retired_conn_ids or {}) do
+    affected[conn_id] = true
+  end
+  for _, conn_id in ipairs(data and data.new_conn_ids or {}) do
+    affected[conn_id] = true
+  end
+  if data and data.current_conn_id_before then
+    affected[data.current_conn_id_before] = true
+  end
+  if data and data.current_conn_id_after then
+    affected[data.current_conn_id_after] = true
+  end
+  return affected
 end
 
 --- Queue a buffer for LSP attachment.
@@ -435,12 +458,17 @@ end
 
 ---@private
 ---@param data ConnectionInvalidatedEvent
-function M._on_connection_invalidated(data)
-  if data and data.silent == true then
+function M._flush_connection_invalidations()
+  M._connection_invalidation_flush_scheduled = false
+
+  if not state.is_core_loaded() then
+    M._pending_connection_invalidations = {}
     return
   end
 
-  if not state.is_core_loaded() then
+  local batched = M._pending_connection_invalidations
+  M._pending_connection_invalidations = {}
+  if not batched or next(batched) == nil then
     return
   end
 
@@ -450,23 +478,36 @@ function M._on_connection_invalidated(data)
     return
   end
 
-  local affected = {}
-  for _, conn_id in ipairs(data and data.retired_conn_ids or {}) do
-    affected[conn_id] = true
-  end
-  for _, conn_id in ipairs(data and data.new_conn_ids or {}) do
-    affected[conn_id] = true
-  end
-  if data and data.current_conn_id_before then
-    affected[data.current_conn_id_before] = true
-  end
-  if data and data.current_conn_id_after then
-    affected[data.current_conn_id_after] = true
+  local should_rewarm = false
+  for _, event in pairs(batched) do
+    local affected = affected_connection_ids(event)
+    if next(affected) == nil or affected[current.id] then
+      should_rewarm = true
+      break
+    end
   end
 
-  if next(affected) == nil or affected[current.id] then
+  if should_rewarm then
     M._request_structure_refresh(handler, current.id)
   end
+end
+
+function M._on_connection_invalidated(data)
+  if not data or data.silent == true then
+    return
+  end
+
+  local key = table.concat({
+    tostring(data.reason or ""),
+    tostring(data.source_id or ""),
+  }, "\x1f")
+  M._pending_connection_invalidations[key] = data
+  if M._connection_invalidation_flush_scheduled then
+    return
+  end
+
+  M._connection_invalidation_flush_scheduled = true
+  vim.schedule(M._flush_connection_invalidations)
 end
 
 --- Get the current status for debugging.

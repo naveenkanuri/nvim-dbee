@@ -60,6 +60,8 @@ local utils = require("dbee.utils")
 ---@field private _manual_refresh_conns table<string, boolean>
 ---@field private _replay_container_expansions table<string, table<string, boolean>>
 ---@field private _connection_invalidated_consumer_id string
+---@field private _pending_connection_invalidations table<string, ConnectionInvalidatedEvent>
+---@field private _connection_invalidation_flush_scheduled boolean
 ---@field private _struct_cache DrawerStructureCache
 ---@field private filter_text string current filter string
 ---@field private pre_filter_expansion table<string, boolean>? saved expansion before filter
@@ -557,6 +559,25 @@ local function should_apply_bootstrap_invalidation(data, snapshot_epoch)
   end
 
   return false
+end
+
+---@param data ConnectionInvalidatedEvent
+---@return table<string, boolean>
+local function affected_connection_ids(data)
+  local affected = {}
+  for _, conn_id in ipairs(data and data.retired_conn_ids or {}) do
+    affected[conn_id] = true
+  end
+  for _, conn_id in ipairs(data and data.new_conn_ids or {}) do
+    affected[conn_id] = true
+  end
+  if data and data.current_conn_id_before then
+    affected[data.current_conn_id_before] = true
+  end
+  if data and data.current_conn_id_after then
+    affected[data.current_conn_id_after] = true
+  end
+  return affected
 end
 
 ---@param ui DrawerUI
@@ -1079,6 +1100,8 @@ function DrawerUI:new(handler, editor, result, opts)
     _manual_refresh_conns = {},
     _replay_container_expansions = {},
     _connection_invalidated_consumer_id = "drawer",
+    _pending_connection_invalidations = {},
+    _connection_invalidation_flush_scheduled = false,
     _struct_cache = {
       root = {},
       root_gen = {},
@@ -1273,12 +1296,63 @@ end
 -- event listener for authoritative connection lifecycle invalidation
 ---@private
 ---@param data ConnectionInvalidatedEvent
-function DrawerUI:on_connection_invalidated(data)
-  if data and data.silent == true then
+function DrawerUI:_flush_connection_invalidations()
+  self._connection_invalidation_flush_scheduled = false
+
+  local batched = self._pending_connection_invalidations
+  self._pending_connection_invalidations = {}
+  if not batched or next(batched) == nil then
     return
   end
+
+  local rewarm_conn_ids = {}
+  for _, event in pairs(batched) do
+    local affected = affected_connection_ids(event)
+    for conn_id in pairs(affected) do
+      local node = self.tree and self.tree:get_node(conn_id)
+      if node and self._struct_cache.root[conn_id] ~= nil then
+        rewarm_conn_ids[conn_id] = true
+      end
+
+      self._manual_refresh_conns[conn_id] = nil
+      self:_prune_loaded_lazy_ids(conn_id)
+      self._struct_cache.root[conn_id] = nil
+      self._struct_cache.branches[conn_id] = nil
+      self._struct_cache.root_gen[conn_id] = self._struct_cache.root_applied[conn_id] or 0
+      self._struct_cache.root_applied[conn_id] = self._struct_cache.root_applied[conn_id] or 0
+      self._struct_cache.root_epoch[conn_id] = event.authoritative_root_epoch
+        or self.handler:get_authoritative_root_epoch(conn_id)
+    end
+  end
+
   invalidate_authoritative_caches(self)
   self:refresh()
+
+  for conn_id in pairs(rewarm_conn_ids) do
+    if self.tree:get_node(conn_id) then
+      self:request_structure_reload(conn_id, { force_new = true })
+    end
+  end
+end
+
+function DrawerUI:on_connection_invalidated(data)
+  if not data or data.silent == true then
+    return
+  end
+
+  local key = table.concat({
+    tostring(data.reason or ""),
+    tostring(data.source_id or ""),
+  }, "\x1f")
+  self._pending_connection_invalidations[key] = data
+  if self._connection_invalidation_flush_scheduled then
+    return
+  end
+
+  self._connection_invalidation_flush_scheduled = true
+  vim.schedule(function()
+    self:_flush_connection_invalidations()
+  end)
 end
 
 -- event listener for current note change

@@ -1,4 +1,5 @@
 local api = require("dbee.api")
+local state = require("dbee.api.state")
 local utils = require("dbee.utils")
 
 local M = {}
@@ -464,8 +465,10 @@ function M.reconnect_connection(conn_id, opts)
   if type(api.core.is_loaded) == "function" and not api.core.is_loaded() then
     return false, "dbee core not loaded", nil, nil
   end
-  if type(api.core.source_reload) ~= "function" then
-    return false, "source reload is not supported by current core API", nil, nil
+
+  local handler = state.handler()
+  if not handler or type(handler.source_reload_reconnect) ~= "function" then
+    return false, "silent reconnect reload is not supported by current handler", nil, nil
   end
 
   local previous_current = nil
@@ -498,10 +501,11 @@ function M.reconnect_connection(conn_id, opts)
 
   M.reset_connection_episode(conn_id)
 
-  local ok_reload, reload_err = pcall(api.core.source_reload, source_id)
+  local ok_reload, reload_result_or_err = pcall(handler.source_reload_reconnect, handler, source_id)
   if not ok_reload then
-    return false, "failed reloading connection source: " .. tostring(reload_err), nil, nil
+    return false, "failed reloading connection source: " .. tostring(reload_result_or_err), nil, nil
   end
+  local reload_result = reload_result_or_err
 
   local reloaded_conn, resolve_err = resolve_reloaded_connection(source_id, target_conn)
   if not reloaded_conn then
@@ -542,6 +546,17 @@ function M.reconnect_connection(conn_id, opts)
         )
       )
     end
+  end
+
+  local current_after = nil
+  local ok_after, current_or_err = pcall(api.core.get_current_connection)
+  if ok_after and current_or_err and current_or_err.id then
+    current_after = current_or_err.id
+  end
+  reload_result.current_conn_id_after = current_after
+
+  if reloaded_conn.id ~= conn_id then
+    handler:emit_connection_invalidated_silent("reconnect_rewrite", reload_result)
   end
 
   return true, reloaded_conn.id, reloaded_conn.name, reloaded_conn.type

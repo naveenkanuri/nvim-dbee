@@ -139,6 +139,36 @@ local function build_rewrites(previous, current)
   return rewrites
 end
 
+---@param conns ConnectionParams[]
+---@param conn_id connection_id?
+---@return boolean
+local function connection_in_list(conns, conn_id)
+  if not conn_id or conn_id == "" then
+    return false
+  end
+  for _, conn in ipairs(conns or {}) do
+    if conn and conn.id == conn_id then
+      return true
+    end
+  end
+  return false
+end
+
+---@param rewrites { old_conn_id: connection_id, new_conn_id: connection_id }[]
+---@param old_conn_id connection_id?
+---@return connection_id|nil
+local function rewrite_target_for(rewrites, old_conn_id)
+  if not old_conn_id or old_conn_id == "" then
+    return nil
+  end
+  for _, rewrite in ipairs(rewrites or {}) do
+    if rewrite.old_conn_id == old_conn_id then
+      return rewrite.new_conn_id
+    end
+  end
+  return nil
+end
+
 ---@param conn_id connection_id
 ---@param epoch integer
 ---@return string
@@ -623,6 +653,70 @@ function Handler:_affected_reload_conn_ids(result)
 end
 
 ---@private
+---@param conn_id connection_id?
+---@return boolean
+function Handler:_connection_still_exists(conn_id)
+  if not conn_id or conn_id == "" then
+    return false
+  end
+  local ok, conn = pcall(self.connection_get_params, self, conn_id)
+  return ok and conn ~= nil
+end
+
+---@private
+---@param source_id source_id
+---@param previous_connections ConnectionParams[]
+---@param current_connections ConnectionParams[]
+---@param previous_current ConnectionParams|nil
+---@param rewrites { old_conn_id: connection_id, new_conn_id: connection_id }[]
+---@return connection_id|nil
+---@return string|nil
+function Handler:_resolve_sticky_current_connection(source_id, previous_connections, current_connections, previous_current, rewrites)
+  local _ = source_id
+  if not previous_current or not previous_current.id or previous_current.id == "" then
+    return nil, nil
+  end
+
+  local previous_current_id = previous_current.id
+  local previous_in_reloaded_source = connection_in_list(previous_connections, previous_current_id)
+  if previous_in_reloaded_source then
+    if connection_in_list(current_connections, previous_current_id) then
+      return previous_current_id, nil
+    end
+
+    local rewritten = rewrite_target_for(rewrites, previous_current_id)
+    if rewritten then
+      return rewritten, nil
+    end
+
+    return nil, string.format(
+      'Sticky current connection for "%s" became ambiguous or vanished after reload',
+      tostring(previous_current.name or previous_current_id)
+    )
+  end
+
+  if self:_connection_still_exists(previous_current_id) then
+    return previous_current_id, nil
+  end
+
+  return nil, nil
+end
+
+function Handler:emit_connection_invalidated_silent(reason, result)
+  self:_emit_connection_invalidated(reason, result, { silent = true })
+end
+
+---@param id source_id
+---@return { source_id: source_id, retired_conn_ids: connection_id[], new_conn_ids: connection_id[], current_conn_id_before: connection_id|nil, current_conn_id_after: connection_id|nil, rewrites: { old_conn_id: connection_id, new_conn_id: connection_id }[], authoritative_root_epoch: integer|nil, reload_error: { error_kind: string, message: string }|nil }
+function Handler:source_reload_reconnect(id)
+  local result = self:_source_reload_silent(id, { eventful = false })
+  if result.reload_error then
+    error(result.reload_error.message)
+  end
+  return result
+end
+
+---@private
 ---@param reason string
 ---@param result table
 ---@param opts? { silent?: boolean }
@@ -681,7 +775,8 @@ function Handler:_source_reload_silent(source_id, opts)
   end
 
   local previous_connections = copy_connections(self:source_get_connections(source_id))
-  local current_conn_id_before = self:_current_connection_id()
+  local previous_current = self:get_current_connection()
+  local current_conn_id_before = previous_current and previous_current.id or nil
 
   for _, conn in ipairs(previous_connections) do
     pcall(vim.fn.DbeeDeleteConnection, conn.id)
@@ -725,13 +820,25 @@ function Handler:_source_reload_silent(source_id, opts)
   end
 
   local current_connections = copy_connections(self:source_get_connections(source_id))
+  local rewrites = build_rewrites(previous_connections, current_connections)
+  local sticky_target, sticky_warning =
+    self:_resolve_sticky_current_connection(source_id, previous_connections, current_connections, previous_current, rewrites)
+  if sticky_target and sticky_target ~= self:_current_connection_id() then
+    local ok_set, set_err = pcall(self.set_current_connection, self, sticky_target)
+    if not ok_set then
+      utils.log("warn", "Failed restoring sticky current connection: " .. tostring(set_err), "core")
+    end
+  elseif sticky_warning then
+    utils.log("warn", sticky_warning, "core")
+  end
+
   local result = {
     source_id = source_id,
     retired_conn_ids = connection_ids(previous_connections),
     new_conn_ids = connection_ids(current_connections),
     current_conn_id_before = current_conn_id_before,
     current_conn_id_after = self:_current_connection_id(),
-    rewrites = build_rewrites(previous_connections, current_connections),
+    rewrites = rewrites,
     authoritative_root_epoch = nil,
     reload_error = reload_error,
   }
