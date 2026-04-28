@@ -357,6 +357,70 @@ function dbee.focus_pane(name)
 end
 
 ---Open notes picker using snacks.nvim.
+local function note_picker_item_selectable(item)
+  return item and item.kind == "note" and item.note_id ~= nil and item.disabled ~= true
+end
+
+---@param picker table?
+local function focus_first_selectable_note_picker_item(picker)
+  if not picker or not picker.list then
+    return
+  end
+
+  local list = picker.list
+  if type(list.count) ~= "function" or type(list.current) ~= "function" or type(list.move) ~= "function" then
+    return
+  end
+  if list:count() == 0 or note_picker_item_selectable(list:current()) then
+    return
+  end
+
+  list:move(1, true, false)
+  if type(list.render) == "function" then
+    list:render()
+  end
+end
+
+---@param picker table?
+local function install_note_picker_nonselectable_rows(picker)
+  if not picker or not picker.list or type(picker.list.move) ~= "function" then
+    return
+  end
+
+  local list = picker.list
+  local original_move = list.move
+  list.move = function(self, to, absolute, render)
+    local previous = self.cursor
+    original_move(self, to, absolute, render)
+    if note_picker_item_selectable(type(self.current) == "function" and self:current() or nil) then
+      return
+    end
+
+    local step = absolute and 1 or (to < 0 and -1 or 1)
+    if step == 0 then
+      step = 1
+    end
+
+    for _ = 1, type(self.count) == "function" and self:count() or 0 do
+      local before = self.cursor
+      original_move(self, step, false, render)
+      if self.cursor == before then
+        break
+      end
+      if note_picker_item_selectable(type(self.current) == "function" and self:current() or nil) then
+        return
+      end
+    end
+
+    original_move(self, previous, true, render)
+  end
+
+  focus_first_selectable_note_picker_item(picker)
+  vim.schedule(function()
+    focus_first_selectable_note_picker_item(picker)
+  end)
+end
+
 local function append_note_picker_row(items, row)
   local index = #items + 1
   row.idx = index
@@ -377,12 +441,14 @@ local function append_note_picker_section(items, title, notes, tag, empty_hint)
   append_note_picker_row(items, {
     kind = "header",
     text = title,
+    disabled = true,
   })
 
   if #notes == 0 then
     append_note_picker_row(items, {
       kind = "hint",
       text = empty_hint,
+      disabled = true,
     })
     return
   end
@@ -437,7 +503,7 @@ function dbee.pick_notes()
     max_tag_len = math.max(max_tag_len, #(item.tag or ""))
   end
 
-  require("snacks").picker({
+  local picker = require("snacks").picker({
     title = "Dbee Notes",
     items = items,
     format = function(item)
@@ -466,6 +532,7 @@ function dbee.pick_notes()
       api.ui.editor_set_current_note(item.note_id)
     end,
   })
+  install_note_picker_nonselectable_rows(picker)
 end
 
 ---Open connections picker using snacks.nvim.

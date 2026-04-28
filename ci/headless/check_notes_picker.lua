@@ -143,10 +143,32 @@ package.loaded["dbee.variables"] = {
 
 package.loaded["snacks"] = {
   picker = function(opts)
-    runtime.picker_calls[#runtime.picker_calls + 1] = {
+    local picker = {
       opts = opts,
+      list = {
+        items = opts.items,
+        cursor = 1,
+        render_calls = 0,
+        count = function(self)
+          return #self.items
+        end,
+        current = function(self)
+          return self.items[self.cursor]
+        end,
+        move = function(self, to, absolute)
+          if absolute then
+            self.cursor = math.max(1, math.min(#self.items, to))
+          else
+            self.cursor = math.max(1, math.min(#self.items, self.cursor + to))
+          end
+        end,
+        render = function(self)
+          self.render_calls = self.render_calls + 1
+        end,
+      },
     }
-    return runtime.picker_calls[#runtime.picker_calls]
+    runtime.picker_calls[#runtime.picker_calls + 1] = picker
+    return picker
   end,
 }
 
@@ -175,6 +197,12 @@ local function picker_items()
   local picker = current_picker()
   assert_true("picker_present", picker ~= nil)
   return picker.opts.items
+end
+
+local function picker_current_item()
+  local picker = current_picker()
+  assert_true("picker_present_for_current", picker ~= nil)
+  return picker.list:current()
 end
 
 local function picker_item_names()
@@ -335,13 +363,13 @@ do
   })
   dbee.pick_notes()
   local items = picker_items()
+  assert_true("header_row_disabled", items[1].disabled == true)
+  assert_true("current_item_skips_header", picker_current_item().kind == "note")
+  current_picker().list:move(-1, false)
+  assert_true("move_up_skips_header", picker_current_item().kind == "note")
+  current_picker().list:move(1, false)
+  assert_true("move_down_skips_section_header", picker_current_item().kind == "note")
 
-  local header_picker = confirm_with(items[1])
-  assert_eq("header_guard_close_calls", header_picker.close_calls, 0)
-  assert_eq("header_guard_set_note_calls", #runtime.set_current_note_calls, 0)
-  assert_match("header_guard_warn", last_notification().msg, "Select a note row")
-
-  clear_notifications()
   local nil_picker = confirm_with(nil)
   assert_eq("nil_guard_close_calls", nil_picker.close_calls, 0)
   assert_eq("nil_guard_set_note_calls", #runtime.set_current_note_calls, 0)
@@ -366,10 +394,8 @@ do
     local_notes = {},
   })
   dbee.pick_notes()
-  local hint_picker = confirm_with(picker_items()[4])
-  assert_eq("hint_guard_close_calls", hint_picker.close_calls, 0)
-  assert_eq("hint_guard_set_note_calls", #runtime.set_current_note_calls, 0)
-  assert_match("hint_guard_warn", last_notification().msg, "Select a note row")
+  assert_true("hint_row_disabled", picker_items()[4].disabled == true)
+  assert_true("hint_row_skipped_by_navigation", picker_current_item().kind == "note")
 
   clear_notifications()
   set_notes({
