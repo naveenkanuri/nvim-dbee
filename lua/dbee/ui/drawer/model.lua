@@ -54,7 +54,7 @@ local function connection_coverage(handler, structure_cache)
     local source_id = source:name()
     for _, conn in ipairs(handler:source_get_connections(source_id)) do
       coverage.total_connections = coverage.total_connections + 1
-      local cached = structure_cache and structure_cache[conn.id]
+      local cached = structure_cache and structure_cache.root and structure_cache.root[conn.id] or structure_cache and structure_cache[conn.id]
       if cached and not cached.error then
         coverage.ready_connections = coverage.ready_connections + 1
       end
@@ -143,7 +143,7 @@ function M.build_search_model(handler, structure_cache)
     local source_children = {}
 
     for _, conn in ipairs(handler:source_get_connections(source_id)) do
-      local cached = structure_cache and structure_cache[conn.id]
+      local cached = structure_cache and structure_cache.root and structure_cache.root[conn.id] or structure_cache and structure_cache[conn.id]
       if cached and not cached.error then
         table.insert(source_children, {
           id = conn.id,
@@ -182,14 +182,14 @@ end
 ---@param opts? { disable_help?: boolean }
 ---@return DrawerRenderNode[] render_model
 ---@return DrawerModelCoverage coverage
-function M.build_rendered_model(handler, editor, result, structure_cache, current_conn_id, refresh_cb, opts)
+function M.build_tree_from_struct_cache(handler, editor, result, structure_cache, current_conn_id, refresh_cb, opts)
   local _ = editor
   local _current = current_conn_id
   local _refresh = refresh_cb
   local _opts = opts
 
   local coverage = connection_coverage(handler, structure_cache)
-  local handler_nodes = convert.handler_nodes(handler, result, structure_cache)
+  local handler_nodes = convert.handler_nodes(handler, result, structure_cache, opts)
   local render_model = {}
 
   for _, node in ipairs(handler_nodes) do
@@ -197,6 +197,10 @@ function M.build_rendered_model(handler, editor, result, structure_cache, curren
   end
 
   return render_model, coverage
+end
+
+function M.build_rendered_model(handler, editor, result, structure_cache, current_conn_id, refresh_cb, opts)
+  return M.build_tree_from_struct_cache(handler, editor, result, structure_cache, current_conn_id, refresh_cb, opts)
 end
 
 M.SEARCHABLE_TYPES = SEARCHABLE_TYPES

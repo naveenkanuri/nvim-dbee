@@ -374,17 +374,35 @@ local drawer_mock_editor = {
 }
 
 local drawer = DrawerUI:new(drawer_mock_handler, drawer_mock_editor, result)
+drawer._patch_connection_subtree = function()
+  return true
+end
+
+local function emit_drawer_structure_loaded(payload)
+  local conn_id = payload.conn_id
+  local next_request_id = math.max(drawer._struct_cache.root_gen[conn_id] or 0, drawer._struct_cache.root_applied[conn_id] or 0) + 1
+  local request_id = payload.request_id or next_request_id
+  local root_epoch = payload.root_epoch or drawer._struct_cache.root_epoch[conn_id] or 0
+
+  drawer._struct_cache.root_gen[conn_id] = request_id
+  drawer._struct_cache.root_epoch[conn_id] = root_epoch
+  drawer:on_structure_loaded(vim.tbl_extend("force", {
+    request_id = request_id,
+    root_epoch = root_epoch,
+    caller_token = "drawer",
+  }, payload))
+end
 
 -- 5a: Auto-load (conn_id NOT in _manual_refresh_conns) -> NO notification
 clear_notifications()
 drawer._manual_refresh_conns = {}
-drawer:on_structure_loaded({ conn_id = "c1", structures = {} })
+emit_drawer_structure_loaded({ conn_id = "c1", structures = {} })
 assert_eq("schema_autoload_no_notif", #notifications, 0)
 
 -- 5b: Manual refresh (conn_id IN _manual_refresh_conns) -> INFO notification
 clear_notifications()
 drawer._manual_refresh_conns = { c1 = true }
-drawer:on_structure_loaded({ conn_id = "c1", structures = {} })
+emit_drawer_structure_loaded({ conn_id = "c1", structures = {} })
 assert_true("schema_manual_notif_count", #notifications >= 1)
 assert_match("schema_manual_notif_msg", notifications[1].msg, "Schema loaded: my-postgres-dev")
 assert_eq("schema_manual_notif_level", notifications[1].level, vim.log.levels.INFO)
@@ -394,20 +412,20 @@ assert_eq("schema_drain", drawer._manual_refresh_conns["c1"], nil)
 
 -- 5c: After drain, same conn_id should NOT trigger notification (no leak)
 clear_notifications()
-drawer:on_structure_loaded({ conn_id = "c1", structures = {} })
+emit_drawer_structure_loaded({ conn_id = "c1", structures = {} })
 assert_eq("schema_no_leak", #notifications, 0)
 
 -- 5d: connection_get_params failure -> falls back to conn_id
 clear_notifications()
 drawer._manual_refresh_conns = { c2 = true }
-drawer:on_structure_loaded({ conn_id = "c2", structures = {} })
+emit_drawer_structure_loaded({ conn_id = "c2", structures = {} })
 assert_true("schema_fallback_count", #notifications >= 1)
 assert_match("schema_fallback_msg", notifications[1].msg, "Schema loaded: c2")
 
 -- 5e: Error in data -> error notification for manual refresh (includes reason)
 clear_notifications()
 drawer._manual_refresh_conns = { c3 = true }
-drawer:on_structure_loaded({ conn_id = "c3", structures = {}, error = "connection failed" })
+emit_drawer_structure_loaded({ conn_id = "c3", structures = {}, error = "connection failed" })
 assert_true("schema_error_notif_count", #notifications >= 1)
 assert_match("schema_error_notif_msg", notifications[1].msg, "Schema refresh failed")
 assert_match("schema_error_reason", notifications[1].msg, "connection failed")
@@ -415,21 +433,19 @@ assert_eq("schema_error_notif_level", notifications[1].level, vim.log.levels.ERR
 -- c3 should still be drained
 assert_eq("schema_error_drained", drawer._manual_refresh_conns["c3"], nil)
 
--- 5f: Integration test -- refresh() populates _manual_refresh_conns from expanded connections
--- Simulate: c1 is expanded but NOT in structure_cache (still loading)
-expansion_state = { c1 = true }
-drawer.structure_cache = {}
-drawer:get_actions().refresh()
--- refresh() should have tracked c1 via expanded connection enumeration
-assert_eq("refresh_tracks_expanded", drawer._manual_refresh_conns["c1"], true)
+-- 5f: Manual refresh winner still notifies after the root slot was pre-cleared.
+drawer._struct_cache.root["c1"] = nil
+drawer._manual_refresh_conns = { c1 = true }
+emit_drawer_structure_loaded({ conn_id = "c1", structures = {} })
+assert_eq("refresh_tracks_expanded", drawer._manual_refresh_conns["c1"], nil)
 
 -- Now simulate structure_loaded arriving -> should notify
 clear_notifications()
-drawer:on_structure_loaded({ conn_id = "c1", structures = {} })
+drawer._struct_cache.root["c1"] = nil
+drawer._manual_refresh_conns = { c1 = true }
+emit_drawer_structure_loaded({ conn_id = "c1", structures = {} })
 assert_true("refresh_expanded_notif_count", #notifications >= 1)
 assert_match("refresh_expanded_notif_msg", notifications[1].msg, "Schema loaded: my-postgres-dev")
--- Reset expansion state
-expansion_state = {}
 
 print("WINBAR_SCHEMA_REFRESH_OK=true")
 

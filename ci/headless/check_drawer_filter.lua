@@ -480,6 +480,35 @@ local function new_fixture(opts)
       counters.async = counters.async + 1
       counters.last_async = { conn_id = conn_id, request_id = request_id }
     end,
+    connection_get_columns_async = function(_, conn_id, request_id, branch_id, root_epoch, table_opts)
+      counters.columns = counters.columns + 1
+      counters.last_columns_async = {
+        conn_id = conn_id,
+        request_id = request_id,
+        branch_id = branch_id,
+        root_epoch = root_epoch,
+        table = table_opts and table_opts.table or nil,
+        schema = table_opts and table_opts.schema or nil,
+        materialization = table_opts and table_opts.materialization or nil,
+      }
+      local columns = columns_by_table[table.concat({
+        conn_id,
+        table_opts and table_opts.schema or "",
+        table_opts and table_opts.table or "",
+      }, "|")] or {}
+      vim.schedule(function()
+        if handler_listeners.structure_children_loaded then
+          handler_listeners.structure_children_loaded({
+            conn_id = conn_id,
+            request_id = request_id,
+            branch_id = branch_id,
+            root_epoch = root_epoch,
+            kind = table_opts and table_opts.kind or "columns",
+            columns = vim.deepcopy(columns),
+          })
+        end
+      end)
+    end,
     connection_get_columns = function(_, conn_id, table_opts)
       counters.columns = counters.columns + 1
       return columns_by_table[table.concat({ conn_id, table_opts.schema or "", table_opts.table or "" }, "|")] or {}
@@ -575,11 +604,16 @@ local function new_fixture(opts)
     mappings = mappings,
   })
 
-  drawer.structure_cache = opts.structure_cache or {
+  drawer._struct_cache.root = vim.deepcopy(opts.structure_cache or {
     ["conn-ready"] = { structures = vim.deepcopy(default_structures) },
     ["conn-alt"] = { structures = vim.deepcopy(alt_structures) },
     ["conn-error"] = { error = "boom" },
-  }
+  })
+  drawer._struct_cache.root_gen = {}
+  drawer._struct_cache.root_applied = {}
+  drawer._struct_cache.root_epoch = {}
+  drawer._struct_cache.loaded_lazy_ids = {}
+  drawer._struct_cache.branches = {}
 
   local real_refresh = drawer.refresh
   drawer.refresh_count = 0
@@ -625,6 +659,7 @@ local employees_id = convert.structure_node_id(hr_schema_id, { type = "table", n
 local departments_id = convert.structure_node_id(hr_schema_id, { type = "table", name = "departments", schema = "hr" })
 local employee_view_id = convert.structure_node_id(hr_schema_id, { type = "view", name = "employee_view", schema = "hr" })
 local employee_col_id = convert.column_node_id(employees_id, { type = "NUMBER", name = "employee_id" })
+local ops_schema_id = convert.structure_node_id(conn_id, { type = "schema", name = "ops", schema = "ops" })
 local db_switch_id = conn_id .. "_database_switch__"
 
 set_current_node(fixture.winid, drawer.tree, source_id)
@@ -635,8 +670,10 @@ set_current_node(fixture.winid, drawer.tree, hr_schema_id)
 drawer:get_actions().expand()
 set_current_node(fixture.winid, drawer.tree, employees_id)
 drawer:get_actions().expand()
+vim.wait(20, function() return false end, 1)
 set_current_node(fixture.winid, drawer.tree, departments_id)
 drawer:get_actions().expand()
+vim.wait(20, function() return false end, 1)
 drawer:get_actions().collapse()
 
 local baseline_columns = counters.columns
@@ -755,10 +792,11 @@ session = stub_filter_sessions[#stub_filter_sessions]
 session:change("emp")
 set_current_node(fixture.winid, drawer.tree, employees_id)
 session.opts.forward_insert["<Tab>"]()
+vim.wait(20, function() return false end, 1)
 set_current_node(fixture.winid, drawer.tree, employee_col_id)
 session:submit("emp")
 assert_eq("a11_submit_column_focus", drawer.tree:get_node():get_id(), employee_col_id)
-assert_true("a11_column_rpc_happened", counters.columns >= 1)
+assert_eq("a11_zero_replay_column_rpc", counters.columns, 0)
 print("DRAW01_A11_OK=true")
 
 drawer:get_actions().filter()
@@ -909,15 +947,33 @@ session = stub_filter_sessions[#stub_filter_sessions]
 session:change("emp")
 set_current_node(fixture.winid, drawer.tree, employees_id)
 session.opts.forward_insert["<Tab>"]()
+vim.wait(20, function() return false end, 1)
 set_current_node(fixture.winid, drawer.tree, employee_col_id)
-local original_columns = fixture.handler.connection_get_columns
-fixture.handler.connection_get_columns = function()
-  counters.columns = counters.columns + 1
-  return {}
+drawer.filter_restore_snapshot = vim.deepcopy(drawer.filter_restore_snapshot)
+local stripped_column_from_snapshot = false
+for _, snapshot_node in ipairs(drawer.filter_restore_snapshot or {}) do
+  if snapshot_node.id == source_id then
+    for _, source_child in ipairs(snapshot_node.children or {}) do
+      if source_child.id == conn_id then
+        for _, conn_child in ipairs(source_child.children or {}) do
+          if conn_child.id == hr_schema_id then
+            for _, table_child in ipairs(conn_child.children or {}) do
+              if table_child.id == employees_id then
+                table_child.children = {}
+                table_child.rendered_children_loaded = false
+                table_child.lazy_children = nil
+                stripped_column_from_snapshot = true
+              end
+            end
+          end
+        end
+      end
+    end
+  end
 end
+assert_true("a14_snapshot_column_removed", stripped_column_from_snapshot)
 clear_notifications()
 session:submit("emp")
-fixture.handler.connection_get_columns = original_columns
 assert_eq("a14_fallback_focus", drawer.tree:get_node():get_id(), employees_id)
 assert_match("a14_warn_fallback", last_notification().msg, "nearest restored ancestor")
 print("DRAW01_A14_OK=true")
@@ -945,25 +1001,45 @@ end)
 
 assert_eq("a15_db_switch_no_generic_cb", db_refresh_cb_calls, 0)
 assert_true("a15_filter_interrupted_on_db_switch", drawer.filter_input == nil)
-assert_eq("a15_structure_cache_cleared", drawer.structure_cache[conn_id], nil)
-assert_true("a15_request_recorded", drawer.structure_request_gen[conn_id] ~= nil)
+assert_eq("a15_structure_cache_cleared", drawer._struct_cache.root[conn_id], nil)
+assert_true("a15_request_recorded", drawer._struct_cache.root_gen[conn_id] ~= nil)
 assert_eq("a15_no_refresh_before_winner", drawer.refresh_count, 0)
 
-local pending_request_id = drawer.structure_request_gen[conn_id]
-drawer:on_structure_loaded({ conn_id = conn_id, request_id = pending_request_id - 1, structures = alt_structures })
+local pending_request_id = drawer._struct_cache.root_gen[conn_id]
+local pending_root_epoch = drawer._struct_cache.root_epoch[conn_id]
+drawer:on_structure_loaded({
+  conn_id = conn_id,
+  request_id = pending_request_id - 1,
+  root_epoch = pending_root_epoch,
+  caller_token = "drawer",
+  structures = alt_structures,
+})
 assert_eq("a15_stale_refresh_ignored", drawer.refresh_count, 0)
-assert_eq("a15_stale_cache_ignored", drawer.structure_cache[conn_id], nil)
+assert_eq("a15_stale_cache_ignored", drawer._struct_cache.root[conn_id], nil)
 
-drawer:on_structure_loaded({ conn_id = conn_id, request_id = pending_request_id, structures = alt_structures })
-assert_eq("a15_winning_refresh_runs_once", drawer.refresh_count, 1)
-assert_true("a15_winning_cache_updates", drawer.structure_cache[conn_id] ~= nil)
-assert_eq("a15_request_preserved", drawer.structure_request_gen[conn_id], pending_request_id)
-assert_eq("a15_applied_gen_recorded", drawer.structure_applied_gen[conn_id], pending_request_id)
+drawer:on_structure_loaded({
+  conn_id = conn_id,
+  request_id = pending_request_id,
+  root_epoch = pending_root_epoch,
+  caller_token = "drawer",
+  structures = alt_structures,
+})
+assert_eq("a15_winning_no_global_refresh", drawer.refresh_count, 0)
+assert_true("a15_winning_cache_updates", drawer._struct_cache.root[conn_id] ~= nil)
+assert_eq("a15_request_preserved", drawer._struct_cache.root_gen[conn_id], pending_request_id)
+assert_eq("a15_applied_gen_recorded", drawer._struct_cache.root_applied[conn_id], pending_request_id)
+assert_true("a15_winning_tree_patch", drawer.tree:get_node(ops_schema_id) ~= nil)
 
-drawer:on_structure_loaded({ conn_id = conn_id, request_id = pending_request_id - 1, structures = default_structures })
-assert_eq("a15_stale_after_fresh_refresh_ignored", drawer.refresh_count, 1)
-assert_eq("a15_stale_after_fresh_cache_kept", drawer.structure_cache[conn_id].structures[1].name, "ops")
-assert_eq("a15_applied_gen_retained", drawer.structure_applied_gen[conn_id], pending_request_id)
+drawer:on_structure_loaded({
+  conn_id = conn_id,
+  request_id = pending_request_id - 1,
+  root_epoch = pending_root_epoch,
+  caller_token = "drawer",
+  structures = default_structures,
+})
+assert_eq("a15_stale_after_fresh_refresh_ignored", drawer.refresh_count, 0)
+assert_eq("a15_stale_after_fresh_cache_kept", drawer._struct_cache.root[conn_id].structures[1].name, "ops")
+assert_eq("a15_applied_gen_retained", drawer._struct_cache.root_applied[conn_id], pending_request_id)
 
 drawer:get_actions().filter()
 session = stub_filter_sessions[#stub_filter_sessions]

@@ -6,6 +6,7 @@ local M = {}
 
 local ID_SEP = "\x1f"
 local SEGMENT_SEP = ":"
+local LOAD_MORE_SUFFIX = ID_SEP .. "__load_more__"
 
 ---@param value string?
 ---@return string
@@ -70,15 +71,66 @@ local function column_nodes(parent_id, columns)
 end
 
 M.column_nodes = column_nodes
+M.ID_SEP = ID_SEP
+M.LOAD_MORE_SUFFIX = LOAD_MORE_SUFFIX
+
+---@param parent_id string
+---@return string
+function M.load_more_node_id(parent_id)
+  return parent_id .. LOAD_MORE_SUFFIX
+end
+
+---@param id string
+---@param name string
+---@return DrawerUINode
+function M.message_node(id, name)
+  return NuiTree.Node({
+    id = id,
+    name = name,
+    type = "",
+  }) --[[@as DrawerUINode]]
+end
+
+---@param parent_id string
+---@return DrawerUINode
+function M.loading_node(parent_id)
+  return M.message_node(parent_id .. ID_SEP .. "__loading__", "loading...")
+end
+
+---@param parent_id string
+---@param err any
+---@return DrawerUINode
+function M.error_node(parent_id, err)
+  return M.message_node(parent_id .. ID_SEP .. "__error__", tostring(err))
+end
+
+---@param branch_id string
+---@param kind string
+---@return DrawerUINode
+function M.load_more_node(branch_id, kind)
+  return NuiTree.Node({
+    id = M.load_more_node_id(branch_id),
+    name = "Load more...",
+    type = "load_more",
+    structure_load_more = {
+      branch_id = branch_id,
+      kind = kind,
+    },
+  }) --[[@as DrawerUINode]]
+end
 
 ---@param node DrawerUINode|table
 ---@param handler Handler
 ---@param result ResultUI
 ---@param conn_id string
 ---@param struct { id: string, name: string, schema?: string, type: string }
+---@param lazy_children_factory? fun(): DrawerUINode[]
 --- INVARIANT: struct.type MUST be passed through as the materialization.
-function M.decorate_structure_node(node, handler, result, conn_id, struct)
+function M.decorate_structure_node(node, handler, result, conn_id, struct, lazy_children_factory)
   if struct.type ~= "table" and struct.type ~= "view" and struct.type ~= "procedure" and struct.type ~= "function" then
+    if type(lazy_children_factory) == "function" then
+      node.lazy_children = lazy_children_factory
+    end
     return node
   end
 
@@ -107,7 +159,9 @@ function M.decorate_structure_node(node, handler, result, conn_id, struct)
     }
   end
 
-  if struct.type == "table" or struct.type == "view" then
+  if type(lazy_children_factory) == "function" then
+    node.lazy_children = lazy_children_factory
+  elseif struct.type == "table" or struct.type == "view" then
     node.lazy_children = function()
       return column_nodes(struct.id, handler:connection_get_columns(conn_id, table_opts))
     end
@@ -184,8 +238,13 @@ end
 ---@param conn ConnectionParams
 ---@param result ResultUI
 ---@param structure_cache table
+---@param opts? { connection_children?: fun(conn: ConnectionParams, source_meta: table): DrawerUINode[] }
 ---@return DrawerUINode[]
-local function connection_nodes(handler, conn, result, structure_cache)
+local function connection_nodes(handler, conn, result, structure_cache, opts)
+  if opts and type(opts.connection_children) == "function" then
+    return opts.connection_children(conn)
+  end
+
   ---@param structs DBStructure[]
   ---@param parent_id string
   ---@return DrawerUINode[]
@@ -225,17 +284,17 @@ local function connection_nodes(handler, conn, result, structure_cache)
 
   -- check cache for async-loaded structure
   local parent_id = conn.id
-  local cached = structure_cache and structure_cache[conn.id]
+  local cached = structure_cache and structure_cache.root and structure_cache.root[conn.id] or structure_cache and structure_cache[conn.id]
   local structs
   if cached then
     if cached.error then
-      return { NuiTree.Node({ id = parent_id .. "__error__", name = tostring(cached.error), type = "" }) }
+      return { M.error_node(parent_id, cached.error) }
     end
     structs = cached.structures or {}
   else
     -- trigger async load and show loading indicator
     handler:connection_get_structure_async(conn.id)
-    return { NuiTree.Node({ id = parent_id .. "__loading__", name = "loading...", type = "" }) }
+    return { M.loading_node(parent_id) }
   end
 
   -- recursively parse structure to drawer nodes
@@ -267,8 +326,9 @@ end
 ---@param handler Handler
 ---@param result ResultUI
 ---@param structure_cache table
+---@param opts? { connection_children?: fun(conn: ConnectionParams): DrawerUINode[] }
 ---@return DrawerUINode[]
-local function handler_real_nodes(handler, result, structure_cache)
+local function handler_real_nodes(handler, result, structure_cache, opts)
   ---@type DrawerUINode[]
   local nodes = {}
 
@@ -340,7 +400,7 @@ local function handler_real_nodes(handler, result, structure_cache)
         name = conn.name,
         type = "connection",
         lazy_children = function()
-          return connection_nodes(handler, conn, result, structure_cache)
+          return connection_nodes(handler, conn, result, structure_cache, opts)
         end,
       } --[[@as DrawerUINode]]
 
@@ -400,13 +460,14 @@ end
 ---@param handler Handler
 ---@param result ResultUI
 ---@param structure_cache table
+---@param opts? { connection_children?: fun(conn: ConnectionParams): DrawerUINode[] }
 ---@return DrawerUINode[]
-function M.handler_nodes(handler, result, structure_cache)
+function M.handler_nodes(handler, result, structure_cache, opts)
   -- in case there are no sources defined, return helper nodes
   if #handler:get_sources() < 1 then
     return handler_help_nodes()
   end
-  return handler_real_nodes(handler, result, structure_cache)
+  return handler_real_nodes(handler, result, structure_cache, opts)
 end
 
 -- whitespace between nodes

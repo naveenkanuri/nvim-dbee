@@ -27,13 +27,22 @@ local utils = require("dbee.utils")
 ---@class DrawerUINode: NuiTree.Node
 ---@field id string unique identifier
 ---@field name string display name
----@field type ""|"table"|"view"|"procedure"|"function"|"column"|"history"|"note"|"connection"|"database_switch"|"add"|"edit"|"remove"|"help"|"source"|"separator" type of node
+---@field type ""|"table"|"view"|"procedure"|"function"|"column"|"history"|"note"|"connection"|"database_switch"|"add"|"edit"|"remove"|"help"|"source"|"separator"|"load_more" type of node
 ---@field schema? string
 ---@field raw_name? string
 ---@field action_1? drawer_node_action primary action if function takes a second selection parameter, pick_items get picked before the call
 ---@field action_2? drawer_node_action secondary action if function takes a second selection parameter, pick_items get picked before the call
 ---@field action_3? drawer_node_action tertiary action if function takes a second selection parameter, pick_items get picked before the call
 ---@field lazy_children? fun():DrawerUINode[] lazy loaded child nodes
+---@field structure_load_more? { branch_id: string, kind: string }
+
+---@class DrawerStructureCache
+---@field root table<string, { structures?: DBStructure[], error?: any }>
+---@field root_gen table<string, integer>
+---@field root_applied table<string, integer>
+---@field root_epoch table<string, integer>
+---@field loaded_lazy_ids table<string, boolean>
+---@field branches table<string, table<string, { raw?: Column[], error?: any, built_count: integer, render_limit: integer, request_gen: integer, applied_gen: integer, loading: boolean }>>
 
 ---@class DrawerUI
 ---@field private tree NuiTree
@@ -49,7 +58,8 @@ local utils = require("dbee.utils")
 ---@field private current_note_id? note_id current active note
 ---@field private pending_generated_calls table<string, { note_id: note_id, fallback_template: string }>
 ---@field private _manual_refresh_conns table<string, boolean>
----@field private structure_cache table<string, { structures: DBStructure[]?, error: any }>
+---@field private _replay_container_expansions table<string, table<string, boolean>>
+---@field private _struct_cache DrawerStructureCache
 ---@field private filter_text string current filter string
 ---@field private pre_filter_expansion table<string, boolean>? saved expansion before filter
 ---@field private pre_filter_cursor integer[]? saved cursor position {row, col} before filter
@@ -61,9 +71,6 @@ local utils = require("dbee.utils")
 ---@field private filter_debounce_ms integer debounce window for live apply
 ---@field private pending_filter_text? string latest queued filter text
 ---@field private filter_timer? uv_timer_t
----@field private loaded_lazy_ids table<string, boolean> tracks branches whose lazy children were materialized at least once, even if they loaded empty
----@field private structure_request_gen table<string, integer> latest requested request_id per connection for DB-switch stale-load rejection
----@field private structure_applied_gen table<string, integer> latest applied request_id per connection so stale-after-fresh loads are ignored
 ---@field private cached_search_model? { nodes: table[], coverage: DrawerModelCoverage } immutable search corpus reused across repeated filter starts within the same authoritative drawer generation
 ---@field private cached_render_snapshot? DrawerRenderSnapshotNode[] baseline rendered-tree snapshot reused across repeated filter starts while the rendered tree is unchanged
 ---@field private filter_cached_connections integer ready cached connections in the current filter session
@@ -80,6 +87,14 @@ local SEARCHABLE_TYPES = drawer_model.SEARCHABLE_TYPES or {
 }
 
 local SNAPSHOT_ID_SEP = "\x1f"
+local ID_SEP = convert.ID_SEP or "\x1f"
+local LOAD_MORE_SUFFIX = convert.LOAD_MORE_SUFFIX or (ID_SEP .. "__load_more__")
+local COLUMNS_KIND = "columns"
+local CHILD_CHUNK_SIZE = 1000
+local TABLE_LIKE_TYPES = {
+  table = true,
+  view = true,
+}
 
 local function normalize_mapping_lhs(key)
   return vim.api.nvim_replace_termcodes(key, true, true, true)
@@ -119,7 +134,7 @@ end
 ---@param ui DrawerUI
 ---@param node_id string
 local function mark_lazy_loaded(ui, node_id)
-  ui.loaded_lazy_ids[node_id] = true
+  ui._struct_cache.loaded_lazy_ids[node_id] = true
 end
 
 ---@param ui DrawerUI
@@ -138,6 +153,105 @@ end
 local function invalidate_authoritative_caches(ui)
   ui.cached_search_model = nil
   ui.cached_render_snapshot = nil
+end
+
+---@param ui DrawerUI
+local function invalidate_render_snapshot(ui)
+  ui.cached_render_snapshot = nil
+end
+
+---@param value any
+---@return integer
+local function normalize_root_epoch(value)
+  if value == nil or value == vim.NIL then
+    return 0
+  end
+  return tonumber(value) or 0
+end
+
+---@param branch_id string
+---@param kind? string
+---@return string
+local function branch_cache_key(branch_id, kind)
+  return branch_id .. ID_SEP .. (kind or COLUMNS_KIND)
+end
+
+---@param ui DrawerUI
+---@param conn_id string
+---@return integer
+local function current_root_epoch(ui, conn_id)
+  return ui._struct_cache.root_epoch[conn_id] or 0
+end
+
+---@param ui DrawerUI
+---@param conn_id string
+---@return boolean
+local function root_request_pending(ui, conn_id)
+  local requested = ui._struct_cache.root_gen[conn_id] or 0
+  local applied = ui._struct_cache.root_applied[conn_id] or 0
+  return requested > applied and ui._struct_cache.root[conn_id] == nil
+end
+
+---@param ui DrawerUI
+---@param conn_id string
+---@param branch_id string
+---@param kind? string
+---@param create? boolean
+---@return { raw?: Column[], error?: any, built_count: integer, render_limit: integer, request_gen: integer, applied_gen: integer, loading: boolean }?
+local function branch_state(ui, conn_id, branch_id, kind, create)
+  local conn_branches = ui._struct_cache.branches[conn_id]
+  if not conn_branches and create then
+    conn_branches = {}
+    ui._struct_cache.branches[conn_id] = conn_branches
+  end
+  if not conn_branches then
+    return nil
+  end
+
+  local key = branch_cache_key(branch_id, kind)
+  if not conn_branches[key] and create then
+    conn_branches[key] = {
+      raw = nil,
+      error = nil,
+      built_count = 0,
+      render_limit = CHILD_CHUNK_SIZE,
+      request_gen = 0,
+      applied_gen = 0,
+      loading = false,
+    }
+  end
+
+  return conn_branches[key]
+end
+
+---@param children any[]?
+---@return any[]
+local function normalize_children(children)
+  if not children or children == vim.NIL then
+    return {}
+  end
+  return children
+end
+
+---@param structs DBStructure[]?
+---@return DBStructure[]
+local function sorted_struct_children(structs)
+  local sorted = {}
+  for _, struct in ipairs(normalize_children(structs)) do
+    table.insert(sorted, struct)
+  end
+
+  table.sort(sorted, function(a, b)
+    return tostring(a.type or "") .. tostring(a.name or "") < tostring(b.type or "") .. tostring(b.name or "")
+  end)
+
+  return sorted
+end
+
+---@param branch_id string
+---@return string
+local function load_more_node_id(branch_id)
+  return branch_id .. LOAD_MORE_SUFFIX
 end
 
 ---@param snapshot_nodes DrawerRenderSnapshotNode[]?
@@ -213,7 +327,7 @@ local function snapshot_rendered_tree(ui, tree, parent_id)
   local snapshot = {}
   for _, node in ipairs(tree:get_nodes(parent_id)) do
     local children = snapshot_rendered_tree(ui, tree, node:get_id())
-    local was_materialized = ui.loaded_lazy_ids[node:get_id()] == true or node:is_expanded() or #children > 0
+    local was_materialized = ui._struct_cache.loaded_lazy_ids[node:get_id()] == true or node:is_expanded() or #children > 0
     table.insert(snapshot, {
       id = node.id,
       name = node.name,
@@ -257,13 +371,12 @@ local function sorted_expansion_ids(expansion_ids)
   return ids
 end
 
+---@param ui DrawerUI
 ---@param node table
 ---@param inherited_conn_id string?
----@param handler Handler
----@param result_ui ResultUI
 ---@param children? DrawerUINode[]
 ---@return DrawerUINode
-local function searchable_node_to_tree_node(node, inherited_conn_id, handler, result_ui, children)
+local function searchable_node_to_tree_node(ui, node, inherited_conn_id, children)
   local conn_id = node.type == "connection" and (node.conn_id or node.id) or inherited_conn_id
   local tree_node = NuiTree.Node({
     id = node.id,
@@ -274,14 +387,21 @@ local function searchable_node_to_tree_node(node, inherited_conn_id, handler, re
   }, children) --[[@as DrawerUINode]]
 
   if node.type == "connection" and node.source_meta then
-    convert.decorate_connection_node(tree_node, handler, node.source_meta, conn_id or node.id)
+    convert.decorate_connection_node(tree_node, ui.handler, node.source_meta, conn_id or node.id)
   elseif SEARCHABLE_TYPES[node.type] then
-    convert.decorate_structure_node(tree_node, handler, result_ui, conn_id or "", node.struct_meta or {
+    local struct_meta = node.struct_meta or {
       id = node.id,
       name = node.name,
       schema = node.schema,
       type = node.type,
-    })
+    }
+    local lazy_children_factory
+    if TABLE_LIKE_TYPES[node.type] then
+      lazy_children_factory = function()
+        return ui:_materialize_table_like_branch(conn_id or "", node.id, struct_meta)
+      end
+    end
+    convert.decorate_structure_node(tree_node, ui.handler, ui.result, conn_id or "", struct_meta, lazy_children_factory)
   end
 
   if children and #children > 0 then
@@ -333,7 +453,15 @@ local function restore_expansion_state(ui, expansion_ids)
   for _, node_id in ipairs(sorted_expansion_ids(expansion_ids)) do
     local node = ui.tree:get_node(node_id)
     if node then
-      expand_node_filter_safe(ui, node, false)
+      if TABLE_LIKE_TYPES[node.type] then
+        if node._materialized_in_tree or node:has_children() then
+          node:expand()
+        else
+          unresolved[node_id] = true
+        end
+      else
+        expand_node_filter_safe(ui, node, false)
+      end
     else
       unresolved[node_id] = true
     end
@@ -341,22 +469,21 @@ local function restore_expansion_state(ui, expansion_ids)
   return unresolved
 end
 
+---@param ui DrawerUI
 ---@param nodes table[]?
 ---@param pattern string
----@param handler Handler
----@param result_ui ResultUI
 ---@param inherited_conn_id? string
 ---@return DrawerUINode[]
-local function filter_nodes_recursive(nodes, pattern, handler, result_ui, inherited_conn_id)
+local function filter_nodes_recursive(ui, nodes, pattern, inherited_conn_id)
   local filtered = {}
 
   for _, node in ipairs(nodes or {}) do
     local conn_id = node.type == "connection" and (node.conn_id or node.id) or inherited_conn_id
-    local children = filter_nodes_recursive(node.children, pattern, handler, result_ui, conn_id)
+    local children = filter_nodes_recursive(ui, node.children, pattern, conn_id)
     local matched_self = SEARCHABLE_TYPES[node.type] and string.find(string.lower(node.name), pattern, 1, true) ~= nil
 
     if matched_self or #children > 0 then
-      table.insert(filtered, searchable_node_to_tree_node(node, conn_id, handler, result_ui, children))
+      table.insert(filtered, searchable_node_to_tree_node(ui, node, conn_id, children))
     end
   end
 
@@ -452,6 +579,323 @@ local function materialize_selected_path(ui, tree, path_ids)
   return resolved_id == path_ids[#path_ids], resolved_id
 end
 
+---@param ui DrawerUI
+---@param conn_id string
+---@param branch_id string
+---@param kind? string
+---@return DrawerUINode[]
+local function build_branch_nodes(ui, conn_id, branch_id, kind)
+  local state = branch_state(ui, conn_id, branch_id, kind, false)
+  if not state then
+    return {}
+  end
+
+  if state.loading then
+    return { convert.loading_node(branch_id) }
+  end
+
+  if state.error then
+    return { convert.error_node(branch_id, state.error) }
+  end
+
+  local raw = normalize_children(state.raw)
+  local render_limit = math.max(state.render_limit or CHILD_CHUNK_SIZE, CHILD_CHUNK_SIZE)
+  local built_count = math.min(#raw, render_limit)
+  state.render_limit = render_limit
+  state.built_count = built_count
+
+  local chunk = {}
+  for index = 1, built_count do
+    chunk[#chunk + 1] = raw[index]
+  end
+
+  local nodes = convert.column_nodes(branch_id, chunk)
+  if built_count < #raw then
+    nodes[#nodes + 1] = convert.load_more_node(branch_id, kind or COLUMNS_KIND)
+  end
+
+  return nodes
+end
+
+---@param ui DrawerUI
+---@param conn ConnectionParams
+---@param opts? { suppress_root_request?: boolean }
+---@return DrawerUINode[]
+local function build_connection_children(ui, conn, opts)
+  opts = opts or {}
+  local cached_root = ui._struct_cache.root[conn.id]
+  if not cached_root then
+    if not opts.suppress_root_request and not root_request_pending(ui, conn.id) then
+      ui:request_structure_reload(conn.id)
+    end
+    return { convert.loading_node(conn.id) }
+  end
+
+  local nodes = {}
+  if cached_root.error then
+    nodes[#nodes + 1] = convert.error_node(conn.id, cached_root.error)
+  else
+    for _, struct in ipairs(sorted_struct_children(cached_root.structures)) do
+      nodes[#nodes + 1] = ui:_build_structure_node(conn.id, conn.id, struct)
+    end
+  end
+
+  local current_db, available_dbs = ui.handler:connection_list_databases(conn.id)
+  if current_db ~= "" and #available_dbs > 0 then
+    table.insert(nodes, 1, NuiTree.Node({
+      id = conn.id .. "_database_switch__",
+      name = current_db,
+      type = "database_switch",
+      action_1 = function(_, select)
+        select {
+          title = "Select a Database",
+          items = available_dbs,
+          on_confirm = function(selection)
+            ui.handler:connection_select_database(conn.id, selection)
+          end,
+        }
+      end,
+    }) --[[@as DrawerUINode]])
+  end
+
+  return nodes
+end
+
+---@param tree NuiTree
+---@param node DrawerUINode|nil
+---@return connection_id?
+local function resolve_connection_ancestor(tree, node)
+  local current = node
+  while current do
+    if current.type == "connection" then
+      return current:get_id()
+    end
+
+    local parent_id = current:get_parent_id()
+    if not parent_id then
+      break
+    end
+    current = tree:get_node(parent_id)
+  end
+
+  return nil
+end
+
+function DrawerUI:_build_structure_children(conn_id, parent_id, structs)
+  local nodes = {}
+  for _, struct in ipairs(sorted_struct_children(structs)) do
+    nodes[#nodes + 1] = self:_build_structure_node(conn_id, parent_id, struct)
+  end
+  return nodes
+end
+
+function DrawerUI:_materialize_table_like_branch(conn_id, node_id, struct)
+  local cached = branch_state(self, conn_id, node_id, COLUMNS_KIND, true)
+  if cached.loading or cached.error ~= nil or cached.raw ~= nil then
+    return build_branch_nodes(self, conn_id, node_id, COLUMNS_KIND)
+  end
+
+  local request_id = math.max(cached.request_gen or 0, cached.applied_gen or 0) + 1
+  cached.request_gen = request_id
+  cached.loading = true
+  cached.error = nil
+  cached.raw = nil
+  cached.built_count = 0
+  cached.render_limit = math.max(cached.render_limit or CHILD_CHUNK_SIZE, CHILD_CHUNK_SIZE)
+
+  self.handler:connection_get_columns_async(conn_id, request_id, node_id, current_root_epoch(self, conn_id), {
+    table = struct.name,
+    schema = struct.schema,
+    materialization = struct.type,
+    kind = COLUMNS_KIND,
+  })
+
+  return { convert.loading_node(node_id) }
+end
+
+function DrawerUI:_build_structure_node(conn_id, parent_id, struct)
+  local node_id = convert.structure_node_id(parent_id, struct)
+  local built_children = nil
+  local lazy_children_factory = nil
+
+  if TABLE_LIKE_TYPES[struct.type] then
+    local cached_branch = branch_state(self, conn_id, node_id, COLUMNS_KIND, false)
+    if cached_branch and (cached_branch.loading or cached_branch.error ~= nil or cached_branch.raw ~= nil) then
+      built_children = build_branch_nodes(self, conn_id, node_id, COLUMNS_KIND)
+    end
+
+    lazy_children_factory = function()
+      return self:_materialize_table_like_branch(conn_id, node_id, struct)
+    end
+  else
+    local children = normalize_children(struct.children)
+    if #children > 0 then
+      if self._struct_cache.loaded_lazy_ids[node_id] == true then
+        built_children = self:_build_structure_children(conn_id, node_id, children)
+      end
+      lazy_children_factory = function()
+        return self:_build_structure_children(conn_id, node_id, children)
+      end
+    end
+  end
+
+  local node = NuiTree.Node({
+    id = node_id,
+    name = struct.name,
+    schema = struct.schema,
+    type = struct.type,
+  }, built_children) --[[@as DrawerUINode]]
+
+  convert.decorate_structure_node(node, self.handler, self.result, conn_id, {
+    id = node_id,
+    name = struct.name,
+    schema = struct.schema,
+    type = struct.type,
+  }, lazy_children_factory)
+
+  if self._struct_cache.loaded_lazy_ids[node_id] == true or (built_children and #built_children > 0) then
+    node._materialized_in_tree = true
+  end
+
+  return node
+end
+
+function DrawerUI:_patch_connection_subtree(conn_id, opts)
+  opts = opts or {}
+
+  local node = self.tree:get_node(conn_id)
+  if not node then
+    return false
+  end
+
+  local ok_params, conn = pcall(self.handler.connection_get_params, self.handler, conn_id)
+  if not ok_params or not conn then
+    conn = { id = conn_id, name = conn_id }
+  end
+  conn.id = conn.id or conn_id
+  conn.name = conn.name or conn_id
+
+  local was_expanded = node:is_expanded()
+  self.tree:set_nodes(build_connection_children(self, conn, {
+    suppress_root_request = opts.suppress_root_request == true,
+  }), conn_id)
+  node._materialized_in_tree = true
+
+  if was_expanded then
+    node:expand()
+  end
+
+  if opts.restore_container_expansions then
+    local replay = self._replay_container_expansions[conn_id]
+    self._replay_container_expansions[conn_id] = nil
+    for _, node_id in ipairs(sorted_expansion_ids(replay)) do
+      if node_id ~= conn_id then
+        local child = self.tree:get_node(node_id)
+        if child then
+          expand_node_filter_safe(self, child, false)
+        end
+      end
+    end
+  end
+
+  self.tree:render()
+  return true
+end
+
+function DrawerUI:_patch_branch_subtree(conn_id, branch_id, kind)
+  local node = self.tree:get_node(branch_id)
+  if not node then
+    return false
+  end
+
+  local was_expanded = node:is_expanded()
+  self.tree:set_nodes(build_branch_nodes(self, conn_id, branch_id, kind), branch_id)
+  node._materialized_in_tree = true
+  if was_expanded then
+    node:expand()
+  end
+  self.tree:render()
+  return true
+end
+
+function DrawerUI:_capture_container_expansions(conn_id)
+  local captured = {}
+  local expansion_ids = expansion.get(self.tree)
+  for node_id, expanded in pairs(expansion_ids or {}) do
+    if expanded and (node_id == conn_id or node_id:sub(1, #conn_id + 1) == conn_id .. ID_SEP) then
+      local node = self.tree:get_node(node_id)
+      if node and node.type ~= "table" and node.type ~= "view" and node.type ~= "column" and node.type ~= "load_more" then
+        captured[node_id] = true
+      end
+    end
+  end
+  self._replay_container_expansions[conn_id] = captured
+end
+
+function DrawerUI:_prune_loaded_lazy_ids(conn_id)
+  for node_id in pairs(self._struct_cache.loaded_lazy_ids) do
+    if node_id == conn_id or node_id:sub(1, #conn_id + 1) == conn_id .. ID_SEP then
+      self._struct_cache.loaded_lazy_ids[node_id] = nil
+    end
+  end
+end
+
+---@param branch_id string
+---@return connection_id
+local function branch_owner_conn_id(branch_id)
+  local sep_start = tostring(branch_id):find(ID_SEP, 1, true)
+  if sep_start then
+    return branch_id:sub(1, sep_start - 1)
+  end
+  return branch_id
+end
+
+---@param branch_id string
+---@param kind? string
+function DrawerUI:structure_load_more(branch_id, kind)
+  local conn_id = branch_owner_conn_id(branch_id)
+  local state = branch_state(self, conn_id, branch_id, kind, false)
+  if not state or state.loading or state.error then
+    return
+  end
+
+  local raw = normalize_children(state.raw)
+  if #raw <= state.built_count then
+    return
+  end
+
+  state.render_limit = math.max(state.render_limit or CHILD_CHUNK_SIZE, CHILD_CHUNK_SIZE) + CHILD_CHUNK_SIZE
+  local next_built = math.min(#raw, state.render_limit)
+  local sentinel_id = load_more_node_id(branch_id)
+
+  if self.filter_restore_snapshot or self.filter_input then
+    state.built_count = next_built
+    invalidate_render_snapshot(self)
+    return
+  end
+
+  local branch_node = self.tree:get_node(branch_id)
+  if not branch_node then
+    state.built_count = next_built
+    invalidate_render_snapshot(self)
+    return
+  end
+
+  self.tree:remove_node(sentinel_id)
+  for index = state.built_count + 1, next_built do
+    self.tree:add_node(convert.column_nodes(branch_id, { raw[index] })[1], branch_id)
+  end
+  state.built_count = next_built
+
+  if next_built < #raw then
+    self.tree:add_node(convert.load_more_node(branch_id, kind or COLUMNS_KIND), branch_id)
+  end
+
+  branch_node._materialized_in_tree = true
+  invalidate_render_snapshot(self)
+  self.tree:render()
+end
+
 ---@param handler Handler
 ---@param editor EditorUI
 ---@param result ResultUI
@@ -489,7 +933,15 @@ function DrawerUI:new(handler, editor, result, opts)
     current_note_id = current_note.id,
     pending_generated_calls = {},
     _manual_refresh_conns = {},
-    structure_cache = {},
+    _replay_container_expansions = {},
+    _struct_cache = {
+      root = {},
+      root_gen = {},
+      root_applied = {},
+      root_epoch = {},
+      loaded_lazy_ids = {},
+      branches = {},
+    },
     filter_text = "",
     pre_filter_expansion = nil,
     pre_filter_cursor = nil,
@@ -501,9 +953,6 @@ function DrawerUI:new(handler, editor, result, opts)
     filter_debounce_ms = 0,
     pending_filter_text = nil,
     filter_timer = nil,
-    loaded_lazy_ids = {},
-    structure_request_gen = {},
-    structure_applied_gen = {},
     cached_search_model = nil,
     cached_render_snapshot = nil,
     filter_cached_connections = 0,
@@ -543,6 +992,10 @@ function DrawerUI:new(handler, editor, result, opts)
     o:on_structure_loaded(data)
   end)
 
+  handler:register_event_listener("structure_children_loaded", function(data)
+    o:on_structure_children_loaded(data)
+  end)
+
   handler:register_event_listener("database_selected", function(data)
     o:on_database_selected(data)
   end)
@@ -568,7 +1021,7 @@ end
 
 ---@private
 function DrawerUI:rebuild_buffer()
-  -- structure_cache persists across buffer rebuilds; rebuild only the UI shell.
+  -- _struct_cache persists across buffer rebuilds; rebuild only the UI shell.
   if self.bufnr and vim.api.nvim_buf_is_valid(self.bufnr) then
     pcall(vim.api.nvim_buf_delete, self.bufnr, { force = true })
   end
@@ -606,7 +1059,7 @@ function DrawerUI:on_current_note_changed(data)
   if self.filter_restore_snapshot or self.filter_input then
     self:interrupt_filter("Drawer data changed; closing filter before refresh")
   end
-  invalidate_authoritative_caches(self)
+  invalidate_render_snapshot(self)
 
   self.current_note_id = data.note_id
   self:refresh()
@@ -614,21 +1067,30 @@ end
 
 -- event listener for async structure loading
 ---@private
----@param data { conn_id: string, request_id?: integer, structures?: DBStructure[], error?: any }
+---@param data { conn_id: string, request_id?: integer, root_epoch?: integer, caller_token?: string, structures?: DBStructure[], error?: any }
 function DrawerUI:on_structure_loaded(data)
   if not data or not data.conn_id then
     return
   end
 
-  local request_id = data.request_id
-  local pending_request_id = self.structure_request_gen[data.conn_id]
-  local applied_request_id = self.structure_applied_gen[data.conn_id] or 0
-
-  if request_id ~= nil and request_id < applied_request_id then
+  if data.caller_token ~= "drawer" then
     return
   end
 
-  if pending_request_id ~= nil and request_id ~= pending_request_id then
+  local request_id = data.request_id or 0
+  local pending_request_id = self._struct_cache.root_gen[data.conn_id]
+  local applied_request_id = self._struct_cache.root_applied[data.conn_id] or 0
+  local payload_epoch = normalize_root_epoch(data.root_epoch)
+
+  if pending_request_id == nil or request_id ~= pending_request_id then
+    return
+  end
+
+  if payload_epoch ~= current_root_epoch(self, data.conn_id) then
+    return
+  end
+
+  if applied_request_id >= request_id then
     return
   end
 
@@ -636,9 +1098,7 @@ function DrawerUI:on_structure_loaded(data)
     self:interrupt_filter("Drawer data changed; closing filter before refresh")
   end
 
-  if request_id ~= nil then
-    self.structure_applied_gen[data.conn_id] = math.max(applied_request_id, request_id)
-  end
+  self._struct_cache.root_applied[data.conn_id] = math.max(applied_request_id, request_id)
   invalidate_authoritative_caches(self)
 
   if self._manual_refresh_conns[data.conn_id] then
@@ -653,12 +1113,18 @@ function DrawerUI:on_structure_loaded(data)
     end
   end
 
-  self.structure_cache[data.conn_id] = {
-    structures = data.structures,
+  self._struct_cache.root[data.conn_id] = {
+    structures = data.structures or {},
     error = data.error,
   }
 
-  self:refresh()
+  if data.error then
+    self._replay_container_expansions[data.conn_id] = nil
+  end
+
+  self:_patch_connection_subtree(data.conn_id, {
+    restore_container_expansions = not data.error,
+  })
 end
 
 ---@private
@@ -672,9 +1138,55 @@ function DrawerUI:on_database_selected(data)
     self:interrupt_filter("DB switched; closing filter before refresh")
   end
 
-  self.structure_cache[data.conn_id] = nil
+  self:_capture_container_expansions(data.conn_id)
+  self:_prune_loaded_lazy_ids(data.conn_id)
+  self._struct_cache.root[data.conn_id] = nil
+  self._struct_cache.branches[data.conn_id] = nil
+  self._struct_cache.root_epoch[data.conn_id] = current_root_epoch(self, data.conn_id) + 1
   invalidate_authoritative_caches(self)
+  self:_patch_connection_subtree(data.conn_id, { suppress_root_request = true })
   self:request_structure_reload(data.conn_id)
+end
+
+---@private
+---@param data { conn_id: string, request_id?: integer, branch_id?: string, root_epoch?: integer, kind?: string, columns?: Column[], error?: any }
+function DrawerUI:on_structure_children_loaded(data)
+  if not data or not data.conn_id or not data.branch_id then
+    return
+  end
+
+  local kind = data.kind or COLUMNS_KIND
+  local state = branch_state(self, data.conn_id, data.branch_id, kind, false)
+  if not state then
+    return
+  end
+
+  local request_id = data.request_id or 0
+  local payload_epoch = normalize_root_epoch(data.root_epoch)
+  if request_id ~= state.request_gen then
+    return
+  end
+  if payload_epoch ~= current_root_epoch(self, data.conn_id) then
+    return
+  end
+  if (state.applied_gen or 0) >= request_id then
+    return
+  end
+
+  state.applied_gen = request_id
+  state.loading = false
+  state.error = data.error
+  state.raw = data.error and nil or (data.columns or {})
+  state.render_limit = math.max(state.render_limit or CHILD_CHUNK_SIZE, CHILD_CHUNK_SIZE)
+  state.built_count = math.min(#normalize_children(state.raw), state.render_limit)
+
+  invalidate_render_snapshot(self)
+
+  if self.filter_restore_snapshot or self.filter_input then
+    return
+  end
+
+  self:_patch_branch_subtree(data.conn_id, data.branch_id, kind)
 end
 
 ---@private
@@ -877,7 +1389,7 @@ end
 ---@return string? error_message
 function DrawerUI:capture_filter_snapshot()
   if not self.cached_search_model then
-    local search_model, coverage = drawer_model.build_search_model(self.handler, self.structure_cache)
+    local search_model, coverage = drawer_model.build_search_model(self.handler, self._struct_cache)
     self.cached_search_model = {
       nodes = search_model,
       coverage = coverage,
@@ -913,11 +1425,15 @@ end
 ---@param conn_id string
 ---@return integer request_id
 function DrawerUI:request_structure_reload(conn_id)
-  local applied_request_id = self.structure_applied_gen[conn_id] or 0
-  local requested_request_id = self.structure_request_gen[conn_id] or 0
-  self.structure_request_gen[conn_id] = math.max(requested_request_id, applied_request_id) + 1
-  local request_id = self.structure_request_gen[conn_id]
-  self.handler:connection_get_structure_async(conn_id, request_id)
+  if root_request_pending(self, conn_id) then
+    return self._struct_cache.root_gen[conn_id]
+  end
+
+  local applied_request_id = self._struct_cache.root_applied[conn_id] or 0
+  local requested_request_id = self._struct_cache.root_gen[conn_id] or 0
+  self._struct_cache.root_gen[conn_id] = math.max(requested_request_id, applied_request_id) + 1
+  local request_id = self._struct_cache.root_gen[conn_id]
+  self.handler:connection_get_structure_async(conn_id, request_id, current_root_epoch(self, conn_id), "drawer")
   return request_id
 end
 
@@ -991,7 +1507,7 @@ function DrawerUI:render_restore_snapshot(snapshot, expansion_state, cursor)
   expansion_state = expansion_state or self.pre_filter_expansion
   cursor = cursor or self.pre_filter_cursor
 
-  self.loaded_lazy_ids = collect_loaded_lazy_ids(snapshot)
+  self._struct_cache.loaded_lazy_ids = collect_loaded_lazy_ids(snapshot)
   self.tree:set_nodes(snapshot_to_tree_nodes(snapshot or {}))
   local unresolved = restore_expansion_state(self, expansion_state)
   self.tree:render()
@@ -1021,7 +1537,7 @@ function DrawerUI:apply_filter(filter_text)
   end
 
   local pattern = string.lower(filter_text)
-  local filtered = filter_nodes_recursive(self.filter_search_model, pattern, self.handler, self.result)
+  local filtered = filter_nodes_recursive(self, self.filter_search_model, pattern)
   self.tree:set_nodes(filtered)
   self.tree:render()
 end
@@ -1124,25 +1640,38 @@ function DrawerUI:get_actions()
 
   return {
     refresh = function()
-      local exp = expansion.get(self.tree)
-      self._manual_refresh_conns = {}
-      for node_id, expanded in pairs(exp) do
-        if expanded then
-          local node = self.tree:get_node(node_id)
-          if node and node.type == "connection" then
-            self._manual_refresh_conns[node_id] = true
-          end
-        end
+      local node = self.tree:get_node() --[[@as DrawerUINode]]
+      if not node then
+        return
       end
 
-      self.structure_cache = {}
+      local conn_id = resolve_connection_ancestor(self.tree, node)
+      if not conn_id then
+        utils.log("warn", "select a connection row to reload")
+        return
+      end
+
+      if self.filter_restore_snapshot or self.filter_input then
+        self:interrupt_filter("Drawer refresh requested; closing filter before rebuild")
+      end
+
+      self._manual_refresh_conns = { [conn_id] = true }
+      self:_capture_container_expansions(conn_id)
+      self:_prune_loaded_lazy_ids(conn_id)
+      self._struct_cache.root[conn_id] = nil
+      self._struct_cache.branches[conn_id] = nil
+      self._struct_cache.root_epoch[conn_id] = current_root_epoch(self, conn_id) + 1
       invalidate_authoritative_caches(self)
-      self.structure_request_gen = {}
-      self:refresh()
+      self:_patch_connection_subtree(conn_id, { suppress_root_request = true })
+      self:request_structure_reload(conn_id)
     end,
     action_1 = function()
       local node = self.tree:get_node() --[[@as DrawerUINode]]
       if not node then
+        return
+      end
+      if node.structure_load_more then
+        self:structure_load_more(node.structure_load_more.branch_id, node.structure_load_more.kind)
         return
       end
       perform_action(node.action_1)
@@ -1385,6 +1914,10 @@ function DrawerUI:get_actions()
             [normalize_mapping_lhs("<C-y>")] = function()
               local node = self.tree:get_node()
               if node then
+                if node.structure_load_more then
+                  self:structure_load_more(node.structure_load_more.branch_id, node.structure_load_more.kind)
+                  return
+                end
                 perform_action(node.action_1)
               end
             end,
@@ -1510,8 +2043,7 @@ function DrawerUI:refresh()
     self:interrupt_filter("Drawer refresh requested; closing filter before rebuild")
   end
 
-  self.loaded_lazy_ids = {}
-  invalidate_authoritative_caches(self)
+  invalidate_render_snapshot(self)
 
   if not self.bufnr or not vim.api.nvim_buf_is_valid(self.bufnr) then
     self:rebuild_buffer()
@@ -1521,16 +2053,21 @@ function DrawerUI:refresh()
   local current_conn_id = (self.handler:get_current_connection() or {}).id
   self.current_conn_id = current_conn_id
 
-  local render_model, coverage = drawer_model.build_rendered_model(
+  local render_model, coverage = drawer_model.build_tree_from_struct_cache(
     self.handler,
     self.editor,
     self.result,
-    self.structure_cache,
+    self._struct_cache,
     current_conn_id,
     function()
       self:refresh()
     end,
-    { disable_help = self.disable_help }
+    {
+      disable_help = self.disable_help,
+      connection_children = function(conn)
+        return build_connection_children(self, conn)
+      end,
+    }
   )
   self.filter_total_connections = coverage.total_connections
 
