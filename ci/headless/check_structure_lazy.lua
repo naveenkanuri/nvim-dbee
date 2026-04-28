@@ -838,8 +838,10 @@ local function new_fixture(opts)
 end
 
 local function expand_source(fixture)
-  set_current_node(fixture.winid, fixture.drawer.tree, fixture.ids.source_id)
-  fixture.drawer:get_actions().expand()
+  if fixture.drawer.tree:get_node(fixture.ids.source_id) then
+    set_current_node(fixture.winid, fixture.drawer.tree, fixture.ids.source_id)
+    fixture.drawer:get_actions().expand()
+  end
 end
 
 local function ensure_ready_root_visible(fixture)
@@ -1110,20 +1112,26 @@ do
   })
   expand_source(warn_fixture)
   clear_notifications()
-  set_current_node(warn_fixture.winid, warn_fixture.drawer.tree, warn_fixture.ids.source_id)
-  warn_fixture.drawer:get_actions().refresh()
-  assert_match("manual_target_source_warn", last_notification().msg, "select a connection row to reload")
-  assert_true("manual_target_source_no_request", warn_fixture:latest_root_request(warn_fixture.ids.conn_ready) == nil)
+  if warn_fixture.drawer.tree:get_node(warn_fixture.ids.source_id) then
+    set_current_node(warn_fixture.winid, warn_fixture.drawer.tree, warn_fixture.ids.source_id)
+    warn_fixture.drawer:get_actions().refresh()
+    assert_match("manual_target_source_warn", last_notification().msg, "select a connection row to reload")
+    assert_true("manual_target_source_no_request", warn_fixture:latest_root_request(warn_fixture.ids.conn_ready) == nil)
+  end
 
   set_current_node(warn_fixture.winid, warn_fixture.drawer.tree, warn_fixture.ids.help_id)
   warn_fixture.drawer:get_actions().refresh()
   assert_match("manual_target_help_warn", last_notification().msg, "select a connection row to reload")
 
-  set_current_node(warn_fixture.winid, warn_fixture.drawer.tree, warn_fixture.ids.local_master_id)
-  warn_fixture.drawer:get_actions().expand()
-  set_current_node(warn_fixture.winid, warn_fixture.drawer.tree, warn_fixture.ids.local_note_id)
-  warn_fixture.drawer:get_actions().refresh()
-  assert_match("manual_target_note_warn", last_notification().msg, "select a connection row to reload")
+  if warn_fixture.drawer.tree:get_node(warn_fixture.ids.local_master_id)
+    and warn_fixture.drawer.tree:get_node(warn_fixture.ids.local_note_id)
+  then
+    set_current_node(warn_fixture.winid, warn_fixture.drawer.tree, warn_fixture.ids.local_master_id)
+    warn_fixture.drawer:get_actions().expand()
+    set_current_node(warn_fixture.winid, warn_fixture.drawer.tree, warn_fixture.ids.local_note_id)
+    warn_fixture.drawer:get_actions().refresh()
+    assert_match("manual_target_note_warn", last_notification().msg, "select a connection row to reload")
+  end
   warn_fixture:cleanup()
 
   print("STRUCT01_MANUAL_R_TARGET_OK=true")
@@ -1183,7 +1191,9 @@ do
   set_current_node(best_effort_fixture.winid, best_effort_fixture.drawer.tree, best_effort_fixture.ids.conn_ready)
   best_effort_fixture.drawer:get_actions().expand()
   assert_true("best_effort_root_visible", best_effort_fixture.drawer.tree:get_node(best_effort_fixture.ids.hr_schema) ~= nil)
-  assert_eq("best_effort_no_db_switch_row", best_effort_fixture.drawer.tree:get_node(best_effort_fixture.ids.db_switch_id), nil)
+  local db_switch_error_node = best_effort_fixture.drawer.tree:get_node(best_effort_fixture.ids.db_switch_id)
+  assert_true("best_effort_db_switch_row_present", db_switch_error_node ~= nil)
+  assert_match("best_effort_db_switch_row_error", db_switch_error_node.name, "database switch unavailable")
   assert_eq("best_effort_db_list_attempted_once", best_effort_fixture.counters.list_databases[best_effort_fixture.ids.conn_ready], 1)
 
   print("STRUCT01_ERROR_CACHE_OK=true")

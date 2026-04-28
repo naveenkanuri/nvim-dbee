@@ -746,28 +746,35 @@ end
 local function run_supersession_and_cleanup_contracts()
   local env = new_env()
 
+  seed_drawer_root(env, "conn-alpha", 0)
+  env.runtime.structure_requests = {}
+  env.runtime.lsp.cache_builds = {}
+  env.lsp.refresh()
+  env.drawer:request_structure_reload("conn-alpha", { force_new = true })
   local first_payload = nil
   env.handler:connection_get_structure_singleflight({
     conn_id = "conn-alpha",
-    consumer = "drawer",
+    consumer = "probe",
     request_id = 11,
-    caller_token = "drawer",
+    caller_token = "probe",
     callback = function(data)
       first_payload = data
     end,
   })
+  assert_eq("supersession_underlying_requests", #env.runtime.structure_requests, 1)
+  local stale_request = env.runtime.structure_requests[1]
+  local applied_before = env.drawer._struct_cache.root_applied["conn-alpha"] or 0
   local new_epoch = env.handler:bump_authoritative_root_epoch({ "conn-alpha" })
-  env.handler:connection_get_structure_singleflight({
-    conn_id = "conn-alpha",
-    consumer = "drawer",
-    request_id = 12,
-    caller_token = "drawer",
-    callback = function() end,
-  })
   assert_true("superseded_payload_present", first_payload ~= nil)
   assert_eq("superseded_error_kind", first_payload.error_kind, "superseded")
   assert_eq("superseded_new_epoch", first_payload.new_epoch, new_epoch)
+  emit_structure_loaded(env, stale_request, {
+    caller_token = "__singleflight",
+  })
+  assert_eq("superseded_root_applied_unchanged", env.drawer._struct_cache.root_applied["conn-alpha"] or 0, applied_before)
+  assert_eq("superseded_lsp_cache_unchanged", #env.runtime.lsp.cache_builds, 0)
   print("DCFG01_SUPERSEDED_FLIGHT_OK=true")
+  print("LIFECYCLE01_INVALIDATION_SUPERSESSION_OK=true")
 
   env.runtime.structure_requests = {}
   env.drawer:request_structure_reload("conn-alpha", { force_new = true })
@@ -784,6 +791,88 @@ local function run_supersession_and_cleanup_contracts()
   print("DCFG01_WAITER_CLEANUP_OK=true")
 
   env:cleanup()
+end
+
+local function run_consumer_rebootstrap_contracts()
+  local env = new_env()
+  local reopen_winid = env.winid
+
+  env.drawer:prepare_close()
+  env.handler:source_remove_connection("source1", "conn-beta")
+  Harness.drain()
+  env.drawer:show(reopen_winid)
+  Harness.drain()
+  assert_true("drawer_reopen_consumer_live", env.drawer._connection_invalidated_consumer_live)
+  assert_true("drawer_reopen_snapshot_applied", env.drawer.tree:get_node("conn-beta") == nil)
+  print("DCFG01_DRAWER_REBOOTSTRAP_OK=true")
+
+  local original_snapshot = env.handler.get_connection_state_snapshot
+  local drawer_overflow_bursts = 4
+  env.drawer:prepare_close()
+  env.handler.get_connection_state_snapshot = function(self, ...)
+    if drawer_overflow_bursts > 0 then
+      for offset = 1, 65 do
+        self:_dispatch_connection_invalidated(new_invalidation((drawer_overflow_bursts * 1000) + offset))
+      end
+      drawer_overflow_bursts = drawer_overflow_bursts - 1
+    end
+    return original_snapshot(self, ...)
+  end
+  env.drawer:show(reopen_winid)
+  Harness.drain()
+  env.handler.get_connection_state_snapshot = original_snapshot
+  assert_true("drawer_storm_rebootstrap_live", env.drawer._connection_invalidated_consumer_live)
+  env.drawer.refresh_count = 0
+  env.events.trigger("connection_invalidated", new_invalidation(env.handler:get_authoritative_root_epoch("conn-alpha") + 1, {
+    retired_conn_ids = { "conn-alpha" },
+  }))
+  Harness.drain()
+  assert_true("drawer_storm_rebootstrap_refresh", env.drawer.refresh_count > 0)
+  print("DCFG01_DRAWER_STORM_REBOOTSTRAP_OK=true")
+
+  env.runtime.structure_requests = {}
+  seed_drawer_root(env, "conn-alpha", env.handler:get_authoritative_root_epoch("conn-alpha"))
+  expand_connection(env, "conn-alpha")
+  env.events.trigger("connection_invalidated", new_invalidation(env.handler:get_authoritative_root_epoch("conn-alpha") + 1, {
+    retired_conn_ids = { "conn-alpha" },
+  }))
+  env.drawer:prepare_close()
+  Harness.drain()
+  assert_eq("drawer_close_clears_batched_rewarm", #env.runtime.structure_requests, 0)
+  print("DCFG01_CLOSE_BATCH_CLEAR_OK=true")
+
+  env:cleanup()
+
+  local env_lsp = new_env()
+  local original_snapshot = env_lsp.handler.get_connection_state_snapshot
+  local overflow_bursts = 4
+  env_lsp.lsp.register_events()
+  Harness.drain()
+  env_lsp.drawer:prepare_close()
+  env_lsp.lsp.stop()
+  env_lsp.handler.get_connection_state_snapshot = function(self, ...)
+    if overflow_bursts > 0 then
+      for offset = 1, 65 do
+        self:_dispatch_connection_invalidated(new_invalidation((overflow_bursts * 100) + offset))
+      end
+      overflow_bursts = overflow_bursts - 1
+    end
+    return original_snapshot(self, ...)
+  end
+
+  env_lsp.runtime.structure_requests = {}
+  env_lsp.lsp._try_start()
+  Harness.drain()
+  env_lsp.handler.get_connection_state_snapshot = original_snapshot
+  assert_true("lsp_rebootstrap_live", env_lsp.lsp._connection_invalidated_consumer_live)
+
+  env_lsp.runtime.structure_requests = {}
+  env_lsp.handler:source_reload("source1")
+  Harness.drain()
+  assert_true("lsp_rebootstrap_rewarm", #env_lsp.runtime.structure_requests > 0)
+  print("DCFG01_LSP_REBOOTSTRAP_OK=true")
+
+  env_lsp:cleanup()
 end
 
 local function run_backpressure_and_sticky_contracts()
@@ -999,6 +1088,7 @@ end
 run_singleflight_contracts()
 run_bootstrap_contracts()
 run_supersession_and_cleanup_contracts()
+run_consumer_rebootstrap_contracts()
 run_backpressure_and_sticky_contracts()
 run_database_switch_and_reconnect_contracts()
 run_structure_regression_guard()

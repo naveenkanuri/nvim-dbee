@@ -662,8 +662,10 @@ local employee_col_id = convert.column_node_id(employees_id, { type = "NUMBER", 
 local ops_schema_id = convert.structure_node_id(conn_id, { type = "schema", name = "ops", schema = "ops" })
 local db_switch_id = conn_id .. "_database_switch__"
 
-set_current_node(fixture.winid, drawer.tree, source_id)
-drawer:get_actions().expand()
+if drawer.tree:get_node(source_id) then
+  set_current_node(fixture.winid, drawer.tree, source_id)
+  drawer:get_actions().expand()
+end
 set_current_node(fixture.winid, drawer.tree, conn_id)
 drawer:get_actions().expand()
 set_current_node(fixture.winid, drawer.tree, hr_schema_id)
@@ -952,19 +954,26 @@ set_current_node(fixture.winid, drawer.tree, employee_col_id)
 drawer.filter_restore_snapshot = vim.deepcopy(drawer.filter_restore_snapshot)
 local stripped_column_from_snapshot = false
 for _, snapshot_node in ipairs(drawer.filter_restore_snapshot or {}) do
-  if snapshot_node.id == source_id then
+  local connection_children = {}
+  if snapshot_node.id == conn_id then
+    connection_children[#connection_children + 1] = snapshot_node
+  elseif snapshot_node.id == source_id then
     for _, source_child in ipairs(snapshot_node.children or {}) do
       if source_child.id == conn_id then
-        for _, conn_child in ipairs(source_child.children or {}) do
-          if conn_child.id == hr_schema_id then
-            for _, table_child in ipairs(conn_child.children or {}) do
-              if table_child.id == employees_id then
-                table_child.children = {}
-                table_child.rendered_children_loaded = false
-                table_child.lazy_children = nil
-                stripped_column_from_snapshot = true
-              end
-            end
+        connection_children[#connection_children + 1] = source_child
+      end
+    end
+  end
+
+  for _, conn_child in ipairs(connection_children) do
+    for _, schema_child in ipairs(conn_child.children or {}) do
+      if schema_child.id == hr_schema_id then
+        for _, table_child in ipairs(schema_child.children or {}) do
+          if table_child.id == employees_id then
+            table_child.children = {}
+            table_child.rendered_children_loaded = false
+            table_child.lazy_children = nil
+            stripped_column_from_snapshot = true
           end
         end
       end
@@ -979,8 +988,10 @@ assert_match("a14_warn_fallback", last_notification().msg, "nearest restored anc
 print("DRAW01_A14_OK=true")
 
 drawer:refresh()
-set_current_node(fixture.winid, drawer.tree, source_id)
-drawer:get_actions().expand()
+if drawer.tree:get_node(source_id) then
+  set_current_node(fixture.winid, drawer.tree, source_id)
+  drawer:get_actions().expand()
+end
 set_current_node(fixture.winid, drawer.tree, conn_id)
 drawer:get_actions().expand()
 local db_switch_node = drawer.tree:get_node(db_switch_id)
@@ -1069,8 +1080,10 @@ drawer:get_actions().filter()
 session = stub_filter_sessions[#stub_filter_sessions]
 assert_true("a15_cached_snapshot_reused", drawer.cached_render_snapshot == snapshot_before_restart)
 session:close()
-set_current_node(fixture.winid, drawer.tree, source_id)
-drawer:get_actions().expand()
+if drawer.tree:get_node(source_id) then
+  set_current_node(fixture.winid, drawer.tree, source_id)
+  drawer:get_actions().expand()
+end
 set_current_node(fixture.winid, drawer.tree, conn_id)
 drawer:get_actions().toggle()
 assert_eq("a15_local_toggle_invalidates_snapshot", drawer.cached_render_snapshot, nil)

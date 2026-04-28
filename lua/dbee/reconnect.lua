@@ -1,6 +1,12 @@
-local api = require("dbee.api")
-local state = require("dbee.api.state")
 local utils = require("dbee.utils")
+
+local function get_api()
+  return require("dbee.api")
+end
+
+local function get_state()
+  return require("dbee.api.state")
+end
 
 local M = {}
 
@@ -125,6 +131,7 @@ end
 ---@param conn_id connection_id
 ---@return source_id|nil
 local function find_source_id_for_connection(conn_id)
+  local api = get_api()
   if type(api.core.get_sources) ~= "function" or type(api.core.source_get_connections) ~= "function" then
     return nil
   end
@@ -158,6 +165,7 @@ end
 ---@return ConnectionParams|nil
 ---@return string|nil
 local function resolve_reloaded_connection(source_id, previous)
+  local api = get_api()
   local ok_conns, source_conns = pcall(api.core.source_get_connections, source_id)
   if not ok_conns then
     return nil, "failed reading reloaded source connections"
@@ -261,6 +269,7 @@ function M.ensure_reconnect_listener()
   if reconnect_listener_registered then
     return
   end
+  local api = get_api()
   if not api.core or type(api.core.register_event_listener) ~= "function" then
     return
   end
@@ -371,6 +380,8 @@ function M.rewrite_connection_identity(old_conn_id, new_conn_id, new_conn_name, 
     return
   end
 
+  local api = get_api()
+
   local ids = {}
   for call_id in pairs(call_ids_by_conn[old_conn_id] or {}) do
     ids[#ids + 1] = call_id
@@ -461,12 +472,13 @@ end
 function M.reconnect_connection(conn_id, opts)
   M.ensure_reconnect_listener()
   opts = opts or {}
+  local api = get_api()
 
   if type(api.core.is_loaded) == "function" and not api.core.is_loaded() then
     return false, "dbee core not loaded", nil, nil
   end
 
-  local handler = state.handler()
+  local handler = get_state().handler()
   if not handler or type(handler.source_reload_reconnect) ~= "function" then
     return false, "silent reconnect reload is not supported by current handler", nil, nil
   end
@@ -575,6 +587,7 @@ end
 ---@return dbee_retry_meta|nil
 function M.retry_call(target_conn_id, call_id, meta, opts)
   opts = opts or {}
+  local api = get_api()
   local ok_conn, new_conn_id_or_err, new_conn_name, new_conn_type =
     M.reconnect_connection(target_conn_id, { restore_current = opts.restore_current ~= false })
   if not ok_conn then

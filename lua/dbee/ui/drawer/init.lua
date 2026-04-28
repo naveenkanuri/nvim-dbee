@@ -60,9 +60,11 @@ local utils = require("dbee.utils")
 ---@field private pending_generated_calls table<string, { note_id: note_id, fallback_template: string }>
 ---@field private _manual_refresh_conns table<string, boolean>
 ---@field private _replay_container_expansions table<string, table<string, boolean>>
+---@field private _reconnect_listener_id string
 ---@field private _connection_invalidated_consumer_id string
 ---@field private _pending_connection_invalidations table<string, ConnectionInvalidatedEvent>
 ---@field private _connection_invalidation_flush_scheduled boolean
+---@field private _connection_invalidated_consumer_live boolean
 ---@field private _database_switch_state table<string, { loading: boolean, token?: { conn_id: string, request_id: integer, root_epoch: integer }, current?: string, available?: string[], error?: any }>
 ---@field private _next_database_switch_request_id integer
 ---@field private _struct_cache DrawerStructureCache
@@ -168,6 +170,12 @@ local function invalidate_render_snapshot(ui)
   ui.cached_render_snapshot = nil
 end
 
+---@param ui DrawerUI
+local function clear_connection_invalidations(ui)
+  ui._pending_connection_invalidations = {}
+  ui._connection_invalidation_flush_scheduled = false
+end
+
 ---@param value any
 ---@return integer
 local function normalize_root_epoch(value)
@@ -189,6 +197,42 @@ end
 ---@return integer
 local function current_root_epoch(ui, conn_id)
   return ui._struct_cache.root_epoch[conn_id] or 0
+end
+
+---@param ui DrawerUI
+---@param conn_id string
+---@return integer
+local function handler_root_epoch(ui, conn_id)
+  if type(ui.handler.get_authoritative_root_epoch) == "function" then
+    return ui.handler:get_authoritative_root_epoch(conn_id)
+  end
+  return current_root_epoch(ui, conn_id)
+end
+
+---@param ui DrawerUI
+---@param conn_ids string[]
+---@return integer|nil
+local function handler_bump_root_epoch(ui, conn_ids)
+  if type(ui.handler.bump_authoritative_root_epoch) == "function" then
+    return ui.handler:bump_authoritative_root_epoch(conn_ids)
+  end
+
+  local seen = {}
+  local next_epoch = 0
+  local has_conn = false
+  for _, conn_id in ipairs(conn_ids or {}) do
+    if conn_id and conn_id ~= "" and not seen[conn_id] then
+      seen[conn_id] = true
+      has_conn = true
+      next_epoch = math.max(next_epoch, current_root_epoch(ui, conn_id))
+    end
+  end
+
+  if not has_conn then
+    return nil
+  end
+
+  return next_epoch + 1
 end
 
 ---@param ui DrawerUI
@@ -1055,7 +1099,21 @@ function DrawerUI:_start_database_switch_load(conn_id, carried)
     error = nil,
   }
   self._database_switch_state[conn_id] = state
-  self.handler:connection_list_databases_async(conn_id, token.request_id, token.root_epoch)
+  if type(self.handler.connection_list_databases_async) == "function" then
+    self.handler:connection_list_databases_async(conn_id, token.request_id, token.root_epoch)
+  elseif type(self.handler.connection_list_databases) == "function" then
+    local ok, current, available = pcall(self.handler.connection_list_databases, self.handler, conn_id)
+    state.loading = false
+    state.token = nil
+    if ok then
+      state.current = tostring(current or "")
+      state.available = vim.deepcopy(available or {})
+    else
+      state.error = current
+      state.current = tostring(state.current or "")
+      state.available = vim.deepcopy(state.available or {})
+    end
+  end
   return state
 end
 
@@ -1231,9 +1289,11 @@ function DrawerUI:new(handler, editor, result, opts)
     pending_generated_calls = {},
     _manual_refresh_conns = {},
     _replay_container_expansions = {},
+    _reconnect_listener_id = "drawer:" .. tostring({}),
     _connection_invalidated_consumer_id = "drawer",
     _pending_connection_invalidations = {},
     _connection_invalidation_flush_scheduled = false,
+    _connection_invalidated_consumer_live = false,
     _database_switch_state = {},
     _next_database_switch_request_id = 0,
     _struct_cache = {
@@ -1310,11 +1370,11 @@ function DrawerUI:new(handler, editor, result, opts)
     o:on_call_state_changed(data)
   end)
 
-  reconnect.register_connection_rewritten_listener("drawer", function(old_conn_id, new_conn_id)
+  reconnect.register_connection_rewritten_listener(o._reconnect_listener_id, function(old_conn_id, new_conn_id)
     o:on_connection_rewritten(old_conn_id, new_conn_id)
   end)
 
-  o:_bootstrap_connection_invalidated_consumer()
+  o:_ensure_connection_invalidated_consumer()
 
   return o
 end
@@ -1333,6 +1393,7 @@ end
 
 ---@private
 function DrawerUI:rebuild_buffer()
+  local reopen_winid = self.winid
   -- _struct_cache persists across buffer rebuilds; rebuild only the UI shell.
   if self.bufnr and vim.api.nvim_buf_is_valid(self.bufnr) then
     pcall(vim.api.nvim_buf_delete, self.bufnr, { force = true })
@@ -1341,6 +1402,13 @@ function DrawerUI:rebuild_buffer()
   self.bufnr = self:_create_drawer_buffer()
   self.tree = self:create_tree(self.bufnr)
   common.configure_buffer_mappings(self.bufnr, self:get_actions(), self.mappings)
+
+  if reopen_winid and vim.api.nvim_win_is_valid(reopen_winid) then
+    self.winid = reopen_winid
+    vim.api.nvim_win_set_buf(self.winid, self.bufnr)
+    common.configure_window_options(self.winid, self.window_options)
+    self:_ensure_connection_invalidated_consumer()
+  end
 end
 
 -- event listener for current connection change
@@ -1370,6 +1438,7 @@ function DrawerUI:_handle_connection_invalidated_consumer_event(data)
   end
 
   if data.kind == "storm" then
+    self._connection_invalidated_consumer_live = false
     utils.log("error", data.message)
     return
   end
@@ -1378,8 +1447,10 @@ function DrawerUI:_handle_connection_invalidated_consumer_event(data)
 end
 
 ---@private
----@return boolean
+---@return boolean ok
+---@return string? reason
 function DrawerUI:_bootstrap_connection_invalidated_consumer()
+  self._connection_invalidated_consumer_live = false
   local consumer_id = self._connection_invalidated_consumer_id
   local generation = self.handler:begin_connection_invalidated_bootstrap(consumer_id, function(data)
     self:_handle_connection_invalidated_consumer_event(data)
@@ -1397,7 +1468,10 @@ function DrawerUI:_bootstrap_connection_invalidated_consumer()
       generation = drained.generation or generation
     elseif drained.kind == "storm" then
       utils.log("error", drained.message or "[dbee] bootstrap_overflow_storm")
-      return false
+      return false, "storm"
+    elseif drained.kind ~= "ok" then
+      utils.log("error", drained.message or "[dbee] bootstrap unavailable")
+      return false, drained.kind
     else
       local should_refresh = false
       for _, event in ipairs(drained.events or {}) do
@@ -1415,7 +1489,10 @@ function DrawerUI:_bootstrap_connection_invalidated_consumer()
         generation = promoted.generation or generation
       elseif promoted.kind == "storm" then
         utils.log("error", promoted.message or "[dbee] bootstrap_overflow_storm")
-        return false
+        return false, "storm"
+      elseif promoted.kind ~= "ok" then
+        utils.log("error", promoted.message or "[dbee] bootstrap unavailable")
+        return false, promoted.kind
       else
         for _, event in ipairs(promoted.events or {}) do
           if should_apply_bootstrap_invalidation(event, snapshot.snapshot_authoritative_epoch or {}) then
@@ -1424,6 +1501,7 @@ function DrawerUI:_bootstrap_connection_invalidated_consumer()
           end
         end
 
+        self._connection_invalidated_consumer_live = true
         if should_refresh then
           self:on_connection_invalidated({
             reason = "bootstrap_replay",
@@ -1435,11 +1513,64 @@ function DrawerUI:_bootstrap_connection_invalidated_consumer()
   end
 end
 
+---@private
+function DrawerUI:_teardown_connection_invalidated_consumer()
+  self._connection_invalidated_consumer_live = false
+  clear_connection_invalidations(self)
+
+  if not self.handler then
+    return
+  end
+
+  if type(self.handler.teardown_structure_consumer) == "function" then
+    self.handler:teardown_structure_consumer(self._connection_invalidated_consumer_id)
+  end
+  if type(self.handler.teardown_connection_invalidated_consumer) == "function" then
+    self.handler:teardown_connection_invalidated_consumer(self._connection_invalidated_consumer_id)
+  end
+end
+
+---@private
+---@return boolean
+function DrawerUI:_ensure_connection_invalidated_consumer()
+  if self._connection_invalidated_consumer_live then
+    return true
+  end
+
+  if type(self.handler.begin_connection_invalidated_bootstrap) ~= "function"
+    or type(self.handler.drain_connection_invalidated_bootstrap) ~= "function"
+    or type(self.handler.promote_to_live) ~= "function"
+  then
+    self._connection_invalidated_consumer_live = true
+    return true
+  end
+
+  for _ = 1, 2 do
+    local ok, reason = self:_bootstrap_connection_invalidated_consumer()
+    if ok then
+      return true
+    end
+
+    self:_teardown_connection_invalidated_consumer()
+    if reason ~= "storm" then
+      break
+    end
+  end
+
+  utils.log("error", "[dbee] bootstrap_unavailable")
+  return false
+end
+
 -- event listener for authoritative connection lifecycle invalidation
 ---@private
 ---@param data ConnectionInvalidatedEvent
 function DrawerUI:_flush_connection_invalidations()
   self._connection_invalidation_flush_scheduled = false
+
+  if not self._connection_invalidated_consumer_live or not self.winid or not vim.api.nvim_win_is_valid(self.winid) then
+    clear_connection_invalidations(self)
+    return
+  end
 
   local batched = self._pending_connection_invalidations
   self._pending_connection_invalidations = {}
@@ -1463,8 +1594,7 @@ function DrawerUI:_flush_connection_invalidations()
       self._struct_cache.branches[conn_id] = nil
       self._struct_cache.root_gen[conn_id] = self._struct_cache.root_applied[conn_id] or 0
       self._struct_cache.root_applied[conn_id] = self._struct_cache.root_applied[conn_id] or 0
-      self._struct_cache.root_epoch[conn_id] = event.authoritative_root_epoch
-        or self.handler:get_authoritative_root_epoch(conn_id)
+      self._struct_cache.root_epoch[conn_id] = event.authoritative_root_epoch or handler_root_epoch(self, conn_id)
     end
   end
 
@@ -1539,7 +1669,7 @@ function DrawerUI:on_connection_rewritten(old_conn_id, new_conn_id)
   if self._struct_cache.root_epoch[old_conn_id] ~= nil then
     self._struct_cache.root_epoch[new_conn_id] = self._struct_cache.root_epoch[old_conn_id]
   elseif self._struct_cache.root_epoch[new_conn_id] == nil then
-    self._struct_cache.root_epoch[new_conn_id] = self.handler:get_authoritative_root_epoch(new_conn_id)
+    self._struct_cache.root_epoch[new_conn_id] = handler_root_epoch(self, new_conn_id)
   end
 
   self._struct_cache.root[old_conn_id] = nil
@@ -1671,7 +1801,7 @@ function DrawerUI:on_database_selected(data)
   self:_prune_loaded_lazy_ids(data.conn_id)
   self._struct_cache.root[data.conn_id] = nil
   self._struct_cache.branches[data.conn_id] = nil
-  self._struct_cache.root_epoch[data.conn_id] = self.handler:bump_authoritative_root_epoch({ data.conn_id })
+  self._struct_cache.root_epoch[data.conn_id] = handler_bump_root_epoch(self, { data.conn_id })
     or (current_root_epoch(self, data.conn_id) + 1)
   invalidate_authoritative_caches(self)
   self:_patch_connection_subtree(data.conn_id, { suppress_root_request = true })
@@ -2011,19 +2141,23 @@ function DrawerUI:request_structure_reload(conn_id, opts)
   local requested_request_id = self._struct_cache.root_gen[conn_id] or 0
   self._struct_cache.root_gen[conn_id] = math.max(requested_request_id, applied_request_id) + 1
   local request_id = self._struct_cache.root_gen[conn_id]
-  self._struct_cache.root_epoch[conn_id] = self.handler:get_authoritative_root_epoch(conn_id)
-  self.handler:connection_get_structure_singleflight({
-    conn_id = conn_id,
-    consumer = self._connection_invalidated_consumer_id,
-    request_id = request_id,
-    caller_token = "drawer",
-    callback = function(data)
-      if data.error_kind == "superseded" then
-        return
-      end
-      self:on_structure_loaded(data)
-    end,
-  })
+  self._struct_cache.root_epoch[conn_id] = handler_root_epoch(self, conn_id)
+  if type(self.handler.connection_get_structure_singleflight) == "function" then
+    self.handler:connection_get_structure_singleflight({
+      conn_id = conn_id,
+      consumer = self._connection_invalidated_consumer_id,
+      request_id = request_id,
+      caller_token = "drawer",
+      callback = function(data)
+        if data.error_kind == "superseded" then
+          return
+        end
+        self:on_structure_loaded(data)
+      end,
+    })
+  else
+    self.handler:connection_get_structure_async(conn_id, request_id, self._struct_cache.root_epoch[conn_id], "drawer")
+  end
   return request_id
 end
 
@@ -2144,14 +2278,7 @@ function DrawerUI:prepare_close()
     input:unmount()
   end
 
-  if self.handler then
-    if type(self.handler.teardown_structure_consumer) == "function" then
-      self.handler:teardown_structure_consumer(self._connection_invalidated_consumer_id)
-    end
-    if type(self.handler.teardown_connection_invalidated_consumer) == "function" then
-      self.handler:teardown_connection_invalidated_consumer(self._connection_invalidated_consumer_id)
-    end
-  end
+  self:_teardown_connection_invalidated_consumer()
 
   clear_filter_state(self)
   self.winid = nil
@@ -2361,7 +2488,7 @@ function DrawerUI:get_actions()
       self:_prune_loaded_lazy_ids(conn_id)
       self._struct_cache.root[conn_id] = nil
       self._struct_cache.branches[conn_id] = nil
-      self._struct_cache.root_epoch[conn_id] = self.handler:bump_authoritative_root_epoch({ conn_id })
+      self._struct_cache.root_epoch[conn_id] = handler_bump_root_epoch(self, { conn_id })
         or (current_root_epoch(self, conn_id) + 1)
       invalidate_authoritative_caches(self)
       self:_patch_connection_subtree(conn_id, { suppress_root_request = true })
@@ -2907,6 +3034,10 @@ function DrawerUI:refresh()
     self:rebuild_buffer()
   end
 
+  if self.winid and not self:_ensure_connection_invalidated_consumer() then
+    return
+  end
+
   local exp = expansion.get(self.tree)
   local current_conn_id = (self.handler:get_current_connection() or {}).id
   self.current_conn_id = current_conn_id
@@ -2981,6 +3112,9 @@ function DrawerUI:show(winid)
   self.winid = winid
   vim.api.nvim_win_set_buf(self.winid, self.bufnr)
   common.configure_window_options(self.winid, self.window_options)
+  if not self:_ensure_connection_invalidated_consumer() then
+    return
+  end
   self:refresh()
 end
 
