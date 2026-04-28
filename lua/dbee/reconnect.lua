@@ -231,13 +231,6 @@ local function resolve_reloaded_connection(source_id, previous)
     end
   end
 
-  if #source_conns == 1 then
-    if prev_type ~= "" and tostring(source_conns[1].type or "") ~= prev_type then
-      return nil, "reloaded connection type changed unexpectedly"
-    end
-    return source_conns[1], nil
-  end
-
   return nil, "unable to map reloaded connection; reconnect manually from connection picker"
 end
 
@@ -484,13 +477,9 @@ function M.reconnect_connection(conn_id, opts)
   end
 
   local previous_current = nil
-  local previous_current_source_id = nil
   local ok_current, current_or_err = pcall(api.core.get_current_connection)
   if ok_current then
     previous_current = current_or_err
-    if previous_current and previous_current.id then
-      previous_current_source_id = find_source_id_for_connection(previous_current.id)
-    end
   end
 
   local target_conn = nil
@@ -513,8 +502,7 @@ function M.reconnect_connection(conn_id, opts)
 
   M.reset_connection_episode(conn_id)
 
-  local ok_reload, reload_result_or_err =
-    pcall(handler.source_reload_reconnect, handler, source_id, { defer_current_restore = true })
+  local ok_reload, reload_result_or_err = pcall(handler.source_reload_reconnect, handler, source_id)
   if not ok_reload then
     return false, "failed reloading connection source: " .. tostring(reload_result_or_err), nil, nil
   end
@@ -529,41 +517,7 @@ function M.reconnect_connection(conn_id, opts)
     handler:migrate_structure_flights(conn_id, reloaded_conn.id)
   end
 
-  local ok_set, set_err = pcall(api.core.set_current_connection, reloaded_conn.id)
-  if not ok_set then
-    return false, "failed selecting reloaded connection: " .. tostring(set_err), nil, nil
-  end
-
   M.reset_connection_episode(reloaded_conn.id)
-
-  if opts.restore_current ~= false and previous_current and previous_current.id ~= conn_id then
-    local restore_conn = previous_current
-    if previous_current_source_id and previous_current_source_id == source_id then
-      local resolved_previous, resolve_err = resolve_reloaded_connection(source_id, previous_current)
-      if not resolved_previous then
-        utils.log(
-          "warn",
-          ("Reconnect succeeded, but could not restore previous current connection %q: %s"):format(
-            tostring(previous_current.name or previous_current.id),
-            tostring(resolve_err)
-          )
-        )
-        return true, reloaded_conn.id, reloaded_conn.name, reloaded_conn.type
-      end
-      restore_conn = resolved_previous
-    end
-
-    local ok_restore, restore_err = pcall(api.core.set_current_connection, restore_conn.id)
-    if not ok_restore then
-      utils.log(
-        "warn",
-        ("Reconnect succeeded, but could not restore previous current connection %q: %s"):format(
-          tostring(previous_current.name or previous_current.id),
-          tostring(restore_err)
-        )
-      )
-    end
-  end
 
   local current_after = nil
   local ok_after, current_or_err = pcall(api.core.get_current_connection)

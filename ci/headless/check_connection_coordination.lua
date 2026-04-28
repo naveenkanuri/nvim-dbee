@@ -1150,6 +1150,85 @@ local function run_database_switch_and_reconnect_contracts()
   print("LIFECYCLE01_RECONNECT_LSP_NO_DOUBLE_HIT_OK=true")
 
   env_reconnect_lsp:cleanup()
+
+  local env_reconnect_lone = new_env()
+  env_reconnect_lone.lsp.register_events()
+  env_reconnect_lone.runtime.structure_requests = {}
+  env_reconnect_lone.lsp._request_structure_refresh(env_reconnect_lone.handler, "conn-alpha")
+  local lone_request = latest_request(env_reconnect_lone.runtime.structure_requests, "conn-alpha")
+  assert_true("reconnect_lone_lsp_request", lone_request ~= nil)
+  emit_structure_loaded(env_reconnect_lone, lone_request, {
+    caller_token = "__singleflight",
+  })
+  assert_true("reconnect_lone_lsp_started", env_reconnect_lone.lsp.status().running == true)
+
+  clear_notifications()
+  env_reconnect_lone.source._specs = {
+    {
+      id = "conn-solo",
+      name = "Solo",
+      type = "postgres",
+      url = "postgres://solo",
+    },
+  }
+  local ok_lone, lone_err = env_reconnect_lone.reconnect.reconnect_connection("conn-alpha")
+  Harness.drain()
+  assert_true("reconnect_lone_failed", not ok_lone)
+  assert_match("reconnect_lone_error", tostring(lone_err), "unable to map reloaded connection")
+  assert_eq("reconnect_lone_current_cleared", env_reconnect_lone.handler:get_current_connection(), nil)
+  assert_eq("reconnect_lone_runtime_current_cleared", env_reconnect_lone.runtime.current_conn_id, nil)
+  assert_eq("reconnect_lone_lsp_stopped", env_reconnect_lone.runtime.lsp.stops, 1)
+  assert_true("reconnect_lone_survivor_not_selected", env_reconnect_lone.runtime.current_conn_id ~= "conn-solo")
+  print("LIFECYCLE01_RECONNECT_NO_LONE_SURVIVOR_OK=true")
+
+  env_reconnect_lone:cleanup()
+
+  local env_reconnect_restore = new_env({
+    current_conn_id = "conn-beta",
+  })
+  env_reconnect_restore.lsp.register_events()
+  env_reconnect_restore.runtime.structure_requests = {}
+  env_reconnect_restore.lsp._request_structure_refresh(env_reconnect_restore.handler, "conn-beta")
+  local restore_request = latest_request(env_reconnect_restore.runtime.structure_requests, "conn-beta")
+  assert_true("reconnect_restore_lsp_request", restore_request ~= nil)
+  emit_structure_loaded(env_reconnect_restore, restore_request, {
+    caller_token = "__singleflight",
+  })
+  assert_true("reconnect_restore_lsp_started", env_reconnect_restore.lsp.status().running == true)
+
+  clear_notifications()
+  env_reconnect_restore.source._specs = {
+    {
+      id = "conn-alpha-new",
+      name = "Alpha",
+      type = "postgres",
+      url = "postgres://alpha",
+    },
+    {
+      id = "conn-beta-a",
+      name = "Beta Rewrite A",
+      type = "postgres",
+      url = "postgres://shared",
+    },
+    {
+      id = "conn-beta-b",
+      name = "Beta Rewrite B",
+      type = "postgres",
+      url = "postgres://shared",
+    },
+  }
+  local ok_restore, restored_conn_id = env_reconnect_restore.reconnect.reconnect_connection("conn-alpha")
+  Harness.drain()
+  assert_true("reconnect_restore_ok", ok_restore)
+  assert_eq("reconnect_restore_target_conn", restored_conn_id, "conn-alpha-new")
+  assert_eq("reconnect_restore_current_cleared", env_reconnect_restore.handler:get_current_connection(), nil)
+  assert_eq("reconnect_restore_runtime_current_cleared", env_reconnect_restore.runtime.current_conn_id, nil)
+  assert_true("reconnect_restore_target_not_current", env_reconnect_restore.runtime.current_conn_id ~= "conn-alpha-new")
+  assert_eq("reconnect_restore_lsp_stopped", env_reconnect_restore.runtime.lsp.stops, 1)
+  assert_true("reconnect_restore_warning_logged", has_notification("ambiguous or vanished", vim.log.levels.WARN))
+  print("LIFECYCLE01_RECONNECT_FAILURE_CLEARS_OK=true")
+
+  env_reconnect_restore:cleanup()
 end
 
 local function run_lsp_retarget_rewarm_contracts()
