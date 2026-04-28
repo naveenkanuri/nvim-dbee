@@ -1145,7 +1145,7 @@ function DrawerUI:on_database_selected(data)
   self._struct_cache.root_epoch[data.conn_id] = current_root_epoch(self, data.conn_id) + 1
   invalidate_authoritative_caches(self)
   self:_patch_connection_subtree(data.conn_id, { suppress_root_request = true })
-  self:request_structure_reload(data.conn_id)
+  self:request_structure_reload(data.conn_id, { force_new = true })
 end
 
 ---@private
@@ -1423,9 +1423,12 @@ end
 
 ---@private
 ---@param conn_id string
+---@param opts? { force_new?: boolean }
 ---@return integer request_id
-function DrawerUI:request_structure_reload(conn_id)
-  if root_request_pending(self, conn_id) then
+function DrawerUI:request_structure_reload(conn_id, opts)
+  opts = opts or {}
+
+  if not opts.force_new and root_request_pending(self, conn_id) then
     return self._struct_cache.root_gen[conn_id]
   end
 
@@ -1663,7 +1666,7 @@ function DrawerUI:get_actions()
       self._struct_cache.root_epoch[conn_id] = current_root_epoch(self, conn_id) + 1
       invalidate_authoritative_caches(self)
       self:_patch_connection_subtree(conn_id, { suppress_root_request = true })
-      self:request_structure_reload(conn_id)
+      self:request_structure_reload(conn_id, { force_new = true })
     end,
     action_1 = function()
       local node = self.tree:get_node() --[[@as DrawerUINode]]

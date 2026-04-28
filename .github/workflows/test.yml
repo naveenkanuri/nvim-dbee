@@ -72,6 +72,7 @@ jobs:
           - check_drawer_yank.lua
           - check_pane_jump.lua
           - check_drawer_filter.lua
+          - check_structure_lazy.lua
     steps:
       - uses: actions/checkout@v4
       - name: Install Neovim
