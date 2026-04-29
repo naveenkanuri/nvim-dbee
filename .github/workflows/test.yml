@@ -76,6 +76,8 @@ jobs:
           - check_notes_picker.lua
           - check_connection_lifecycle.lua
           - check_connection_coordination.lua
+          - check_connection_wizard.lua
+          - check_filesource_persistence.lua
     steps:
       - uses: actions/checkout@v4
       - name: Install Neovim
