@@ -546,6 +546,68 @@ function SchemaCache:_validate_columns(cols)
 end
 
 ---@private
+---@param data any
+---@return table?
+function SchemaCache:_normalize_schema_index(data)
+  if type(data) ~= "table" or is_array(data) then
+    return nil
+  end
+  if not is_array(data.schemas) or type(data.tables) ~= "table" or is_array(data.tables) then
+    return nil
+  end
+  if data.all_table_names ~= nil and not is_array(data.all_table_names) then
+    return nil
+  end
+
+  local normalized = {
+    schemas = {},
+    tables = {},
+  }
+
+  for _, schema in ipairs(data.schemas) do
+    if type(schema) ~= "string" then
+      return nil
+    end
+    normalized.schemas[#normalized.schemas + 1] = schema
+  end
+
+  if data.all_table_names then
+    for _, table_name in ipairs(data.all_table_names) do
+      if type(table_name) ~= "string" then
+        return nil
+      end
+    end
+  end
+
+  for schema, tbls in pairs(data.tables) do
+    if type(schema) ~= "string" or type(tbls) ~= "table" or is_array(tbls) then
+      return nil
+    end
+
+    normalized.tables[schema] = {}
+    for table_name, info in pairs(tbls) do
+      if type(table_name) ~= "string" then
+        return nil
+      end
+
+      local table_type = nil
+      if type(info) == "string" then
+        table_type = info
+      elseif type(info) == "table" and type(info.type) == "string" then
+        table_type = info.type
+      end
+      if not table_type then
+        return nil
+      end
+
+      normalized.tables[schema][table_name] = table_type
+    end
+  end
+
+  return normalized
+end
+
+---@private
 ---@param path string
 ---@return table?
 function SchemaCache:_file_stat(path)
@@ -845,6 +907,11 @@ function SchemaCache:load_from_disk()
     self:_remove_corrupt_file(path, "loading schema index")
     return false
   end
+  local normalized = self:_normalize_schema_index(data)
+  if not normalized then
+    self:_remove_corrupt_file(path, "loading schema index")
+    return false
+  end
 
   self.schemas = {}
   self.tables = {}
@@ -852,18 +919,14 @@ function SchemaCache:load_from_disk()
   self:_bump_disk_work_generation()
   self:_reset_indexes()
 
-  if data.schemas then
-    for _, s in ipairs(data.schemas) do
-      self.schemas[s] = true
-    end
+  for _, s in ipairs(normalized.schemas) do
+    self.schemas[s] = true
   end
 
-  if data.tables then
-    for schema, tbls in pairs(data.tables) do
-      self.tables[schema] = {}
-      for name, stype in pairs(tbls) do
-        self.tables[schema][name] = { type = stype }
-      end
+  for schema, tbls in pairs(normalized.tables) do
+    self.tables[schema] = {}
+    for name, stype in pairs(tbls) do
+      self.tables[schema][name] = { type = stype }
     end
   end
 

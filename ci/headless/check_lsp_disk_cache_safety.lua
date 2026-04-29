@@ -93,6 +93,23 @@ assert_eq("corrupt schema load returns false", cache:load_from_disk(), false)
 assert_true("corrupt schema warning", has_warning("corrupt cache"))
 assert_true("corrupt schema removed", vim.fn.filereadable(cache:_cache_path()) == 0)
 
+local malformed_schema_payloads = {
+  [[{"schemas":"bad","tables":{}}]],
+  [[{"schemas":["S"],"tables":"bad"}]],
+  [[{"schemas":["S"],"tables":{"S":[]}}]],
+  [[null]],
+  [[]],
+}
+for index, payload in ipairs(malformed_schema_payloads) do
+  write_file(cache:_cache_path(), payload)
+  local ok, loaded = pcall(function()
+    return cache:load_from_disk()
+  end)
+  assert_true("malformed schema load does not throw " .. index, ok)
+  assert_eq("malformed schema load " .. index, loaded, false)
+  assert_true("malformed schema removed " .. index, vim.fn.filereadable(cache:_cache_path()) == 0)
+end
+
 cache:build_from_metadata_rows({
   { schema_name = "S", table_name = "T", obj_type = "table" },
 })
@@ -175,6 +192,7 @@ vim.notify = saved_notify
 print("LSP11_ATOMIC_WRITE_OK=true")
 print("LSP11_CORRUPT_CACHE_RECOVERED=true")
 print("LSP11_DISK_CORRUPT_RECOVERY_OK=true")
+print("LSP11_DISK_INDEX_CORRUPT_RECOVERY_OK=true")
 print("LSP11_DISK_PRUNE_COUNT=" .. tostring(prune_cache:get_stats().disk_pruned))
 print("LSP11_DISK_CACHE_ISOLATED=true")
 print("LSP11_DISK_LOAD_BOUNDED=true")
