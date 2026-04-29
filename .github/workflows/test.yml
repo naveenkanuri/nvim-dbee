@@ -300,9 +300,6 @@ jobs:
           grep -q '^LSP11_DIAGNOSTIC_NAMESPACE_OK=true$' "${log}"
           grep -q '^LSP11_DIAGNOSTICS_SINGLE_NAMESPACE_OWNED=true$' "${log}"
           grep -Eq '^LSP01_REAL_LSP_PERF_ALL_PASS=(true|unfrozen)$' "${log}"
-          grep -q '^UX13_DRAWER_FILTER_EXPANDED_CACHED_VS_VISIBLE_OK=true$' "${log}"
-          grep -q '^UX13_WIZARD_NUI_WIN_OPTIONS_THREADED=true$' "${log}"
-          grep -q '^UX13_ALL_PASS=true$' "${log}"
       - name: LSP advisory promotion seam
         if: always()
         run: |
@@ -311,6 +308,34 @@ jobs:
           echo "Phase 10 LSP perf remains advisory in this workflow until ci/headless/lsp_perf_thresholds.lua is frozen."
           echo "Promotion requires four weeks at >=95% pass rate per platform, freezes Linux and macOS thresholds, then flips LSP01_PERF_GATE_MODE=blocking."
           echo "Once blocking is enabled, either the Linux or macOS LSP perf lane failing blocks the release."
+
+  phase13-ux13-rollup-gate:
+    needs: lua-lsp-perf-advisory
+    if: always()
+    runs-on: ubuntu-22.04
+    name: Phase 13 UX13 Rollup Gate
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Neovim ${{ env.NVIM_PERF_VERSION }}
+        run: |
+          curl -fsSLO https://github.com/neovim/neovim/releases/download/${NVIM_PERF_VERSION}/nvim-linux-x86_64.tar.gz
+          tar xzf nvim-linux-x86_64.tar.gz
+          echo "${PWD}/nvim-linux-x86_64/bin" >> "${GITHUB_PATH}"
+      - name: Download LSP advisory evidence
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*-lsp-perf-threshold-summary"
+          path: ${{ runner.temp }}/lsp01-perf-threshold-summary
+      - name: Validate UX13 rollups
+        run: |
+          set -eu
+          for platform in linux macos; do
+            log="${RUNNER_TEMP}/lsp01-perf-threshold-summary/${platform}-lsp-perf-threshold-summary/lsp01-stdout.log"
+            test -s "${log}"
+            UX13_ROLLUP_LOG="${log}" nvim --headless -u NONE -i NONE -n \
+              --cmd "set rtp+=${GITHUB_WORKSPACE}" \
+              -c "luafile ${GITHUB_WORKSPACE}/ci/headless/check_ux13_rollup.lua"
+          done
 
   bootstrap-testcontainers:
     runs-on: ubuntu-22.04

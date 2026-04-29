@@ -17,6 +17,7 @@ key-files:
   - ci/headless/check_ux13_rollup.lua
   - ci/headless/perf_bootstrap.mk
   - Makefile
+  - .github/workflows/test.yml
 metrics:
   ux13_all_pass: true
   draw01_rollup: unfrozen
@@ -33,6 +34,7 @@ metrics:
 | 13-01-02 | 819a3e3 | Added drawer filter visible-connection fallback for cold and mixed cached/uncached roots plus advisory perf scenarios. |
 | 13-01-03 | 1436bdc | Applied the locked wizard float highlight mapping to wizard Popup/Input/Menu surfaces with render-state tests. |
 | impl-gate r1 fix | this changeset | Added fail-closed UX13 rollup aggregation, deeper mixed drawer coverage, and real menu win_options threading coverage. |
+| impl-gate r2 fix | this changeset | Hardened UX13 rollup validation with strict duplicate-marker handling, LSP01 count checks, and a blocking CI rollup job outside advisory perf. |
 
 ## Deviations
 
@@ -102,9 +104,11 @@ metrics:
   - `LSP01_SCENARIOS_COUNT=33`
   - `LSP01_REAL_LSP_PERF_ALL_PASS=unfrozen`
 - Fail-closed Phase 13 rollup passed via `ci/headless/check_ux13_rollup.lua`, wired into `make perf-lsp`:
-  - `UX13_ROLLUP_MARKERS_CHECKED=62`
+  - `UX13_ROLLUP_LSP01_COUNTS_OK=true`
+  - `UX13_ROLLUP_MARKERS_CHECKED=66`
   - `UX13_ALL_PASS=true`
+  - CI downloads the `linux` and `macos` LSP advisory evidence artifacts and reruns the same rollup script in the blocking `phase13-ux13-rollup-gate` job.
 
 ## Self-Check: PASSED
 
-`UX13_ALL_PASS=true` is emitted by `ci/headless/check_ux13_rollup.lua` after scanning the combined verification log produced by `make perf-lsp`; it is no longer a summary-only self-attestation.
+`UX13_ALL_PASS=true` is emitted by `ci/headless/check_ux13_rollup.lua` after scanning the combined verification log produced by `make perf-lsp`; it is no longer a summary-only self-attestation. The rollup fails closed on missing markers, `false` markers, unsupported duplicate marker values, LSP01 count drift, or advisory rollup values outside `true|unfrozen`.
