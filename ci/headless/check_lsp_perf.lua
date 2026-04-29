@@ -393,13 +393,18 @@ local function make_handler(opts)
   function handler:assert_lifecycle_methods_complete(cohort)
     local required = {
       "get_current_connection",
-      "get_authoritative_root_epoch",
       "get_connection_state_snapshot",
       "begin_connection_invalidated_bootstrap",
       "drain_connection_invalidated_bootstrap",
       "promote_to_live",
       "connection_get_structure_singleflight",
     }
+    if cohort == "STARTUP_METADATA_FALLBACK" then
+      required[#required + 1] = "connection_execute"
+      required[#required + 1] = "call_store_result"
+    else
+      required[#required + 1] = "get_authoritative_root_epoch"
+    end
     local ok = true
     for _, name in ipairs(required) do
       if (handler.counters[name] or 0) == 0 then
