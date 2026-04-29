@@ -12,12 +12,19 @@
 ---@field private schema_lookup table<string, string>
 ---@field private table_lookup_by_schema table<string, table<string, string>>
 ---@field private table_lookup_global table<string, { name: string, schema: string }>
+---@field private async_inflight table<string, table>
+---@field private async_chains table<string, table>
+---@field private async_failed table<string, boolean>
+---@field private next_async_request_id integer
 ---@field private cache_dir string directory for disk cache
 local SchemaCache = {}
+
+local nio = require("nio")
 
 local MAX_COLUMNS_IN_MEMORY = 500
 local SYNC_COLUMN_FILE_LOAD_LIMIT = 100
 local COLUMN_CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
+local MATERIALIZATIONS = { "table", "view" }
 
 local CompletionItemKind = {
   Field = 5,
@@ -37,6 +44,20 @@ end
 ---@return string?
 local function fold(value)
   return value and value:upper() or nil
+end
+
+---@param values string[]
+---@return string[]
+local function unique_nonempty(values)
+  local out = {}
+  local seen = {}
+  for _, value in ipairs(values) do
+    if value and value ~= "" and not seen[value] then
+      seen[value] = true
+      out[#out + 1] = value
+    end
+  end
+  return out
 end
 
 ---@param items table[]
@@ -76,6 +97,10 @@ function SchemaCache:new(handler, conn_id)
     sync_column_files_loaded = 0,
     deferred_column_files_scheduled = 0,
     deferred_disk_work_scheduled = false,
+    async_inflight = {},
+    async_chains = {},
+    async_failed = {},
+    next_async_request_id = 0,
     cache_dir = cache_dir,
   }
   setmetatable(o, self)
@@ -280,6 +305,145 @@ function SchemaCache:_store_columns(key, cols)
   end
 
   self:_evict_columns_if_needed()
+end
+
+---@private
+---@param conn_id connection_id
+---@param schema string
+---@param table_name string
+---@param materialization string
+---@param root_epoch integer
+---@return string
+function SchemaCache:_async_key(conn_id, schema, table_name, materialization, root_epoch)
+  return table.concat({
+    tostring(conn_id or ""),
+    tostring(schema or ""),
+    tostring(table_name or ""),
+    tostring(materialization or ""),
+    tostring(root_epoch or 0),
+  }, "|")
+end
+
+---@private
+---@param conn_id connection_id
+---@param schema string
+---@param table_name string
+---@param root_epoch integer
+---@return string
+function SchemaCache:_async_chain_key(conn_id, schema, table_name, root_epoch)
+  return table.concat({
+    tostring(conn_id or ""),
+    tostring(schema or ""),
+    tostring(table_name or ""),
+    tostring(root_epoch or 0),
+  }, "|")
+end
+
+---@private
+---@return integer
+function SchemaCache:_next_request_id()
+  self.next_async_request_id = (self.next_async_request_id or 0) + 1
+  return self.next_async_request_id
+end
+
+---@private
+---@param opts table
+---@return integer
+function SchemaCache:_root_epoch(opts)
+  if opts and opts.root_epoch ~= nil then
+    return tonumber(opts.root_epoch) or 0
+  end
+  if self.handler and type(self.handler.get_authoritative_root_epoch) == "function" then
+    return tonumber(self.handler:get_authoritative_root_epoch(self.conn_id)) or 0
+  end
+  return 0
+end
+
+---@private
+---@param entry table
+function SchemaCache:_finish_async_entry(entry)
+  if entry.active_key then
+    self.async_inflight[entry.active_key] = nil
+  end
+  self.async_chains[entry.chain_key] = nil
+end
+
+---@private
+---@param entry table
+---@return boolean
+function SchemaCache:_queue_async_probe(entry)
+  if not self.handler or type(self.handler.connection_get_columns_async) ~= "function" then
+    self:_finish_async_entry(entry)
+    self.async_failed[entry.chain_key] = true
+    return false
+  end
+
+  local schema = entry.schema_candidates[entry.schema_index]
+  local table_name = entry.table_candidates[entry.table_index]
+  local materialization = entry.materializations[entry.materialization_index]
+  if not schema or not table_name or not materialization then
+    self:_finish_async_entry(entry)
+    self.async_failed[entry.chain_key] = true
+    return false
+  end
+
+  local request_id = self:_next_request_id()
+  local branch_id = table.concat({ "lsp-columns", tostring(request_id) }, ":")
+  local key = self:_async_key(entry.conn_id, schema, table_name, materialization, entry.root_epoch)
+  local query_schema = (schema == "_default") and "" or schema
+
+  local ok = pcall(self.handler.connection_get_columns_async, self.handler, entry.conn_id, request_id, branch_id, entry.root_epoch, {
+    table = table_name,
+    schema = query_schema,
+    materialization = materialization,
+    kind = "columns",
+  })
+  if not ok then
+    self:_finish_async_entry(entry)
+    self.async_failed[entry.chain_key] = true
+    return false
+  end
+
+  entry.active_key = key
+  entry.request_id = request_id
+  entry.branch_id = branch_id
+  entry.schema = schema
+  entry.table_name = table_name
+  entry.materialization = materialization
+  self.async_inflight[key] = entry
+  self.async_chains[entry.chain_key] = entry
+  return true
+end
+
+---@private
+---@param entry table
+---@return boolean
+function SchemaCache:_advance_async_probe(entry)
+  if entry.active_key then
+    self.async_inflight[entry.active_key] = nil
+    entry.active_key = nil
+  end
+
+  entry.materialization_index = entry.materialization_index + 1
+  if entry.materialization_index <= #entry.materializations then
+    return self:_queue_async_probe(entry)
+  end
+
+  entry.materialization_index = 1
+  entry.table_index = entry.table_index + 1
+  if entry.table_index <= #entry.table_candidates then
+    return self:_queue_async_probe(entry)
+  end
+
+  entry.table_index = 1
+  entry.schema_index = entry.schema_index + 1
+  if entry.schema_index <= #entry.schema_candidates then
+    return self:_queue_async_probe(entry)
+  end
+
+  self:_finish_async_entry(entry)
+  self.async_failed[entry.chain_key] = true
+  return false
 end
 
 ---@private
@@ -722,6 +886,167 @@ function SchemaCache:find_schema(schema_name)
   return self.schema_lookup[fold(schema_name)]
 end
 
+--- Get columns through the non-blocking async miss path.
+---@param schema string
+---@param table_name string
+---@param opts? { probe_if_missing?: boolean, materializations?: string[], root_epoch?: integer }
+---@return { columns: Column[], is_incomplete: boolean, in_flight: boolean, reason?: string }
+function SchemaCache:get_columns_async(schema, table_name, opts)
+  opts = opts or {}
+  schema = self:find_schema(schema) or schema or "_default"
+  table_name = table_name or ""
+
+  local actual_table = self:find_table_in_schema(schema, table_name)
+  if actual_table then
+    table_name = actual_table
+  end
+
+  local key = table_key(schema, table_name)
+  if self.columns[key] then
+    self:_touch_column(key)
+    return {
+      columns = self.columns[key],
+      is_incomplete = false,
+      in_flight = false,
+    }
+  end
+
+  local root_epoch = self:_root_epoch(opts)
+  local chain_key = self:_async_chain_key(self.conn_id, schema, table_name, root_epoch)
+  if self.async_failed[chain_key] then
+    return {
+      columns = {},
+      is_incomplete = false,
+      in_flight = false,
+      reason = "previous_failure",
+    }
+  end
+
+  if self.async_chains[chain_key] then
+    return {
+      columns = {},
+      is_incomplete = true,
+      in_flight = true,
+    }
+  end
+
+  local tbl_info = (self.tables[schema] or {})[table_name]
+  if not tbl_info and not opts.probe_if_missing then
+    return {
+      columns = {},
+      is_incomplete = false,
+      in_flight = false,
+      reason = "unresolved_table",
+    }
+  end
+
+  local schema_candidates = { schema }
+  local table_candidates = { table_name }
+  if opts.probe_if_missing then
+    schema_candidates = unique_nonempty({
+      self:find_schema(schema),
+      schema,
+      schema:upper(),
+      "_default",
+    })
+    table_candidates = unique_nonempty({
+      table_name,
+      table_name:upper(),
+    })
+  end
+
+  local entry = {
+    conn_id = self.conn_id,
+    root_epoch = root_epoch,
+    chain_key = chain_key,
+    schema_candidates = schema_candidates,
+    table_candidates = table_candidates,
+    materializations = opts.materializations or MATERIALIZATIONS,
+    schema_index = 1,
+    table_index = 1,
+    materialization_index = 1,
+    future = nio.control and nio.control.future and nio.control.future() or nil,
+  }
+
+  if not self:_queue_async_probe(entry) then
+    return {
+      columns = {},
+      is_incomplete = false,
+      in_flight = false,
+      reason = "queue_failed",
+    }
+  end
+
+  return {
+    columns = {},
+    is_incomplete = true,
+    in_flight = true,
+  }
+end
+
+--- Apply a structure_children_loaded column payload to the async cache.
+---@param data { conn_id?: connection_id, request_id?: integer, branch_id?: string, root_epoch?: integer, kind?: string, columns?: Column[], error?: any }
+---@return boolean applied
+function SchemaCache:on_columns_loaded(data)
+  if not data or data.kind ~= "columns" then
+    return false
+  end
+  if data.conn_id ~= self.conn_id then
+    return false
+  end
+
+  local payload_epoch = tonumber(data.root_epoch) or 0
+  local entry = nil
+  for _, candidate in pairs(self.async_inflight) do
+    if candidate.conn_id == data.conn_id
+      and candidate.request_id == data.request_id
+      and candidate.branch_id == data.branch_id
+      and candidate.root_epoch == payload_epoch
+    then
+      entry = candidate
+      break
+    end
+  end
+  if not entry then
+    return false
+  end
+
+  if data.error then
+    self:_finish_async_entry(entry)
+    self.async_failed[entry.chain_key] = true
+    return true
+  end
+
+  local cols = data.columns or {}
+  if #cols == 0 then
+    return self:_advance_async_probe(entry)
+  end
+
+  if not self.schemas[entry.schema] then
+    self.schemas[entry.schema] = true
+  end
+  if not self.tables[entry.schema] then
+    self.tables[entry.schema] = {}
+  end
+  self.tables[entry.schema][entry.table_name] = { type = entry.materialization }
+  self:_rebuild_structure_indexes()
+
+  local key = table_key(entry.schema, entry.table_name)
+  self:_store_columns(key, cols)
+  self:_save_columns_to_disk(key, cols)
+  self:_finish_async_entry(entry)
+  return true
+end
+
+--- Cancel or retire all async column miss state.
+---@param _reason? string
+---@param _opts? table
+function SchemaCache:cancel_async(_reason, _opts)
+  self.async_inflight = {}
+  self.async_chains = {}
+  self.async_failed = {}
+end
+
 --- Get columns for a specific table, lazy-loading from handler on first access.
 --- Results are cached to disk for subsequent sessions.
 ---@param schema string
@@ -919,6 +1244,7 @@ end
 
 --- Invalidate in-memory cache (disk cache remains for next session).
 function SchemaCache:invalidate()
+  self:cancel_async("invalidate")
   self.schemas = {}
   self.tables = {}
   self.columns = {}
