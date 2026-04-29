@@ -1125,15 +1125,30 @@ end
 local function request_diagnostics(state, method, lines, expected_line)
   vim.api.nvim_buf_set_lines(state.bufnr, 0, -1, false, lines)
   local prior_handler = vim.lsp.handlers["textDocument/publishDiagnostics"]
+  local prior_schedule = vim.schedule
   local done = false
   local response = nil
-  local start_ns = uv.hrtime()
+  local start_ns = method == "textDocument/didChange" and nil or uv.hrtime()
+  local compute_only = method ~= "textDocument/didChange"
+  if method == "textDocument/didChange" then
+    -- didChange diagnostics are debounced in production; perf timing starts
+    -- at the debounce compute callback, excluding the configured debounce wait.
+    vim.schedule = function(callback)
+      return prior_schedule(function()
+        if not start_ns then
+          start_ns = uv.hrtime()
+          compute_only = true
+        end
+        callback()
+      end)
+    end
+  end
   vim.lsp.handlers["textDocument/publishDiagnostics"] = function(err, result, ctx, config)
     if result and result.uri == state.uri then
       response = {
         err = err,
         result = result,
-        elapsed_ns = uv.hrtime() - start_ns,
+        elapsed_ns = uv.hrtime() - (start_ns or uv.hrtime()),
       }
       done = true
     elseif prior_handler then
@@ -1159,6 +1174,7 @@ local function request_diagnostics(state, method, lines, expected_line)
     return done
   end, 5)
   vim.lsp.handlers["textDocument/publishDiagnostics"] = prior_handler
+  vim.schedule = prior_schedule
   if not ok or not response then
     error("diagnostics timeout")
   end
@@ -1198,10 +1214,11 @@ local function request_diagnostics(state, method, lines, expected_line)
     ))
   end
 
-  return diagnostics, response.elapsed_ns
+  return diagnostics, response.elapsed_ns, compute_only
 end
 
 local function register_diagnostics(slug, threshold_key, line_count, method)
+  local didchange_compute_only = method ~= "textDocument/didChange"
   register({
     slug = slug,
     threshold_key = threshold_key,
@@ -1213,10 +1230,22 @@ local function register_diagnostics(slug, threshold_key, line_count, method)
     end,
     run = function(state, finish)
       local lines, expected_line = make_diagnostic_lines(line_count)
-      local _, elapsed_ns = request_diagnostics(state, method, lines, expected_line)
+      local _, elapsed_ns, compute_only = request_diagnostics(state, method, lines, expected_line)
+      if method == "textDocument/didChange" and not compute_only then
+        scenario_sentinels[slug] = false
+      end
+      didchange_compute_only = didchange_compute_only and compute_only
       finish(elapsed_ns)
     end,
     after = completion_after,
+    on_complete = function()
+      if method == "textDocument/didChange" then
+        emit("LSP01_DIAGNOSTICS_DIDCHANGE_COMPUTE_ONLY", didchange_compute_only and "true" or "false")
+        if not didchange_compute_only then
+          scenario_sentinels[slug] = false
+        end
+      end
+    end,
   })
 end
 
