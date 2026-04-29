@@ -291,6 +291,8 @@ jobs:
           grep -q '^LSP11_DISK_DISCOVERY_BOUNDED=true$' "${log}"
           grep -q '^LSP11_DISK_DEFERRED_GENERATION_FENCED=true$' "${log}"
           grep -q '^LSP11_DISK_CORRUPT_RECOVERY_OK=true$' "${log}"
+          grep -q '^LSP11_DISK_INDEX_CORRUPT_RECOVERY_OK=true$' "${log}"
+          grep -q '^LSP11_DISK_DEFERRED_PRUNE_DRAINED=true$' "${log}"
           grep -q '^LSP11_ASYNC_AUTO_RETRIGGER_OK=true$' "${log}"
           grep -q '^LSP11_ASYNC_PAYLOAD_ERROR_HANDLED=true$' "${log}"
           grep -q '^LSP11_ASYNC_MATERIALIZATION_PROBE_CHAIN_OK=true$' "${log}"

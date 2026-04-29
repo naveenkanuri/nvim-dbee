@@ -2108,8 +2108,10 @@ local function large_disk_startup_run(state, finish, slug)
 	    local stats = lsp._cache and lsp._cache:get_stats() or {}
 	    emit("LSP01_STARTUP_LARGE_DISK_CACHE_DISCOVERY_COUNT", stats.sync_column_files_discovered or "NA")
 	    emit("LSP01_STARTUP_LARGE_DISK_CACHE_SYNC_LOAD_COUNT", stats.sync_column_files_loaded or "NA")
+	    emit("LSP01_STARTUP_LARGE_DISK_CACHE_DEFERRED_WORK_SCHEDULED", stats.deferred_disk_work_scheduled and "true" or "false")
 	    local discovery_bounded = (stats.sync_column_files_discovered or math.huge) <= 100
-	    local bounded = discovery_bounded and (stats.sync_column_files_loaded or math.huge) <= 100
+	    local deferred_bounded = stats.deferred_disk_work_scheduled == true or stats.deferred_disk_work_drained == true
+	    local bounded = discovery_bounded and deferred_bounded and (stats.sync_column_files_loaded or math.huge) <= 100
 	    emit("LSP11_DISK_DISCOVERY_BOUNDED", discovery_bounded and "true" or "false")
 	    emit("LSP11_DISK_LOAD_BOUNDED", bounded and "true" or "false")
     if not bounded then

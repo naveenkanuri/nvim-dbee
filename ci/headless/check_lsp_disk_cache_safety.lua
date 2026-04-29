@@ -164,6 +164,34 @@ assert_eq("large schema loads", large_cache:load_from_disk(), true)
 local large_stats = large_cache:get_stats()
 assert_true("sync discovery bounded", large_stats.sync_column_files_discovered <= 100)
 assert_true("sync load bounded", large_stats.sync_column_files_loaded <= 100)
+large_cache:cancel_async("test")
+
+local deferred_prune_cache = new_cache("disk-deferred-prune")
+deferred_prune_cache:build_from_metadata_rows({
+  { schema_name = "S", table_name = "T", obj_type = "table" },
+})
+deferred_prune_cache:save_to_disk()
+for i = 1, 150 do
+  local key = string.format("S.DEFERRED_OLD_%03d", i)
+  local path = deferred_prune_cache:_columns_cache_path(key)
+  write_file(path, vim.json.encode({
+    { name = "OLD_ID", type = "NUMBER" },
+  }))
+  local old = os.time() - (31 * 24 * 60 * 60)
+  uv.fs_utime(path, old, old)
+end
+assert_eq("deferred prune schema loads", deferred_prune_cache:load_from_disk(), true)
+local deferred_initial = deferred_prune_cache:get_stats()
+assert_true("deferred prune sync discovery bounded", deferred_initial.sync_column_files_discovered <= 100)
+vim.wait(3000, function()
+  local stats = deferred_prune_cache:get_stats()
+  return stats.deferred_disk_work_drained and stats.disk_pruned >= 150
+end, 20)
+local deferred_stats = deferred_prune_cache:get_stats()
+assert_true("deferred prune drained", deferred_stats.deferred_disk_work_drained)
+assert_true("deferred prune processed remainder", deferred_stats.deferred_column_files_processed >= 50)
+assert_true("deferred prune removed all old files", deferred_stats.disk_pruned >= 150)
+assert_eq("deferred prune files gone", #vim.fn.glob(deferred_prune_cache.cache_dir .. "/" .. "disk-deferred-prune_cols_*.json", false, true), 0)
 
 local fenced_cache = new_cache("disk-fenced")
 local fenced_files = {}
@@ -198,6 +226,7 @@ print("LSP11_DISK_CACHE_ISOLATED=true")
 print("LSP11_DISK_LOAD_BOUNDED=true")
 print("LSP11_DISK_DEFERRED_GENERATION_FENCED=true")
 print("LSP11_DISK_DISCOVERY_BOUNDED=true")
+print("LSP11_DISK_DEFERRED_PRUNE_DRAINED=true")
 
 vim.fn.delete(root, "rf")
 vim.cmd("qa!")
