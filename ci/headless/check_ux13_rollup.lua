@@ -17,54 +17,6 @@ local function fail(failures)
   vim.cmd("cquit 1")
 end
 
-local log_path = vim.env.UX13_ROLLUP_LOG
-if not log_path or log_path == "" then
-  fail({ "missing UX13_ROLLUP_LOG" })
-end
-
-local ok_read, lines = pcall(vim.fn.readfile, log_path)
-if not ok_read or type(lines) ~= "table" then
-  fail({ "unable to read UX13_ROLLUP_LOG: " .. tostring(log_path) })
-end
-
-local marker_values = {}
-for _, line in ipairs(lines) do
-  local key, value = line:match("^([%w_]+)=(.+)$")
-  if key and value then
-    marker_values[key] = marker_values[key] or {}
-    marker_values[key][#marker_values[key] + 1] = value
-  end
-end
-
-local failures = {}
-
-local function require_marker(label, allowed)
-  local values = marker_values[label]
-  if not values or #values == 0 then
-    failures[#failures + 1] = "missing " .. label
-    return
-  end
-
-  for _, value in ipairs(values) do
-    if value == "false" then
-      failures[#failures + 1] = label .. " emitted false"
-      return
-    end
-  end
-
-  for _, value in ipairs(values) do
-    if allowed[value] then
-      return
-    end
-  end
-
-  failures[#failures + 1] = label .. " has unsupported value " .. tostring(values[#values])
-end
-
-local function require_true(label)
-  require_marker(label, { ["true"] = true })
-end
-
 local required_true_markers = {
   "UX13_CACHE_VERSION2_WRITTEN",
   "UX13_CACHE_LEGACY_V1_SILENT",
@@ -128,17 +80,206 @@ local required_true_markers = {
   "LSP11_ASYNC_SYNC_DELIVERY_OK",
 }
 
-for _, marker in ipairs(required_true_markers) do
-  require_true(marker)
+local ROLLUP_CHECK_COUNT = #required_true_markers + 6
+
+local function parse_markers(lines)
+  local marker_values = {}
+  local marker_records = {}
+  for _, line in ipairs(lines) do
+    local key, value = line:match("^([%w_]+)=(.*)$")
+    if key and value then
+      marker_values[key] = marker_values[key] or {}
+      marker_values[key][#marker_values[key] + 1] = value
+      marker_records[#marker_records + 1] = {
+        key = key,
+        value = value,
+      }
+    end
+  end
+  return marker_values, marker_records
 end
 
-require_marker("DRAW01_REAL_NUI_PERF_ALL_PASS", { ["true"] = true, unfrozen = true })
-require_marker("LSP01_REAL_LSP_PERF_ALL_PASS", { ["true"] = true, unfrozen = true })
+local function evaluate(lines)
+  local marker_values, marker_records = parse_markers(lines)
+  local failures = {}
+  local count_failures = {}
 
-if #failures > 0 then
-  fail(failures)
+  local function add_count_failure(reason)
+    count_failures[#count_failures + 1] = reason
+    failures[#failures + 1] = "LSP01 count check failed: " .. reason
+  end
+
+  local function require_marker(label, allowed)
+    local values = marker_values[label]
+    if not values or #values == 0 then
+      failures[#failures + 1] = "missing " .. label
+      return
+    end
+
+    for _, value in ipairs(values) do
+      if not allowed[value] then
+        failures[#failures + 1] = label .. " has unsupported value " .. tostring(value)
+      end
+    end
+  end
+
+  local function require_single_marker(label, expected)
+    local values = marker_values[label]
+    if not values or #values == 0 then
+      add_count_failure("missing " .. label)
+      return
+    end
+    if #values ~= 1 then
+      add_count_failure(label .. " expected exactly one emission, got " .. tostring(#values))
+      return
+    end
+    if values[1] ~= expected then
+      add_count_failure(label .. " expected " .. expected .. ", got " .. tostring(values[1]))
+    end
+  end
+
+  local function require_pattern_count(label, key_pattern, expected, opts)
+    opts = opts or {}
+    local count = 0
+    local seen = {}
+    for _, record in ipairs(marker_records) do
+      if record.key:match(key_pattern) then
+        if record.value ~= "true" then
+          add_count_failure(record.key .. " has unsupported value " .. tostring(record.value))
+        end
+        if opts.distinct then
+          if not seen[record.key] then
+            seen[record.key] = true
+            count = count + 1
+          end
+        else
+          count = count + 1
+        end
+      end
+    end
+    if count ~= expected then
+      add_count_failure(label .. " expected " .. tostring(expected) .. ", got " .. tostring(count))
+    end
+  end
+
+  local function require_true(label)
+    require_marker(label, { ["true"] = true })
+  end
+
+  for _, marker in ipairs(required_true_markers) do
+    require_true(marker)
+  end
+
+  require_marker("DRAW01_REAL_NUI_PERF_ALL_PASS", { ["true"] = true, unfrozen = true })
+  require_marker("LSP01_REAL_LSP_PERF_ALL_PASS", { ["true"] = true, unfrozen = true })
+  require_single_marker("LSP01_SCENARIOS_COUNT", "33")
+  require_pattern_count("LSP01 sentinel markers", "^LSP01_.*_SENTINEL_OK$", 33, { distinct = true })
+  require_pattern_count("LSP01 no-stale-client markers", "^LSP01_.*_NO_STALE_CLIENTS$", 18, { distinct = true })
+  require_pattern_count("LSP01 diagnostics didchange compute-only markers", "^LSP01_DIAGNOSTICS_DIDCHANGE_COMPUTE_ONLY$", 3)
+
+  return {
+    ok = #failures == 0,
+    failures = failures,
+    count_failures = count_failures,
+  }
 end
 
-emit("UX13_ROLLUP_MARKERS_CHECKED", tostring(#required_true_markers + 2))
+local function read_rollup_lines()
+  local log_path = vim.env.UX13_ROLLUP_LOG
+  if not log_path or log_path == "" then
+    fail({ "missing UX13_ROLLUP_LOG" })
+  end
+
+  local ok_read, lines = pcall(vim.fn.readfile, log_path)
+  if not ok_read or type(lines) ~= "table" then
+    fail({ "unable to read UX13_ROLLUP_LOG: " .. tostring(log_path) })
+  end
+  return lines
+end
+
+local function valid_synthetic_log()
+  local lines = {}
+  for _, marker in ipairs(required_true_markers) do
+    lines[#lines + 1] = marker .. "=true"
+  end
+  lines[#lines + 1] = "DRAW01_REAL_NUI_PERF_ALL_PASS=unfrozen"
+  lines[#lines + 1] = "LSP01_REAL_LSP_PERF_ALL_PASS=unfrozen"
+  lines[#lines + 1] = "LSP01_SCENARIOS_COUNT=33"
+  for index = 1, 33 do
+    lines[#lines + 1] = string.format("LSP01_SYNTH_%02d_SENTINEL_OK=true", index)
+  end
+  for index = 1, 18 do
+    lines[#lines + 1] = string.format("LSP01_SYNTH_%02d_NO_STALE_CLIENTS=true", index)
+  end
+  for _ = 1, 3 do
+    lines[#lines + 1] = "LSP01_DIAGNOSTICS_DIDCHANGE_COMPUTE_ONLY=true"
+  end
+  return lines
+end
+
+local function has_failure(result, pattern)
+  for _, failure in ipairs(result.failures or {}) do
+    if failure:find(pattern, 1, true) then
+      return true
+    end
+  end
+  for _, failure in ipairs(result.count_failures or {}) do
+    if failure:find(pattern, 1, true) then
+      return true
+    end
+  end
+  return false
+end
+
+local function selftest()
+  local valid = evaluate(valid_synthetic_log())
+  if not valid.ok then
+    fail({ "selftest valid synthetic log failed: " .. table.concat(valid.failures, "; ") })
+  end
+
+  local duplicate_unexpected = valid_synthetic_log()
+  table.insert(duplicate_unexpected, 1, "UX13_CACHE_VERSION2_WRITTEN=maybe")
+  local duplicate_result = evaluate(duplicate_unexpected)
+  if duplicate_result.ok or not has_failure(duplicate_result, "UX13_CACHE_VERSION2_WRITTEN has unsupported value maybe") then
+    fail({ "selftest duplicate unexpected marker did not fail" })
+  end
+
+  local missing_count = valid_synthetic_log()
+  for index = #missing_count, 1, -1 do
+    if missing_count[index]:match("^LSP01_SYNTH_33_SENTINEL_OK=") then
+      table.remove(missing_count, index)
+      break
+    end
+  end
+  local missing_count_result = evaluate(missing_count)
+  if missing_count_result.ok or not has_failure(missing_count_result, "LSP01 sentinel markers expected 33, got 32") then
+    fail({ "selftest missing LSP01 sentinel count did not fail" })
+  end
+
+  local false_marker = valid_synthetic_log()
+  table.insert(false_marker, 1, "UX13_CACHE_VERSION2_WRITTEN=false")
+  local false_result = evaluate(false_marker)
+  if false_result.ok or not has_failure(false_result, "UX13_CACHE_VERSION2_WRITTEN has unsupported value false") then
+    fail({ "selftest false duplicate marker did not fail" })
+  end
+
+  emit("UX13_ROLLUP_SELFTEST_ALL_PASS", "true")
+  vim.cmd("qa!")
+end
+
+if vim.env.UX13_ROLLUP_SELFTEST == "1" then
+  selftest()
+end
+
+local result = evaluate(read_rollup_lines())
+if not result.ok then
+  for _, failure in ipairs(result.count_failures) do
+    emit("UX13_ROLLUP_LSP01_COUNT_FAIL", failure)
+  end
+  fail(result.failures)
+end
+
+emit("UX13_ROLLUP_LSP01_COUNTS_OK", "true")
+emit("UX13_ROLLUP_MARKERS_CHECKED", tostring(ROLLUP_CHECK_COUNT))
 emit("UX13_ALL_PASS", "true")
 vim.cmd("qa!")
