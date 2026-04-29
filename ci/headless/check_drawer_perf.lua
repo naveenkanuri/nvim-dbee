@@ -1007,8 +1007,8 @@ local function build_restart_metrics()
       return new_drawer_fixture()
     end,
     run = function(state, finish)
-      local started = uv.hrtime()
       local input = open_filter(state.drawer)
+      local started = uv.hrtime()
       active_buffer_watch = {
         bufnr = state.drawer.bufnr,
         mode = "idle",
