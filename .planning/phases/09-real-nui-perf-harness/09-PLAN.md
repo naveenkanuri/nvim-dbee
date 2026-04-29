@@ -1,7 +1,7 @@
 ---
 phase: 09-real-nui-perf-harness
 plan: 01
-revision: 4
+revision: 5
 type: execute
 wave: 1
 depends_on: []
@@ -255,17 +255,21 @@ DRAW01_PHASE4_BUDGETS_PASS := true iff the real-nui harness reports the locked c
 
 Additive Phase 9 pass formula:
 ```text
-scenario_pass(platform, scenario) :=
-  scenario_median_ms <= threshold_file_or_advisory_threshold(platform, scenario).median_ms
-  AND
-  scenario_p95_ms <= threshold_file_or_advisory_threshold(platform, scenario).p95_ms
+Per-scenario active-platform verdicts:
+- `DRAW01_{LINUX|MACOS}_PERF_THRESHOLD_<SCENARIO>_PASS=true|false` is emitted only when that active-platform slot has `STATUS=frozen`.
+- A frozen slot prints `true` iff `measurement.median_ms <= threshold.median_ms` AND `measurement.p95_ms <= threshold.p95_ms`; otherwise it prints `false`.
+- If the active-platform slot is `STATUS=candidate` or `STATUS=missing`, the per-scenario `*_PASS` marker is `unfrozen`.
+- Inactive-platform slots still emit `*_MEDIAN_CANDIDATE_MS`, `*_P95_CANDIDATE_MS`, and `*_STATUS`, but they do not participate in the active-platform pass calculation and their absence does not bubble `unfrozen`.
 
-platform_threshold_pass(platform) := true iff every blocking additive scenario passes:
-  initial_render, filter_first_redraw, filter_stable, lazy_expand, cached_expand, load_more
+Per-platform rollups:
+- `DRAW01_{LINUX|MACOS}_PERF_THRESHOLD_PASS=true` only when every active-platform additive slot (`initial_render`, `filter_first_redraw`, `filter_stable`, `lazy_expand`, `cached_expand`, `load_more`) is `STATUS=frozen` and every per-scenario `*_PASS=true`.
+- `DRAW01_{LINUX|MACOS}_PERF_THRESHOLD_PASS=false` when the active platform has no `unfrozen` slots and at least one frozen per-scenario `*_PASS=false`.
+- `DRAW01_{LINUX|MACOS}_PERF_THRESHOLD_PASS=unfrozen` when any active-platform additive slot is not frozen.
 
-DRAW01_REAL_NUI_PERF_ALL_PASS := true iff
-  DRAW01_PHASE4_BUDGETS_PASS=true
-  AND platform_threshold_pass(active_platform)=true
+Overall rollup:
+- `DRAW01_REAL_NUI_PERF_ALL_PASS=true` only when `DRAW01_PHASE4_BUDGETS_PASS=true` and the active-platform rollup is `true`.
+- `DRAW01_REAL_NUI_PERF_ALL_PASS=unfrozen` when `DRAW01_PHASE4_BUDGETS_PASS=true` and the active-platform rollup is `unfrozen`.
+- `DRAW01_REAL_NUI_PERF_ALL_PASS=false` otherwise.
 
 Once the workflow flips to blocking after the locked four-week, >=95% soak,
 both platform jobs must independently print `DRAW01_REAL_NUI_PERF_ALL_PASS=true`.
