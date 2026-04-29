@@ -112,6 +112,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     continue-on-error: true
     name: Lua Real-Nui Perf Advisory (${{ matrix.platform }})
+    env:
+      PERF_PLUGIN_ROOT: ${{ runner.temp }}/nvim-dbee-perf-plugins
+      DRAW01_PERF_ARTIFACT_DIR: ${{ runner.temp }}/draw01-perf/${{ matrix.platform }}
+      DRAW01_PERF_SUMMARY_PATH: ${{ runner.temp }}/draw01-perf/${{ matrix.platform }}/draw01-perf-summary-${{ matrix.platform }}.txt
+      DRAW01_PERF_TRACE_PATH: ${{ runner.temp }}/draw01-perf/${{ matrix.platform }}/draw01-perf-trace-${{ matrix.platform }}.json
     defaults:
       run:
         working-directory: .
@@ -123,18 +128,40 @@ jobs:
           tar xzf ${{ matrix.archive }}
           echo "${PWD}/${{ matrix.dir }}/bin" >> "${GITHUB_PATH}"
       - name: Bootstrap pinned perf plugins
-        env:
-          PERF_PLUGIN_ROOT: ${{ runner.temp }}/nvim-dbee-perf-plugins
         run: make perf-bootstrap
-      - name: Run advisory real-nui perf harness
-        env:
-          PERF_PLUGIN_ROOT: ${{ runner.temp }}/nvim-dbee-perf-plugins
-          DRAW01_PERF_ARTIFACT_DIR: ${{ runner.temp }}/draw01-perf/${{ matrix.platform }}
-        run: DRAW01_PERF_GATE_MODE=advisory make perf PERF_PLATFORM=${{ matrix.platform }}
-      - name: Advisory promotion seam
+      - name: Rerun preserved DRAW-01 smoke suites
         run: |
+          nvim --headless -u NONE -i NONE -n \
+            --cmd "set rtp^=${PERF_PLUGIN_ROOT}/nui.nvim | set rtp+=${GITHUB_WORKSPACE}" \
+            -c "luafile ${GITHUB_WORKSPACE}/ci/headless/check_drawer_filter.lua"
+          nvim --headless -u NONE -i NONE -n \
+            --cmd "set rtp^=${PERF_PLUGIN_ROOT}/nui.nvim | set rtp+=${GITHUB_WORKSPACE}" \
+            -c "luafile ${GITHUB_WORKSPACE}/ci/headless/check_structure_lazy.lua"
+      - name: Run advisory real-nui perf harness
+        run: DRAW01_PERF_GATE_MODE=advisory make perf PERF_PLATFORM=${{ matrix.platform }}
+      - name: Assert advisory perf artifacts exist
+        if: always()
+        run: |
+          test -s "${DRAW01_PERF_SUMMARY_PATH}"
+          test -s "${DRAW01_PERF_TRACE_PATH}"
+      - name: Upload advisory perf artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: draw01-real-nui-perf-${{ matrix.platform }}
+          path: |
+            ${{ env.DRAW01_PERF_SUMMARY_PATH }}
+            ${{ env.DRAW01_PERF_TRACE_PATH }}
+          if-no-files-found: error
+      - name: Advisory promotion seam
+        if: always()
+        run: |
+          echo "Local macOS replay: ART_DIR=\$(mktemp -d) DRAW01_PERF_GATE_MODE=advisory DRAW01_PERF_ARTIFACT_DIR=\$ART_DIR DRAW01_PERF_SUMMARY_PATH=\$ART_DIR/draw01-perf-summary-macos.txt DRAW01_PERF_TRACE_PATH=\$ART_DIR/draw01-perf-trace-macos.json make perf PERF_PLATFORM=macos"
+          echo "Local Linux replay: ART_DIR=\$(mktemp -d) DRAW01_PERF_GATE_MODE=advisory DRAW01_PERF_ARTIFACT_DIR=\$ART_DIR DRAW01_PERF_SUMMARY_PATH=\$ART_DIR/draw01-perf-summary-linux.txt DRAW01_PERF_TRACE_PATH=\$ART_DIR/draw01-perf-trace-linux.json make perf PERF_PLATFORM=linux"
+          echo "CI-shaped replay: act -W .github/workflows/test.yml -j lua-real-nui-perf-advisory"
           echo "Phase 9 perf remains advisory in this workflow until ci/headless/perf_thresholds.lua is frozen."
           echo "Promotion flips DRAW01_PERF_GATE_MODE=blocking in the same change that freezes Linux and macOS thresholds."
+          echo "Once blocking is enabled, either the Linux or macOS perf lane failing blocks the release."
 
   bootstrap-testcontainers:
     runs-on: ubuntu-22.04
