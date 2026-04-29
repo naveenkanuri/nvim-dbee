@@ -261,12 +261,18 @@ function sources.FileSource:update(id, details)
   local existing = read_json_records(self.path)
   local remove_keys = normalize_remove_keys(details)
   local clean_details = strip_control_fields(details)
+  local matched = false
 
   for index, ex in ipairs(existing) do
     if ex.id == id then
+      matched = true
       local stripped = delete_top_level_keys(ex, remove_keys)
       existing[index] = recursive_merge(stripped, clean_details)
     end
+  end
+
+  if not matched then
+    error("connection id not found: " .. tostring(id))
   end
 
   write_records_atomically(self.path, existing)

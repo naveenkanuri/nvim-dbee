@@ -1251,6 +1251,40 @@ local function run_filesource_raw_fallback_contract()
   print("DCFG02_FILESOURCE_RAW_FALLBACK_NO_METADATA_OK=true")
 end
 
+local function run_missing_filesource_edit_failure_contract()
+  local env = new_env({
+    current_conn_id = "conn-meta",
+  })
+
+  clear_runtime_observations(env.runtime)
+  local wizard = expect_wizard(env, function()
+    env.drawer:open_edit_connection_with_wizard(env:file_source_meta(), "conn-meta")
+  end)
+
+  env.file_source:delete("conn-meta")
+  local after_delete = read_json(env.file_path)
+
+  fill_postgres_form(wizard, {
+    name = "Vanished PG",
+    host = "vanished-host",
+    port = "5432",
+    database = "vanished_db",
+    username = "vanished_user",
+    password = "vanished_pass",
+    sslmode = "require",
+  })
+
+  local submission = wizard:submit()
+  Harness.drain()
+  assert_eq("missing row submission", submission, nil)
+  assert_match("missing row error", wizard.state.last_error, "connection id not found")
+  assert_eq("missing row no invalidation", #env.runtime.connection_invalidated_events, 0)
+  assert_eq("missing row file unchanged", vim.inspect(read_json(env.file_path)), vim.inspect(after_delete))
+
+  wizard:close()
+  env:cleanup()
+end
+
 local function run_partial_failure_contract()
   local env = new_env({
     current_conn_id = false,
@@ -1356,6 +1390,7 @@ run_local_validation_contract()
 run_transient_ping_and_fail_closed_contracts()
 run_other_mode_contracts()
 run_filesource_raw_fallback_contract()
+run_missing_filesource_edit_failure_contract()
 run_partial_failure_contract()
 run_no_auto_activate_contract()
 
