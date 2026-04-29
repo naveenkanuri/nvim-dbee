@@ -890,6 +890,7 @@ local function build_apply_metrics(query)
     before = function()
       collectgarbage("collect")
       local state = new_drawer_fixture()
+      state.drawer.filter_debounce_ms = 0
       local ok_capture, err_capture = state.drawer:capture_filter_snapshot()
       assert_true("capture_filter_snapshot_apply_" .. query, ok_capture ~= false and err_capture == nil)
       return state
@@ -899,6 +900,46 @@ local function build_apply_metrics(query)
         state.drawer:apply_filter(query)
       end)
       finish(sample_ns)
+    end,
+  })
+end
+
+local function build_filter_first_redraw_metrics()
+  return run_benchmark({
+    title = "DRAW01 filter first redraw",
+    before = function()
+      local state = new_drawer_fixture()
+      state.drawer.filter_debounce_ms = 0
+      state.filter_input = open_filter(state.drawer)
+      return state
+    end,
+    run = function(state, finish)
+      local started = uv.hrtime()
+      local watch = { bufnr = state.drawer.bufnr }
+      active_buffer_watch = watch
+      state.filter_input._.on_change(LOCKED_QUERY_COHORT.broad_query)
+      active_buffer_watch = nil
+      local stop_ns = watch.first_ns or watch.last_ns or uv.hrtime()
+      finish(stop_ns - started)
+    end,
+  })
+end
+
+local function build_filter_stable_metrics()
+  return run_benchmark({
+    title = "DRAW01 filter stable",
+    before = function()
+      local state = new_drawer_fixture()
+      state.drawer.filter_debounce_ms = FILTER_STABLE_DEBOUNCE_MS
+      state.filter_input = open_filter(state.drawer)
+      return state
+    end,
+    run = function(state, finish)
+      measure_async_drawer_write(state.drawer.bufnr, "idle", FILTER_STABLE_IDLE_MS, function()
+        state.filter_input._.on_change(LOCKED_QUERY_COHORT.broad_query)
+      end, function(sample_ns)
+        finish(sample_ns)
+      end)
     end,
   })
 end
@@ -992,6 +1033,8 @@ local initial_render_samples = run_benchmark({
 local startup_samples, startup_extras = build_startup_metrics()
 local refresh_samples = build_refresh_metrics()
 local restart_samples = build_restart_metrics()
+local filter_first_redraw_samples = build_filter_first_redraw_metrics()
+local filter_stable_samples = build_filter_stable_metrics()
 
 local apply_max_hit_samples = build_apply_metrics(LOCKED_QUERY_COHORT.max_hit_query)
 local apply_broad_samples = build_apply_metrics(LOCKED_QUERY_COHORT.broad_query)
@@ -1016,6 +1059,10 @@ local prompt_mount_median_ns = median(startup_extras.prompt_ns or {})
 local refresh_median_ns = median(refresh_samples)
 local refresh_max_ns = maximum(refresh_samples)
 local restart_median_ns = median(restart_samples)
+local filter_first_redraw_median_ns = median(filter_first_redraw_samples)
+local filter_first_redraw_p95_ns = percentile(filter_first_redraw_samples, 0.95)
+local filter_stable_median_ns = median(filter_stable_samples)
+local filter_stable_p95_ns = percentile(filter_stable_samples, 0.95)
 
 local apply_max_hit_median_ns = median(apply_max_hit_samples)
 local apply_broad_median_ns = median(apply_broad_samples)
@@ -1039,6 +1086,10 @@ emit("DRAW01_MODEL_BUILD_MS", format_float(ns_to_ms(model_build_median_ns)))
 emit("DRAW01_PROMPT_MOUNT_MS", format_float(ns_to_ms(prompt_mount_median_ns)))
 emit("DRAW01_REFRESH_MS", format_float(ns_to_ms(refresh_median_ns)) .. "/" .. format_float(ns_to_ms(refresh_max_ns)))
 emit("DRAW01_FILTER_RESTART_MS", format_float(ns_to_ms(restart_median_ns)))
+emit("DRAW01_FILTER_FIRST_REDRAW_MEDIAN_MS", format_float(ns_to_ms(filter_first_redraw_median_ns)))
+emit("DRAW01_FILTER_FIRST_REDRAW_P95_MS", format_float(ns_to_ms(filter_first_redraw_p95_ns)))
+emit("DRAW01_FILTER_STABLE_MEDIAN_MS", format_float(ns_to_ms(filter_stable_median_ns)))
+emit("DRAW01_FILTER_STABLE_P95_MS", format_float(ns_to_ms(filter_stable_p95_ns)))
 
 emit_median_max("DRAW01_APPLY_MAX_HIT_MS", apply_max_hit_samples)
 emit_median_max("DRAW01_APPLY_BROAD_MS", apply_broad_samples)
