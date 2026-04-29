@@ -75,6 +75,14 @@ Requirements for the built-in dbee LSP optimization milestone.
 
 - [ ] **LSP-PERF-01**: User can rely on built-in dbee LSP optimization work because Phase 10 provides deterministic headless macOS and Linux perf evidence for production LSP startup, completion, diagnostics, alias parsing, schema-cache build, and disk-cache load/save, using pinned Phase 9 perf infrastructure, `LSP01_*` markers, semantic sentinels, and advisory-to-blocking threshold persistence.
 
+### LSP Optimization
+
+- [ ] **LSP-OPT-01**: User gets a bounded built-in dbee LSP editing path because Phase 11 removes synchronous column metadata fetches from completion, warms missing columns through the existing async handler event surface, dedupes in-flight misses by connection/schema/table/materialization/root epoch, caps in-memory column cache with a 500-table LRU, precomputes schema/table/column completion indexes, debounces `didChange` diagnostics by default, and writes/prunes LSP disk cache safely.
+
+### LSP Correctness
+
+- [ ] **LSP-CORR-01**: User gets truthful static LSP schema diagnostics because Phase 11 validates multi-line `FROM`/`JOIN` references, fixes multi-JOIN-per-line diagnostic ranges, treats schema-qualified `schema.table` references as schema-aware, separates LSP schema warnings from adapter execution diagnostics by namespace/source/severity, and ignores stale async column results across reconnect/source/database invalidations.
+
 ## v2 Requirements
 
 Deferred to future milestone. Tracked but not in current roadmap.
@@ -135,13 +143,15 @@ Which phases cover which requirements. Updated during roadmap creation.
 | NOTES-01 | Phase 6 | Pending |
 | PERF-01 | Phase 9 | Pending |
 | LSP-PERF-01 | Phase 10 | Pending |
+| LSP-OPT-01 | Phase 11 | Pending |
+| LSP-CORR-01 | Phase 11 | Pending |
 
 **Coverage:**
 - v1.0 requirements: 18 total, 18 complete
 - v1.1 requirements: 5 total, 5 mapped
-- v1.2 requirements: 1 total, 1 mapped
+- v1.2 requirements: 3 total, 3 mapped
 - Unmapped: 0
 
 ---
 *Requirements defined: 2026-03-05*
-*Last updated: 2026-04-29 after v1.2 milestone definition*
+*Last updated: 2026-04-29 after Phase 11 discuss*
