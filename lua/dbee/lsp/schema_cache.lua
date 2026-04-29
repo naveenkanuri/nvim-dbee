@@ -5,8 +5,41 @@
 ---@field private tables table<string, table<string, { type: string }>>
 ---@field private columns table<string, Column[]>
 ---@field private all_table_names string[] flat list for unqualified completion
+---@field private schema_items lsp.CompletionItem[]
+---@field private table_items_by_schema table<string, lsp.CompletionItem[]>
+---@field private all_table_items lsp.CompletionItem[]
+---@field private column_items_by_key table<string, lsp.CompletionItem[]>
+---@field private schema_lookup table<string, string>
+---@field private table_lookup_by_schema table<string, table<string, string>>
+---@field private table_lookup_global table<string, { name: string, schema: string }>
 ---@field private cache_dir string directory for disk cache
 local SchemaCache = {}
+
+local CompletionItemKind = {
+  Field = 5,
+  Class = 7,
+  Module = 9,
+  Struct = 22,
+}
+
+---@param schema string
+---@param table_name string
+---@return string
+local function table_key(schema, table_name)
+  return (schema or "_default") .. "." .. table_name
+end
+
+---@param value string?
+---@return string?
+local function fold(value)
+  return value and value:upper() or nil
+end
+
+---@param items table[]
+---@return table[]
+local function copy_items(items)
+  return vim.deepcopy(items or {})
+end
 
 ---@param handler Handler
 ---@param conn_id connection_id
@@ -20,6 +53,13 @@ function SchemaCache:new(handler, conn_id)
     tables = {},
     columns = {},
     all_table_names = {},
+    schema_items = {},
+    table_items_by_schema = {},
+    all_table_items = {},
+    column_items_by_key = {},
+    schema_lookup = {},
+    table_lookup_by_schema = {},
+    table_lookup_global = {},
     cache_dir = cache_dir,
   }
   setmetatable(o, self)
@@ -34,7 +74,7 @@ function SchemaCache:build_from_metadata_rows(rows)
   self.schemas = {}
   self.tables = {}
   self.columns = {}
-  self.all_table_names = {}
+  self:_reset_indexes()
 
   if not rows or #rows == 0 then
     return
@@ -63,7 +103,7 @@ function SchemaCache:build_from_metadata_rows(rows)
     end
   end
 
-  self:_build_name_list()
+  self:_rebuild_structure_indexes()
 end
 
 --- Build the cache from a pre-fetched structure tree.
@@ -73,30 +113,139 @@ function SchemaCache:build_from_structure(structs)
   self.schemas = {}
   self.tables = {}
   self.columns = {}
-  self.all_table_names = {}
+  self:_reset_indexes()
 
   if not structs or structs == vim.NIL then
     return
   end
 
   self:_flatten(structs, nil)
-  self:_build_name_list()
+  self:_rebuild_structure_indexes()
+end
+
+---@private
+function SchemaCache:_reset_indexes()
+  self.all_table_names = {}
+  self.schema_items = {}
+  self.table_items_by_schema = {}
+  self.all_table_items = {}
+  self.column_items_by_key = {}
+  self.schema_lookup = {}
+  self.table_lookup_by_schema = {}
+  self.table_lookup_global = {}
 end
 
 ---@private
 function SchemaCache:_build_name_list()
+  self:_rebuild_structure_indexes()
+end
+
+---@private
+function SchemaCache:_rebuild_structure_indexes()
+  self.all_table_names = {}
+  self.schema_items = {}
+  self.table_items_by_schema = {}
+  self.all_table_items = {}
+  self.schema_lookup = {}
+  self.table_lookup_by_schema = {}
+  self.table_lookup_global = {}
+
+  local schema_names = vim.tbl_keys(self.schemas)
+  table.sort(schema_names)
+
+  for _, schema in ipairs(schema_names) do
+    self.schema_lookup[fold(schema)] = self.schema_lookup[fold(schema)] or schema
+    if schema ~= "_default" then
+      self.schema_items[#self.schema_items + 1] = {
+        label = schema,
+        kind = CompletionItemKind.Module,
+        detail = "schema",
+        insertText = schema,
+        sortText = "0_" .. schema,
+      }
+    end
+
+    local table_names = vim.tbl_keys(self.tables[schema] or {})
+    table.sort(table_names)
+    local schema_lookup = {}
+    local schema_items = {}
+
+    for _, name in ipairs(table_names) do
+      local info = self.tables[schema][name] or { type = "table" }
+      local folded = fold(name)
+      schema_lookup[folded] = schema_lookup[folded] or name
+      self.table_lookup_global[folded] = self.table_lookup_global[folded]
+        or { name = name, schema = schema }
+
+      local detail = (schema ~= "_default") and (schema .. "." .. name) or name
+      local item = {
+        label = name,
+        kind = (info.type == "view") and CompletionItemKind.Class or CompletionItemKind.Struct,
+        detail = detail .. " (" .. (info.type or "table") .. ")",
+        insertText = name,
+        sortText = "0_" .. name,
+      }
+      schema_items[#schema_items + 1] = item
+    end
+
+    self.table_lookup_by_schema[schema] = schema_lookup
+    self.table_items_by_schema[schema] = schema_items
+  end
+
   local seen = {}
-  local unique = {}
-  for _, tbls in pairs(self.tables) do
-    for name, _ in pairs(tbls) do
-      if not seen[name] then
-        seen[name] = true
-        unique[#unique + 1] = name
+  for _, schema in ipairs(schema_names) do
+    for _, item in ipairs(self.table_items_by_schema[schema] or {}) do
+      if not seen[item.label] then
+        seen[item.label] = true
+        self.all_table_items[#self.all_table_items + 1] = vim.deepcopy(item)
+        self.all_table_names[#self.all_table_names + 1] = item.label
       end
     end
   end
-  table.sort(unique)
-  self.all_table_names = unique
+end
+
+---@private
+---@param key string
+function SchemaCache:_drop_column_index(key)
+  self.column_items_by_key[key] = nil
+end
+
+---@private
+---@param schema string
+---@param table_name string
+function SchemaCache:_update_column_index(schema, table_name)
+  local key = table_key(schema, table_name)
+  local cols = self.columns[key]
+  if not cols then
+    self:_drop_column_index(key)
+    return
+  end
+
+  local items = {}
+  for _, col in ipairs(cols) do
+    items[#items + 1] = {
+      label = col.name,
+      kind = CompletionItemKind.Field,
+      detail = col.type,
+      insertText = col.name,
+      sortText = "0_" .. col.name,
+    }
+  end
+  table.sort(items, function(a, b)
+    return a.label < b.label
+  end)
+  self.column_items_by_key[key] = items
+end
+
+---@private
+function SchemaCache:_rebuild_column_indexes()
+  self.column_items_by_key = {}
+  for key, _ in pairs(self.columns) do
+    local schema, name = key:match("^(.-)%.(.+)$")
+    if schema and name then
+      self:_update_column_index(schema, name)
+    end
+  end
 end
 
 ---@private
@@ -211,8 +360,8 @@ function SchemaCache:load_from_disk()
 
   self.schemas = {}
   self.tables = {}
-  self.all_table_names = {}
   self.columns = {}
+  self:_reset_indexes()
 
   if data.schemas then
     for _, s in ipairs(data.schemas) do
@@ -229,8 +378,9 @@ function SchemaCache:load_from_disk()
     end
   end
 
-  self:_build_name_list()
+  self:_rebuild_structure_indexes()
   self:_load_columns_from_disk()
+  self:_rebuild_column_indexes()
   return true
 end
 
@@ -266,6 +416,10 @@ function SchemaCache:_load_columns_from_disk()
         local fname = vim.fn.fnamemodify(path, ":t:r") -- remove dir and .json
         local key = fname:sub(#prefix + 1)
         self.columns[key] = cols
+        local schema, name = key:match("^(.-)%.(.+)$")
+        if schema and name then
+          self:_update_column_index(schema, name)
+        end
       end
     end
   end
@@ -276,7 +430,9 @@ end
 --- Get all schema names.
 ---@return string[]
 function SchemaCache:get_schemas()
-  return vim.tbl_keys(self.schemas)
+  local schemas = vim.tbl_keys(self.schemas)
+  table.sort(schemas)
+  return schemas
 end
 
 --- Get all table/view names in a schema.
@@ -289,7 +445,47 @@ end
 --- Get all table names across all schemas.
 ---@return string[]
 function SchemaCache:get_all_table_names()
-  return self.all_table_names
+  return vim.deepcopy(self.all_table_names)
+end
+
+--- Get precomputed schema completion items.
+---@return lsp.CompletionItem[]
+function SchemaCache:get_schema_completion_items()
+  return copy_items(self.schema_items)
+end
+
+--- Get precomputed table completion items for a schema.
+---@param schema string
+---@return lsp.CompletionItem[]
+function SchemaCache:get_table_completion_items(schema)
+  local actual_schema = self:find_schema(schema) or schema
+  return copy_items(self.table_items_by_schema[actual_schema])
+end
+
+--- Get precomputed table completion items across all schemas.
+---@return lsp.CompletionItem[]
+function SchemaCache:get_all_table_completion_items()
+  return copy_items(self.all_table_items)
+end
+
+--- Get precomputed column completion items for a table.
+---@param schema string
+---@param table_name string
+---@return lsp.CompletionItem[]
+function SchemaCache:get_column_completion_items(schema, table_name)
+  local actual_schema = self:find_schema(schema) or schema or "_default"
+  local actual_table = self:find_table_in_schema(actual_schema, table_name) or table_name
+  return copy_items(self.column_items_by_key[table_key(actual_schema, actual_table)])
+end
+
+--- Find a schema name case-insensitively.
+---@param schema_name string?
+---@return string?
+function SchemaCache:find_schema(schema_name)
+  if not schema_name or schema_name == "" then
+    return nil
+  end
+  return self.schema_lookup[fold(schema_name)]
 end
 
 --- Get columns for a specific table, lazy-loading from handler on first access.
@@ -303,26 +499,30 @@ function SchemaCache:get_columns(schema, table_name, opts)
   schema = schema or "_default"
 
   -- Normalize schema casing against known cache entries.
-  if not self.schemas[schema] then
-    for _, known_schema in ipairs(self:get_schemas()) do
-      if known_schema:upper() == schema:upper() then
-        schema = known_schema
-        break
-      end
-    end
-  end
+  schema = self:find_schema(schema) or schema
 
-  local key = schema .. "." .. table_name
+  local key = table_key(schema, table_name)
   if self.columns[key] then
     return self.columns[key]
   end
 
+  local actual_table = self:find_table_in_schema(schema, table_name)
+  if actual_table then
+    table_name = actual_table
+    key = table_key(schema, table_name)
+    if self.columns[key] then
+      return self.columns[key]
+    end
+  end
+
   local tbl_info = (self.tables[schema] or {})[table_name]
   if not tbl_info then
-    tbl_info = (self.tables["_default"] or {})[table_name]
+    local default_table = self:find_table_in_schema("_default", table_name)
+    tbl_info = default_table and (self.tables["_default"] or {})[default_table] or nil
     if tbl_info then
       schema = "_default"
-      key = schema .. "." .. table_name
+      table_name = default_table
+      key = table_key(schema, table_name)
       if self.columns[key] then
         return self.columns[key]
       end
@@ -331,17 +531,11 @@ function SchemaCache:get_columns(schema, table_name, opts)
 
   if not tbl_info then
     -- Normalize table casing against known entries in this schema.
-    local upper = table_name:upper()
-    for known_name, info in pairs(self.tables[schema] or {}) do
-      if known_name:upper() == upper then
-        table_name = known_name
-        tbl_info = info
-        key = schema .. "." .. table_name
-        if self.columns[key] then
-          return self.columns[key]
-        end
-        break
-      end
+    table_name = self:find_table_in_schema(schema, table_name) or table_name
+    tbl_info = (self.tables[schema] or {})[table_name]
+    key = table_key(schema, table_name)
+    if tbl_info and self.columns[key] then
+      return self.columns[key]
     end
   end
 
@@ -399,12 +593,7 @@ function SchemaCache:get_columns(schema, table_name, opts)
 
     -- Prefer an existing schema with matching case-insensitive name.
     local matched_schema = nil
-    for _, s in ipairs(self:get_schemas()) do
-      if s:upper() == schema:upper() then
-        matched_schema = s
-        break
-      end
-    end
+    matched_schema = self:find_schema(schema)
 
     add_schema_candidate(matched_schema)
     add_schema_candidate(schema)
@@ -448,10 +637,11 @@ function SchemaCache:get_columns(schema, table_name, opts)
   end
   self.schemas[resolved_schema] = true
   self.tables[resolved_schema][resolved_table] = { type = resolved_type }
-  self:_build_name_list()
+  self:_rebuild_structure_indexes()
 
-  key = resolved_schema .. "." .. resolved_table
+  key = table_key(resolved_schema, resolved_table)
   self.columns[key] = cols
+  self:_update_column_index(resolved_schema, resolved_table)
   self:_save_columns_to_disk(key, cols)
   return cols
 end
@@ -462,22 +652,30 @@ function SchemaCache:get_cached_columns()
   return self.columns
 end
 
+--- Find a table within a specific schema case-insensitively.
+---@param schema_name string
+---@param table_name string
+---@return string? actual_name, string? actual_schema
+function SchemaCache:find_table_in_schema(schema_name, table_name)
+  local actual_schema = self:find_schema(schema_name) or schema_name
+  local schema_lookup = self.table_lookup_by_schema[actual_schema]
+  if not schema_lookup then
+    return nil, actual_schema
+  end
+  local actual_name = schema_lookup[fold(table_name)]
+  if actual_name then
+    return actual_name, actual_schema
+  end
+  return nil, actual_schema
+end
+
 --- Find a table name matching case-insensitively.
 ---@param table_name string
 ---@return string? actual_name, string? schema
 function SchemaCache:find_table(table_name)
-  for schema, tbls in pairs(self.tables) do
-    if tbls[table_name] then
-      return table_name, schema
-    end
-  end
-  local upper = table_name:upper()
-  for schema, tbls in pairs(self.tables) do
-    for name, _ in pairs(tbls) do
-      if name:upper() == upper then
-        return name, schema
-      end
-    end
+  local match = self.table_lookup_global[fold(table_name)]
+  if match then
+    return match.name, match.schema
   end
   return nil, nil
 end
@@ -487,7 +685,7 @@ function SchemaCache:invalidate()
   self.schemas = {}
   self.tables = {}
   self.columns = {}
-  self.all_table_names = {}
+  self:_reset_indexes()
 end
 
 --- Update connection ID and clear in-memory cache.
