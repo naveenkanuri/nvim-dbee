@@ -765,7 +765,7 @@ local function validate_submission(state)
     end
   elseif state.mode == "postgres_url" then
     required("url", "URL")
-    if fields.url and fields.url ~= "" and not parse_postgres_url(fields.url) then
+    if fields.url and fields.url ~= "" and not has_postgres_url_scheme(fields.url) then
       errors[#errors + 1] = "URL must be a `postgres://` or `postgresql://` connection string."
     end
   elseif state.mode == "postgres_form" then

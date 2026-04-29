@@ -1206,6 +1206,45 @@ local function run_postgres_form_encoding_contract()
   env:cleanup()
 end
 
+local function run_postgres_url_runtime_contract()
+  local env = new_env({
+    current_conn_id = "conn-meta",
+  })
+
+  clear_runtime_observations(env.runtime)
+  local wizard = expect_wizard(env, function()
+    env.drawer:open_add_connection_with_wizard(env:file_source_meta(), {
+      type = "postgres",
+    })
+  end)
+  wizard:set_mode("postgres_url")
+  wizard:set_field("name", "PG URL No DB")
+  wizard:set_field("url", "postgres://user:pass@db-host?sslmode=require")
+  submit_and_assert_success(wizard)
+
+  assert_true("pg runtime ping called", #env.runtime.connection_test_spec_calls == 1)
+  assert_eq(
+    "pg runtime ping url",
+    env.runtime.connection_test_spec_calls[1].url,
+    "postgres://user:pass@db-host?sslmode=require"
+  )
+
+  local persisted = find_record_by_name(read_json(env.file_path), "PG URL No DB")
+  assert_true("pg runtime record exists", persisted ~= nil)
+  assert_eq("pg runtime url persisted", persisted.url, "postgres://user:pass@db-host?sslmode=require")
+  assert_eq("pg runtime mode persisted", persisted.wizard.mode, "postgres_url")
+  assert_eq("pg runtime url metadata", persisted.wizard.fields.url, "postgres://user:pass@db-host?sslmode=require")
+
+  local reopened = expect_wizard(env, function()
+    env.drawer:open_edit_connection_with_wizard(env:file_source_meta(), persisted.id)
+  end)
+  assert_eq("pg runtime reopen mode", reopened.state.mode, "postgres_url")
+  assert_eq("pg runtime reopen url", reopened:current_fields().url, "postgres://user:pass@db-host?sslmode=require")
+  reopened:close()
+  env:cleanup()
+  print("DCFG02_PG_URL_RUNTIME_COMPAT_OK=true")
+end
+
 local function fill_postgres_form(wizard, fields)
   wizard:set_mode("postgres_form")
   for key, value in pairs(fields or {}) do
@@ -1519,6 +1558,7 @@ end
 run_navigation_and_seed_contracts()
 run_local_validation_contract()
 run_postgres_form_encoding_contract()
+run_postgres_url_runtime_contract()
 run_transient_ping_and_fail_closed_contracts()
 run_other_mode_contracts()
 run_filesource_raw_fallback_contract()
