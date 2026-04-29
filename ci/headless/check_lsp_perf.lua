@@ -836,6 +836,86 @@ register_cached_completion(
   }
 )
 
+local function reset_column_fetch_tracking(handler)
+  handler.counters.connection_get_columns = 0
+  handler.column_fetch_deltas = {}
+end
+
+local function register_column_miss_completion()
+  local measured_state = nil
+  local fetch_deltas = {}
+  local expected_deltas = { 1, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+  local query = "SELECT * FROM SCHEMA_001.TABLE_000001 t WHERE t."
+
+  local function make_miss_state()
+    local state = completion_before(100, {
+      preload_columns = false,
+    })
+    reset_column_fetch_tracking(state.cache.handler)
+    return state
+  end
+
+  register({
+    slug = "COMPLETION_COLUMN_MISS_SYNC",
+    threshold_key = "completion_column_miss_sync",
+    corpus = "tables:100,context:column-miss-sync,alias:t,fetch_deltas:1-then-0",
+    after_warmup_before_measured = function()
+      if measured_state then
+        completion_after(measured_state)
+      end
+      measured_state = make_miss_state()
+      reset_column_fetch_tracking(measured_state.cache.handler)
+      fetch_deltas = {}
+    end,
+    before = function(iteration)
+      if iteration <= WARMUP_COUNT then
+        return make_miss_state()
+      end
+      if not measured_state then
+        measured_state = make_miss_state()
+      end
+      return measured_state
+    end,
+    run = function(state, finish, iteration)
+      local handler = state.cache.handler
+      local before_count = handler.counters.connection_get_columns or 0
+      local items, elapsed_ns = request_completion(state, query, #query)
+      require_completion_labels("COMPLETION_COLUMN_MISS_SYNC", items, { "COL_001", "COL_010" }, { "COL_999" })
+      if iteration > WARMUP_COUNT then
+        local after_count = handler.counters.connection_get_columns or 0
+        fetch_deltas[#fetch_deltas + 1] = after_count - before_count
+      end
+      finish(elapsed_ns)
+    end,
+    after = function(state, iteration)
+      if iteration <= WARMUP_COUNT then
+        completion_after(state)
+      elseif iteration == WARMUP_COUNT + MEASURED_COUNT then
+        completion_after(state)
+        measured_state = nil
+      end
+    end,
+    on_complete = function()
+      local delta_text = table.concat(vim.tbl_map(tostring, fetch_deltas), ",")
+      local ok = #fetch_deltas == #expected_deltas
+      for i, expected in ipairs(expected_deltas) do
+        if fetch_deltas[i] ~= expected then
+          ok = false
+          break
+        end
+      end
+      emit("LSP01_COLUMN_MISS_FETCH_DELTAS", delta_text)
+      emit("LSP01_COLUMN_MISS_FETCH_DELTAS_OK", ok and "true" or "false")
+      if not ok then
+        scenario_sentinels.COMPLETION_COLUMN_MISS_SYNC = false
+        fail("COMPLETION_COLUMN_MISS_SYNC fetch deltas mismatch: " .. delta_text)
+      end
+    end,
+  })
+end
+
+register_column_miss_completion()
+
 local function run_benchmark(spec)
   local iteration = 0
   local state = nil
