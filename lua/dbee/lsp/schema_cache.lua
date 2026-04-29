@@ -45,6 +45,11 @@ local function copy_items(items)
   return vim.deepcopy(items or {})
 end
 
+---@param message string
+local function warn(message)
+  vim.notify(message, vim.log.levels.WARN)
+end
+
 ---@param handler Handler
 ---@param conn_id connection_id
 ---@return SchemaCache
@@ -370,6 +375,7 @@ function SchemaCache:_load_column_file(path, prefix)
   f:close()
   local ok, cols = pcall(vim.json.decode, content)
   if not ok or not cols then
+    self:_remove_corrupt_file(path, "loading columns")
     return false
   end
 
@@ -471,6 +477,58 @@ function SchemaCache:_cache_path()
 end
 
 ---@private
+---@param path string
+---@param operation string
+function SchemaCache:_remove_corrupt_file(path, operation)
+  warn(string.format("dbee-lsp: corrupt cache while %s: %s", operation, path))
+  os.remove(path)
+end
+
+---@private
+---@param path string
+---@param value any
+---@param operation string
+---@return boolean
+function SchemaCache:_atomic_write_json(path, value, operation)
+  vim.fn.mkdir(vim.fn.fnamemodify(path, ":h"), "p")
+
+  local ok, json = pcall(vim.json.encode, value)
+  if not ok then
+    warn(string.format("dbee-lsp: failed to encode cache while %s: %s", operation, path))
+    return false
+  end
+
+  local uv = vim.uv or vim.loop
+  local suffix = uv and tostring(uv.hrtime()) or tostring(math.random(1000000))
+  local tmp = path .. ".tmp." .. suffix
+  local f, open_err = io.open(tmp, "w")
+  if not f then
+    warn(string.format("dbee-lsp: failed to open cache temp file while %s: %s (%s)", operation, tmp, open_err or "unknown"))
+    return false
+  end
+
+  local write_ok, write_err = pcall(function()
+    f:write(json)
+    f:flush()
+  end)
+  local close_ok, close_err = f:close()
+  if not write_ok or not close_ok then
+    os.remove(tmp)
+    warn(string.format("dbee-lsp: failed to write cache while %s: %s (%s)", operation, path, write_err or close_err or "unknown"))
+    return false
+  end
+
+  local renamed, rename_err = os.rename(tmp, path)
+  if not renamed then
+    os.remove(tmp)
+    warn(string.format("dbee-lsp: failed to rename cache while %s: %s (%s)", operation, path, rename_err or "unknown"))
+    return false
+  end
+
+  return true
+end
+
+---@private
 ---@param table_key string "schema.table"
 ---@return string
 function SchemaCache:_columns_cache_path(table_key)
@@ -495,13 +553,7 @@ function SchemaCache:save_to_disk()
     end
   end
 
-  local json = vim.json.encode(data)
-  local path = self:_cache_path()
-  local f = io.open(path, "w")
-  if f then
-    f:write(json)
-    f:close()
-  end
+  self:_atomic_write_json(self:_cache_path(), data, "saving schema index")
 end
 
 --- Load the flattened table/schema index from disk.
@@ -518,6 +570,7 @@ function SchemaCache:load_from_disk()
 
   local ok, data = pcall(vim.json.decode, content)
   if not ok or not data then
+    self:_remove_corrupt_file(path, "loading schema index")
     return false
   end
 
@@ -554,12 +607,7 @@ end
 function SchemaCache:_save_columns_to_disk(key, cols)
   vim.fn.mkdir(self.cache_dir, "p")
   local path = self:_columns_cache_path(key)
-  local json = vim.json.encode(cols)
-  local f = io.open(path, "w")
-  if f then
-    f:write(json)
-    f:close()
-  end
+  self:_atomic_write_json(path, cols, "saving columns")
 end
 
 --- Load all cached column files for this connection from disk.
