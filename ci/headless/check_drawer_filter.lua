@@ -779,14 +779,44 @@ local empty_fixture = new_fixture({
 })
 clear_notifications()
 empty_fixture.drawer:get_actions().filter()
-assert_match("a2_warn_zero_ready", last_notification().msg, "No cached connections available for filter")
-assert_eq("a2_no_prompt", #stub_filter_sessions, 0)
+local cold_session = stub_filter_sessions[#stub_filter_sessions]
+assert_true("a2_cold_session_created", cold_session ~= nil)
+assert_true("a2_no_warning", last_notification() == nil)
 assert_eq("a2_no_async", empty_fixture.counters.async, 0)
 assert_eq("a2_no_db_list", empty_fixture.counters.list_databases, 0)
+assert_match("a2_coverage_label", cold_session.opts.coverage_label, "visible rows + 0 of 4 structures cached")
+cold_session:change("cold")
+assert_true("a2_cold_connection_match", vim.tbl_contains(get_visible_names(empty_fixture.drawer.tree), "Cold Connection  [source1]"))
+cold_session:change("source1")
+local source_badge_names = get_visible_names(empty_fixture.drawer.tree)
+assert_true("a2_source_badge_ready", vim.tbl_contains(source_badge_names, "Ready Connection  [source1]"))
+assert_true("a2_source_badge_cold", vim.tbl_contains(source_badge_names, "Cold Connection  [source1]"))
+cold_session:close()
 empty_fixture.cleanup()
 
-assert_match("a2_coverage_label", session.opts.coverage_label, "2 of 4 connections cached")
+assert_match("a2_coverage_label", session.opts.coverage_label, "visible rows + 2 of 4 structures cached")
 print("DRAW01_A2_OK=true")
+
+local mixed_fixture = new_fixture({
+  structure_cache = {
+    ["conn-ready"] = { structures = vim.deepcopy(default_structures) },
+  },
+})
+clear_notifications()
+local mixed_async_before = mixed_fixture.counters.async
+local mixed_db_before = mixed_fixture.counters.list_databases
+mixed_fixture.drawer:get_actions().filter()
+local mixed_session = stub_filter_sessions[#stub_filter_sessions]
+assert_true("ux13_mixed_session_created", mixed_session ~= nil)
+assert_match("ux13_mixed_coverage_label", mixed_session.opts.coverage_label, "visible rows + 1 of 4 structures cached")
+mixed_session:change("conn")
+local mixed_names = get_visible_names(mixed_fixture.drawer.tree)
+assert_true("ux13_mixed_cached_match", vim.tbl_contains(mixed_names, "Ready Connection  [source1]"))
+assert_true("ux13_mixed_uncached_match", vim.tbl_contains(mixed_names, "Alt Connection  [source1]"))
+assert_eq("ux13_mixed_zero_async", mixed_fixture.counters.async, mixed_async_before)
+assert_eq("ux13_mixed_zero_db_list", mixed_fixture.counters.list_databases, mixed_db_before)
+mixed_session:close()
+mixed_fixture.cleanup()
 
 session:change("emp")
 local visible_after_emp = get_visible_names(drawer.tree)
@@ -1260,5 +1290,11 @@ fixture.cleanup()
 close_window_and_buffer(rebuilt_host_buf, rebuilt_winid)
 vim.notify = saved_notify
 
+print("UX13_DRAWER_FILTER_CONNECTION_ROOT=true")
+print("UX13_DRAWER_FILTER_SOURCE_BADGE=true")
+print("UX13_DRAWER_FILTER_MIXED_VISIBLE_CACHE=true")
+print("UX13_DRAWER_FILTER_ZERO_RPC=true")
+print("UX13_DRAWER_FILTER_RESTORE_OK=true")
+print("UX13_DRAWER_FILTER_ALL_PASS=true")
 print("DRAW01_ALL_PASS=true")
 vim.cmd("qa!")

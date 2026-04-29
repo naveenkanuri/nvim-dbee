@@ -748,6 +748,18 @@ local function count_visible_table_nodes(drawer)
   return count
 end
 
+local function count_visible_connection_nodes(drawer)
+  local count = 0
+  local line_count = vim.api.nvim_buf_line_count(drawer.bufnr)
+  for row = 1, line_count do
+    local node = drawer.tree:get_node(row)
+    if node and node.type == "connection" then
+      count = count + 1
+    end
+  end
+  return count
+end
+
 local function wait_for_filter_text(drawer, expected)
   return vim.wait(1000, function()
     return drawer.filter_text == expected
@@ -983,6 +995,79 @@ local function build_startup_metrics()
         snapshot_ns = math.max(capture_ns - build_ns, 0),
         model_ns = build_ns,
         prompt_ns = prompt_ns,
+        heap_kb = heap_delta_kb,
+      })
+    end,
+  })
+end
+
+local function build_fallback_connections(count)
+  local connections = {}
+  for index = 1, count do
+    connections[#connections + 1] = {
+      id = string.format("fallback-%04d", index),
+      name = string.format("Fallback Connection %04d", index),
+      type = "postgres",
+    }
+  end
+  return connections
+end
+
+local function build_fallback_root_cache(connections, cached_count)
+  local root_cache = {}
+  for index = 1, cached_count do
+    local conn = connections[index]
+    if conn then
+      root_cache[conn.id] = {
+        structures = {
+          {
+            type = "schema",
+            name = "perf_schema",
+            schema = "perf_schema",
+            children = {
+              { type = "table", name = string.format("fallback_table_%04d", index), schema = "perf_schema" },
+            },
+          },
+        },
+      }
+    end
+  end
+  return root_cache
+end
+
+local function build_filter_fallback_metrics(title, connection_count, cached_count)
+  local connections = build_fallback_connections(connection_count)
+  local source_connections = {
+    source1 = connections,
+  }
+  local root_cache = build_fallback_root_cache(connections, cached_count or 0)
+
+  return run_benchmark({
+    title = title,
+    before = function()
+      collectgarbage("collect")
+      return new_drawer_fixture({
+        source_connections = source_connections,
+        root_cache = root_cache,
+      })
+    end,
+    run = function(state, finish)
+      local heap_before = collectgarbage("count")
+      local started = uv.hrtime()
+      state.drawer:get_actions().filter()
+      assert_true(title .. "_filter_input", state.drawer.filter_input ~= nil)
+      state.drawer.filter_input._.on_change("fallback connection")
+      assert_true(title .. "_filter_text_applied", wait_for_filter_text(state.drawer, "fallback connection"))
+      local total_ns = uv.hrtime() - started
+      local visible_matches = count_visible_connection_nodes(state.drawer)
+      assert_true(title .. "_sentinel_count", visible_matches == connection_count)
+      local heap_delta_kb = collectgarbage("count") - heap_before
+
+      if state.drawer.filter_input then
+        close_filter_input(state.drawer.filter_input)
+      end
+
+      finish(total_ns, {
         heap_kb = heap_delta_kb,
       })
     end,
@@ -1337,6 +1422,14 @@ local filter_stable_samples = build_filter_stable_metrics()
 local lazy_expand_samples = build_lazy_expand_metrics()
 local cached_expand_samples = build_cached_expand_metrics()
 local load_more_samples = build_load_more_metrics()
+local filter_cold_connection_only_10_samples, filter_cold_connection_only_10_extras =
+  build_filter_fallback_metrics("FILTER_COLD_CONNECTION_ONLY_10", 10, 0)
+local filter_cold_connection_only_100_samples, filter_cold_connection_only_100_extras =
+  build_filter_fallback_metrics("FILTER_COLD_CONNECTION_ONLY_100", 100, 0)
+local filter_cold_connection_only_1000_samples, filter_cold_connection_only_1000_extras =
+  build_filter_fallback_metrics("FILTER_COLD_CONNECTION_ONLY_1000", 1000, 0)
+local filter_mixed_visible_and_cached_samples, filter_mixed_visible_and_cached_extras =
+  build_filter_fallback_metrics("FILTER_MIXED_VISIBLE_AND_CACHED", 1000, 500)
 
 local apply_max_hit_samples = build_apply_metrics(LOCKED_QUERY_COHORT.max_hit_query)
 local apply_broad_samples = build_apply_metrics(LOCKED_QUERY_COHORT.broad_query)
@@ -1371,6 +1464,18 @@ local cached_expand_median_ns = median(cached_expand_samples)
 local cached_expand_p95_ns = percentile(cached_expand_samples, 0.95)
 local load_more_median_ns = median(load_more_samples)
 local load_more_p95_ns = percentile(load_more_samples, 0.95)
+local filter_cold_connection_only_10_median_ns = median(filter_cold_connection_only_10_samples)
+local filter_cold_connection_only_10_p95_ns = percentile(filter_cold_connection_only_10_samples, 0.95)
+local filter_cold_connection_only_10_heap_kb = maximum(filter_cold_connection_only_10_extras.heap_kb or {})
+local filter_cold_connection_only_100_median_ns = median(filter_cold_connection_only_100_samples)
+local filter_cold_connection_only_100_p95_ns = percentile(filter_cold_connection_only_100_samples, 0.95)
+local filter_cold_connection_only_100_heap_kb = maximum(filter_cold_connection_only_100_extras.heap_kb or {})
+local filter_cold_connection_only_1000_median_ns = median(filter_cold_connection_only_1000_samples)
+local filter_cold_connection_only_1000_p95_ns = percentile(filter_cold_connection_only_1000_samples, 0.95)
+local filter_cold_connection_only_1000_heap_kb = maximum(filter_cold_connection_only_1000_extras.heap_kb or {})
+local filter_mixed_visible_and_cached_median_ns = median(filter_mixed_visible_and_cached_samples)
+local filter_mixed_visible_and_cached_p95_ns = percentile(filter_mixed_visible_and_cached_samples, 0.95)
+local filter_mixed_visible_and_cached_heap_kb = maximum(filter_mixed_visible_and_cached_extras.heap_kb or {})
 
 local apply_max_hit_median_ns = median(apply_max_hit_samples)
 local apply_broad_median_ns = median(apply_broad_samples)
@@ -1404,6 +1509,24 @@ emit("DRAW01_CACHED_EXPAND_MEDIAN_MS", format_float(ns_to_ms(cached_expand_media
 emit("DRAW01_CACHED_EXPAND_P95_MS", format_float(ns_to_ms(cached_expand_p95_ns)))
 emit("DRAW01_LOAD_MORE_MEDIAN_MS", format_float(ns_to_ms(load_more_median_ns)))
 emit("DRAW01_LOAD_MORE_P95_MS", format_float(ns_to_ms(load_more_p95_ns)))
+emit("DRAW01_FILTER_COLD_CONNECTION_ONLY_10_MEDIAN_MS", format_float(ns_to_ms(filter_cold_connection_only_10_median_ns)))
+emit("DRAW01_FILTER_COLD_CONNECTION_ONLY_10_P95_MS", format_float(ns_to_ms(filter_cold_connection_only_10_p95_ns)))
+emit("DRAW01_FILTER_COLD_CONNECTION_ONLY_10_KB_DELTA", format_float(filter_cold_connection_only_10_heap_kb))
+emit("DRAW01_FILTER_COLD_CONNECTION_ONLY_10_SENTINEL_OK", "true")
+emit("DRAW01_FILTER_COLD_CONNECTION_ONLY_100_MEDIAN_MS", format_float(ns_to_ms(filter_cold_connection_only_100_median_ns)))
+emit("DRAW01_FILTER_COLD_CONNECTION_ONLY_100_P95_MS", format_float(ns_to_ms(filter_cold_connection_only_100_p95_ns)))
+emit("DRAW01_FILTER_COLD_CONNECTION_ONLY_100_KB_DELTA", format_float(filter_cold_connection_only_100_heap_kb))
+emit("DRAW01_FILTER_COLD_CONNECTION_ONLY_100_SENTINEL_OK", "true")
+emit("DRAW01_FILTER_COLD_CONNECTION_ONLY_1000_MEDIAN_MS", format_float(ns_to_ms(filter_cold_connection_only_1000_median_ns)))
+emit("DRAW01_FILTER_COLD_CONNECTION_ONLY_1000_P95_MS", format_float(ns_to_ms(filter_cold_connection_only_1000_p95_ns)))
+emit("DRAW01_FILTER_COLD_CONNECTION_ONLY_1000_KB_DELTA", format_float(filter_cold_connection_only_1000_heap_kb))
+emit("DRAW01_FILTER_COLD_CONNECTION_ONLY_1000_SENTINEL_OK", "true")
+emit("DRAW01_FILTER_MIXED_VISIBLE_AND_CACHED_MEDIAN_MS", format_float(ns_to_ms(filter_mixed_visible_and_cached_median_ns)))
+emit("DRAW01_FILTER_MIXED_VISIBLE_AND_CACHED_P95_MS", format_float(ns_to_ms(filter_mixed_visible_and_cached_p95_ns)))
+emit("DRAW01_FILTER_MIXED_VISIBLE_AND_CACHED_KB_DELTA", format_float(filter_mixed_visible_and_cached_heap_kb))
+emit("DRAW01_FILTER_MIXED_VISIBLE_AND_CACHED_SENTINEL_OK", "true")
+emit("UX13_DRAWER_FILTER_PERF_COLD_CONNECTION_ONLY", "true")
+emit("UX13_DRAWER_FILTER_PERF_MIXED_VISIBLE_CACHE", "true")
 
 emit_median_max("DRAW01_APPLY_MAX_HIT_MS", apply_max_hit_samples)
 emit_median_max("DRAW01_APPLY_BROAD_MS", apply_broad_samples)
@@ -1470,6 +1593,22 @@ local additive_measurements = {
     median_ms = ns_to_ms(load_more_median_ns),
     p95_ms = ns_to_ms(load_more_p95_ns),
   },
+  filter_cold_connection_only_10 = {
+    median_ms = ns_to_ms(filter_cold_connection_only_10_median_ns),
+    p95_ms = ns_to_ms(filter_cold_connection_only_10_p95_ns),
+  },
+  filter_cold_connection_only_100 = {
+    median_ms = ns_to_ms(filter_cold_connection_only_100_median_ns),
+    p95_ms = ns_to_ms(filter_cold_connection_only_100_p95_ns),
+  },
+  filter_cold_connection_only_1000 = {
+    median_ms = ns_to_ms(filter_cold_connection_only_1000_median_ns),
+    p95_ms = ns_to_ms(filter_cold_connection_only_1000_p95_ns),
+  },
+  filter_mixed_visible_and_cached = {
+    median_ms = ns_to_ms(filter_mixed_visible_and_cached_median_ns),
+    p95_ms = ns_to_ms(filter_mixed_visible_and_cached_p95_ns),
+  },
 }
 
 local additive_scenarios = {
@@ -1479,6 +1618,10 @@ local additive_scenarios = {
   "lazy_expand",
   "cached_expand",
   "load_more",
+  "filter_cold_connection_only_10",
+  "filter_cold_connection_only_100",
+  "filter_cold_connection_only_1000",
+  "filter_mixed_visible_and_cached",
 }
 
 local function marker_threshold_prefix(platform_name)

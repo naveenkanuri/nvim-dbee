@@ -12,6 +12,8 @@ local SEARCHABLE_TYPES = {
 ---@class DrawerModelCoverage
 ---@field ready_connections integer
 ---@field total_connections integer
+---@field visible_connections? integer
+---@field visible_uncached_connections? integer
 
 ---@class DrawerRenderNode
 ---@field id string
@@ -19,6 +21,9 @@ local SEARCHABLE_TYPES = {
 ---@field type string
 ---@field schema string?
 ---@field raw_name string?
+---@field conn_id string?
+---@field source_meta table?
+---@field search_text string?
 ---@field action_1 function?
 ---@field action_2 function?
 ---@field action_3 function?
@@ -91,6 +96,8 @@ local function to_render_node(node)
     type = node.type,
     schema = node.schema,
     raw_name = node.raw_name,
+    conn_id = node.conn_id,
+    source_meta = node.source_meta,
     action_1 = node.action_1,
     action_2 = node.action_2,
     action_3 = node.action_3,
@@ -137,6 +144,31 @@ local function search_connection_name(conn, source_meta)
   return string.format("%s  [%s]", tostring(conn.name or conn.id), tostring(source_meta.name or source_meta.id))
 end
 
+local function add_search_part(parts, value)
+  if value == nil or value == "" then
+    return
+  end
+  parts[#parts + 1] = tostring(value)
+end
+
+---@param conn_id string?
+---@param raw_name string?
+---@param display_name string?
+---@param source_meta table?
+---@return string
+function M.connection_search_text(conn_id, raw_name, display_name, source_meta)
+  local parts = {}
+  add_search_part(parts, display_name)
+  add_search_part(parts, raw_name)
+  add_search_part(parts, conn_id)
+  if source_meta then
+    add_search_part(parts, source_meta.name)
+    add_search_part(parts, source_meta.id)
+    add_search_part(parts, source_meta.file)
+  end
+  return table.concat(parts, "\n")
+end
+
 ---@param source Source
 ---@return string|nil
 local function search_source_file(source)
@@ -174,13 +206,15 @@ function M.build_search_model(handler, structure_cache)
     for _, conn in ipairs(handler:source_get_connections(source_id)) do
       local cached = structure_cache and structure_cache.root and structure_cache.root[conn.id] or structure_cache and structure_cache[conn.id]
       if cached and not cached.error then
+        local display_name = search_connection_name(conn, source_meta)
         table.insert(search_model, {
           id = conn.id,
-          name = search_connection_name(conn, source_meta),
+          name = display_name,
           raw_name = conn.name,
           type = "connection",
           conn_id = conn.id,
           source_meta = source_meta,
+          search_text = M.connection_search_text(conn.id, conn.name, display_name, source_meta),
           children = build_search_struct_nodes(cached.structures, conn.id),
         })
       end
@@ -188,6 +222,68 @@ function M.build_search_model(handler, structure_cache)
   end
 
   return search_model, coverage
+end
+
+local function collect_connection_ids(nodes, out)
+  out = out or {}
+  for _, node in ipairs(nodes or {}) do
+    if node.type == "connection" then
+      out[node.conn_id or node.id] = true
+    end
+    collect_connection_ids(node.children, out)
+  end
+  return out
+end
+
+local function collect_visible_connection_rows(nodes, out)
+  out = out or {}
+  for _, node in ipairs(nodes or {}) do
+    if node.type == "connection" then
+      out[#out + 1] = node
+    end
+    collect_visible_connection_rows(node.children, out)
+  end
+  return out
+end
+
+---@param search_model table[]
+---@param rendered_snapshot table[]
+---@return table[] merged_model
+---@return integer visible_connections
+---@return integer visible_uncached_connections
+function M.merge_visible_connection_rows(search_model, rendered_snapshot)
+  local merged_model = {}
+  for _, node in ipairs(search_model or {}) do
+    merged_model[#merged_model + 1] = node
+  end
+
+  local cached_conn_ids = collect_connection_ids(search_model)
+  local visible_connections = 0
+  local visible_uncached_connections = 0
+  for _, node in ipairs(collect_visible_connection_rows(rendered_snapshot)) do
+    visible_connections = visible_connections + 1
+    local conn_id = node.conn_id or node.id
+    if conn_id and not cached_conn_ids[conn_id] then
+      cached_conn_ids[conn_id] = true
+      visible_uncached_connections = visible_uncached_connections + 1
+      merged_model[#merged_model + 1] = {
+        id = node.id,
+        name = node.name,
+        raw_name = node.raw_name,
+        type = "connection",
+        conn_id = conn_id,
+        source_meta = node.source_meta,
+        search_text = M.connection_search_text(conn_id, node.raw_name, node.name, node.source_meta),
+        action_1 = node.action_1,
+        action_2 = node.action_2,
+        action_3 = node.action_3,
+        lazy_children = node.lazy_children,
+        children = {},
+      }
+    end
+  end
+
+  return merged_model, visible_connections, visible_uncached_connections
 end
 
 ---@param handler Handler

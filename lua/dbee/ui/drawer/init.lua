@@ -92,6 +92,8 @@ end
 ---@field private cached_render_snapshot? DrawerRenderSnapshotNode[] baseline rendered-tree snapshot reused across repeated filter starts while the rendered tree is unchanged
 ---@field private filter_cached_connections integer ready cached connections in the current filter session
 ---@field private filter_total_connections integer total connections visible to the drawer
+---@field private filter_visible_connections integer visible connection rows captured for fallback search
+---@field private filter_visible_uncached_connections integer visible connection rows merged into fallback search
 ---@field private window_options table<string, any> a table of window options
 ---@field private buffer_options table<string, any> a table of buffer options
 local DrawerUI = {}
@@ -165,6 +167,8 @@ local function clear_filter_state(ui)
   ui.pre_filter_cursor = nil
   ui.filter_cached_connections = 0
   ui.filter_total_connections = 0
+  ui.filter_visible_connections = 0
+  ui.filter_visible_uncached_connections = 0
   ui.filter_text = ""
 end
 
@@ -373,6 +377,8 @@ local function clone_rendered_snapshot(snapshot_nodes)
       type = snap.type,
       schema = snap.schema,
       raw_name = snap.raw_name,
+      conn_id = snap.conn_id,
+      source_meta = snap.source_meta,
       action_1 = snap.action_1,
       action_2 = snap.action_2,
       action_3 = snap.action_3,
@@ -414,6 +420,8 @@ local function snapshot_to_tree_nodes(snapshot_nodes)
       type = snap.type,
       schema = snap.schema,
       raw_name = snap.raw_name,
+      conn_id = snap.conn_id,
+      source_meta = snap.source_meta,
       action_1 = snap.action_1,
       action_2 = snap.action_2,
       action_3 = snap.action_3,
@@ -442,6 +450,8 @@ local function snapshot_rendered_tree(ui, tree, parent_id)
       type = node.type,
       schema = node.schema,
       raw_name = node.raw_name,
+      conn_id = node.conn_id,
+      source_meta = node.source_meta,
       action_1 = node.action_1,
       action_2 = node.action_2,
       action_3 = node.action_3,
@@ -492,6 +502,11 @@ local function searchable_node_to_tree_node(ui, node, inherited_conn_id, childre
     type = node.type,
     schema = node.schema,
     raw_name = node.raw_name,
+    conn_id = node.conn_id,
+    source_meta = node.source_meta,
+    action_1 = node.action_1,
+    action_2 = node.action_2,
+    action_3 = node.action_3,
   }, children) --[[@as DrawerUINode]]
 
   if node.type == "connection" and node.source_meta then
@@ -716,6 +731,19 @@ local function restore_expansion_state(ui, expansion_ids)
   return unresolved
 end
 
+---@param node table
+---@param pattern string
+---@return boolean
+local function filter_node_matches(node, pattern)
+  if node.type == "connection" then
+    local search_text = node.search_text
+      or drawer_model.connection_search_text(node.conn_id or node.id, node.raw_name, node.name, node.source_meta)
+    return string.find(string.lower(search_text), pattern, 1, true) ~= nil
+  end
+
+  return SEARCHABLE_TYPES[node.type] and string.find(string.lower(node.name), pattern, 1, true) ~= nil
+end
+
 ---@param ui DrawerUI
 ---@param nodes table[]?
 ---@param pattern string
@@ -727,7 +755,7 @@ local function filter_nodes_recursive(ui, nodes, pattern, inherited_conn_id)
   for _, node in ipairs(nodes or {}) do
     local conn_id = node.type == "connection" and (node.conn_id or node.id) or inherited_conn_id
     local children = filter_nodes_recursive(ui, node.children, pattern, conn_id)
-    local matched_self = SEARCHABLE_TYPES[node.type] and string.find(string.lower(node.name), pattern, 1, true) ~= nil
+    local matched_self = filter_node_matches(node, pattern)
 
     if matched_self or #children > 0 then
       table.insert(filtered, searchable_node_to_tree_node(ui, node, conn_id, children))
@@ -1342,6 +1370,8 @@ function DrawerUI:new(handler, editor, result, opts)
     cached_render_snapshot = nil,
     filter_cached_connections = 0,
     filter_total_connections = 0,
+    filter_visible_connections = 0,
+    filter_visible_uncached_connections = 0,
     window_options = vim.tbl_extend("force", {
       wrap = false,
       winfixheight = true,
@@ -2121,20 +2151,23 @@ function DrawerUI:capture_filter_snapshot()
     }
   end
 
-  local coverage = self.cached_search_model.coverage
-  if coverage.ready_connections == 0 then
-    return false, "No cached connections available for filter"
-  end
-
-  self.filter_cached_connections = coverage.ready_connections
-  self.filter_total_connections = coverage.total_connections
-
   if not self.cached_render_snapshot then
     self.cached_render_snapshot = snapshot_rendered_tree(self, self.tree)
   end
 
+  local coverage = self.cached_search_model.coverage
+  local merged_model, visible_connections, visible_uncached_connections =
+    drawer_model.merge_visible_connection_rows(self.cached_search_model.nodes, self.cached_render_snapshot)
+  if #merged_model == 0 then
+    return false, "No visible connections available for filter"
+  end
+
+  self.filter_cached_connections = coverage.ready_connections
+  self.filter_total_connections = coverage.total_connections
+  self.filter_visible_connections = visible_connections
+  self.filter_visible_uncached_connections = visible_uncached_connections
   self.filter_restore_snapshot = clone_rendered_snapshot(self.cached_render_snapshot)
-  self.filter_search_model = self.cached_search_model.nodes
+  self.filter_search_model = merged_model
   return true, nil
 end
 
@@ -2973,6 +3006,13 @@ function DrawerUI:get_actions()
 
       local session_id = self:begin_filter_session()
       local coverage_label = string.format("%d of %d connections cached", self.filter_cached_connections, self.filter_total_connections)
+      if self.filter_visible_uncached_connections > 0 then
+        coverage_label = string.format(
+          "visible rows + %d of %d structures cached",
+          self.filter_cached_connections,
+          self.filter_total_connections
+        )
+      end
 
       self.filter_input = menu.filter({
         relative_winid = self.winid,

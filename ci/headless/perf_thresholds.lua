@@ -44,6 +44,26 @@ return {
       p95_ms = nil,
       source = "advisory-candidate",
     },
+    filter_cold_connection_only_10 = {
+      median_ms = nil,
+      p95_ms = nil,
+      source = "advisory-candidate",
+    },
+    filter_cold_connection_only_100 = {
+      median_ms = nil,
+      p95_ms = nil,
+      source = "advisory-candidate",
+    },
+    filter_cold_connection_only_1000 = {
+      median_ms = nil,
+      p95_ms = nil,
+      source = "advisory-candidate",
+    },
+    filter_mixed_visible_and_cached = {
+      median_ms = nil,
+      p95_ms = nil,
+      source = "advisory-candidate",
+    },
   },
   macos = {
     frozen = false,
@@ -73,6 +93,26 @@ return {
       source = "advisory-candidate",
     },
     load_more = {
+      median_ms = nil,
+      p95_ms = nil,
+      source = "advisory-candidate",
+    },
+    filter_cold_connection_only_10 = {
+      median_ms = nil,
+      p95_ms = nil,
+      source = "advisory-candidate",
+    },
+    filter_cold_connection_only_100 = {
+      median_ms = nil,
+      p95_ms = nil,
+      source = "advisory-candidate",
+    },
+    filter_cold_connection_only_1000 = {
+      median_ms = nil,
+      p95_ms = nil,
+      source = "advisory-candidate",
+    },
+    filter_mixed_visible_and_cached = {
       median_ms = nil,
       p95_ms = nil,
       source = "advisory-candidate",
