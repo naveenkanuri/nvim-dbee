@@ -12,6 +12,7 @@ local config = {}
 ---@field editor? editor_config
 ---@field result? result_config
 ---@field call_log? call_log_config
+---@field lsp? lsp_config
 ---@field window_layout? Layout
 
 ---@class Candy
@@ -35,6 +36,9 @@ local config = {}
 
 ---Configuration for drawer UI tile.
 ---@alias drawer_config { disable_candies: boolean, candies: table<string, Candy>, mappings: key_mapping[], disable_help: boolean, window_options: table<string, any>, buffer_options: table<string, any> }
+
+---Configuration for built-in LSP diagnostics.
+---@alias lsp_config { diagnostics_mode: "debounce_didchange"|"save_only"|"off", diagnostics_debounce_ms: integer }
 
 ---@divider -
 
@@ -378,6 +382,12 @@ config.default = {
     },
   },
 
+  -- built-in LSP diagnostics config
+  lsp = {
+    diagnostics_mode = "debounce_didchange",
+    diagnostics_debounce_ms = 250,
+  },
+
   -- window layout
   window_layout = require("dbee.layouts").Default:new(),
 }
@@ -401,12 +411,31 @@ function config.validate(cfg)
     result_mappings = { cfg.result.mappings, "table" },
     editor_mappings = { cfg.editor.mappings, "table" },
     call_log_mappings = { cfg.call_log.mappings, "table" },
+    lsp = { cfg.lsp, "table" },
+    lsp_diagnostics_mode = { cfg.lsp.diagnostics_mode, "string" },
+    lsp_diagnostics_debounce_ms = { cfg.lsp.diagnostics_debounce_ms, "number" },
 
     window_layout = { cfg.window_layout, "table" },
     window_layout_open = { cfg.window_layout.open, "function" },
     window_layout_is_open = { cfg.window_layout.is_open, "function" },
     window_layout_close = { cfg.window_layout.close, "function" },
   }
+
+  local diagnostics_mode = cfg.lsp.diagnostics_mode
+  if
+    diagnostics_mode ~= "debounce_didchange"
+    and diagnostics_mode ~= "save_only"
+    and diagnostics_mode ~= "off"
+  then
+    error(
+      "lsp.diagnostics_mode must be one of: debounce_didchange, save_only, off",
+      2
+    )
+  end
+
+  if cfg.lsp.diagnostics_debounce_ms < 0 then
+    error("lsp.diagnostics_debounce_ms must be non-negative", 2)
+  end
 end
 
 -- Merges changes from config on top of default config.
