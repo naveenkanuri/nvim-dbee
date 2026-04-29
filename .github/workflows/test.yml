@@ -163,6 +163,104 @@ jobs:
           echo "Promotion flips DRAW01_PERF_GATE_MODE=blocking in the same change that freezes Linux and macOS thresholds."
           echo "Once blocking is enabled, either the Linux or macOS perf lane failing blocks the release."
 
+  lua-lsp-perf-advisory:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: linux
+            archive: nvim-linux-x86_64.tar.gz
+            dir: nvim-linux-x86_64
+          - os: macos-14
+            platform: macos
+            archive: nvim-macos-arm64.tar.gz
+            dir: nvim-macos-arm64
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    name: Lua LSP Perf Advisory (${{ matrix.platform }})
+    env:
+      PERF_PLUGIN_ROOT: ${{ runner.temp }}/nvim-dbee-perf-plugins
+      LSP01_PERF_ARTIFACT_DIR: ${{ runner.temp }}/lsp01-perf/${{ matrix.platform }}
+      LSP01_PERF_SUMMARY_PATH: ${{ runner.temp }}/lsp01-perf/${{ matrix.platform }}/lsp01-summary.txt
+      LSP01_PERF_TRACE_PATH: ${{ runner.temp }}/lsp01-perf/${{ matrix.platform }}/lsp01-trace.json
+      LSP01_PERF_STATE_HOME: ${{ runner.temp }}/lsp01-perf/${{ matrix.platform }}/state-home
+      XDG_STATE_HOME: ${{ runner.temp }}/lsp01-perf/${{ matrix.platform }}/state-home
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Neovim ${{ env.NVIM_PERF_VERSION }}
+        run: |
+          curl -fsSLO https://github.com/neovim/neovim/releases/download/${{ env.NVIM_PERF_VERSION }}/${{ matrix.archive }}
+          tar xzf ${{ matrix.archive }}
+          echo "${PWD}/${{ matrix.dir }}/bin" >> "${GITHUB_PATH}"
+      - name: Bootstrap pinned perf plugins
+        run: make perf-bootstrap
+      - name: Rerun preserved LSP semantic checks
+        run: |
+          nvim --headless -u NONE -i NONE -n \
+            --cmd "set rtp+=${GITHUB_WORKSPACE}" \
+            -c "luafile ${GITHUB_WORKSPACE}/ci/headless/check_lsp_alias_completion.lua"
+          nvim --headless -u NONE -i NONE -n \
+            --cmd "set rtp+=${GITHUB_WORKSPACE}" \
+            -c "luafile ${GITHUB_WORKSPACE}/ci/headless/check_lsp_schema_alias_completion.lua"
+          nvim --headless -u NONE -i NONE -n \
+            --cmd "set rtp+=${GITHUB_WORKSPACE}" \
+            -c "luafile ${GITHUB_WORKSPACE}/ci/headless/check_lsp_alias_rebinding.lua"
+      - name: Run advisory LSP perf harness
+        run: |
+          mkdir -p "${LSP01_PERF_ARTIFACT_DIR}"
+          set +e
+          LSP01_PERF_GATE_MODE=advisory make perf-lsp PERF_PLATFORM=${{ matrix.platform }} 2>&1 | tee "${LSP01_PERF_ARTIFACT_DIR}/lsp01-stdout.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          exit "${status}"
+      - name: Assert advisory LSP perf artifacts exist
+        if: always()
+        run: |
+          test -s "${LSP01_PERF_ARTIFACT_DIR}/lsp01-stdout.log"
+          test -s "${LSP01_PERF_SUMMARY_PATH}"
+          test -s "${LSP01_PERF_TRACE_PATH}"
+      - name: Upload LSP advisory summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}-lsp-perf-threshold-summary
+          path: |
+            ${{ env.LSP01_PERF_ARTIFACT_DIR }}/lsp01-stdout.log
+            ${{ env.LSP01_PERF_SUMMARY_PATH }}
+          if-no-files-found: error
+      - name: Upload LSP advisory trace
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}-lsp-perf-threshold-trace
+          path: ${{ env.LSP01_PERF_TRACE_PATH }}
+          if-no-files-found: error
+      - name: Validate LSP advisory markers
+        if: always()
+        run: |
+          log="${LSP01_PERF_ARTIFACT_DIR}/lsp01-stdout.log"
+          grep -q '^LSP01_PLATFORM_AUTHENTIC=true$' "${log}"
+          grep -q '^LSP01_PUBLISHABLE=true$' "${log}"
+          ! grep -q '_SENTINEL_OK=false' "${log}"
+          test "$(grep -c '^LSP01_.*_SENTINEL_OK=true$' "${log}")" -eq 29
+          grep -q '^LSP01_COLD_DISK_DEFERRED_CALLBACK_COUNT=0$' "${log}"
+          grep -q '^LSP01_WARM_DISK_DEFERRED_CALLBACK_COUNT=0$' "${log}"
+          grep -q '^LSP01_METADATA_FALLBACK_DEFERRED_CALLBACK_COUNT=1$' "${log}"
+          grep -q '^LSP01_COLUMN_MISS_FETCH_DELTAS_OK=true$' "${log}"
+          grep -Eq '^LSP01_REAL_LSP_PERF_ALL_PASS=(true|unfrozen)$' "${log}"
+      - name: LSP advisory promotion seam
+        if: always()
+        run: |
+          echo "Local macOS replay: ART_DIR=\$(mktemp -d) LSP01_PERF_GATE_MODE=advisory LSP01_PERF_ARTIFACT_DIR=\$ART_DIR LSP01_PERF_SUMMARY_PATH=\$ART_DIR/lsp01-summary.txt LSP01_PERF_TRACE_PATH=\$ART_DIR/lsp01-trace.json LSP01_PERF_STATE_HOME=\$ART_DIR/state-home make perf-lsp PERF_PLATFORM=macos"
+          echo "Linux replay must run on native Linux or in CI: act -W .github/workflows/test.yml -j lua-lsp-perf-advisory"
+          echo "Phase 10 LSP perf remains advisory in this workflow until ci/headless/lsp_perf_thresholds.lua is frozen."
+          echo "Promotion requires four weeks at >=95% pass rate per platform, freezes Linux and macOS thresholds, then flips LSP01_PERF_GATE_MODE=blocking."
+          echo "Once blocking is enabled, either the Linux or macOS LSP perf lane failing blocks the release."
+
   bootstrap-testcontainers:
     runs-on: ubuntu-22.04
     name: Bootstrap Testcontainers
