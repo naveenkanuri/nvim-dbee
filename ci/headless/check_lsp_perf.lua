@@ -1081,19 +1081,19 @@ end
 local function alias_nested_cte_lines()
   local lines = {
     "WITH c1 AS (",
-    "  SELECT * FROM SCHEMA_001.TABLE_000001 t1",
+    "  SELECT * FROM " .. schema_for_index(1) .. ".TABLE_000001 t1",
     "),",
     "c2 AS (",
-    "  SELECT * FROM SCHEMA_001.TABLE_000002 t2",
+    "  SELECT * FROM " .. schema_for_index(2) .. ".TABLE_000002 t2",
     "),",
     "c3 AS (",
-    "  SELECT * FROM SCHEMA_001.TABLE_000003 t3",
+    "  SELECT * FROM " .. schema_for_index(3) .. ".TABLE_000003 t3",
     ")",
   }
   while #lines < 39 do
     lines[#lines + 1] = "  -- deterministic filler"
   end
-  lines[#lines + 1] = "SELECT * FROM SCHEMA_001.TABLE_000003 t3 WHERE t3."
+  lines[#lines + 1] = "SELECT * FROM " .. schema_for_index(3) .. ".TABLE_000003 t3 WHERE t3."
   return lines
 end
 
@@ -1105,15 +1105,15 @@ local function alias_multiline_lines()
     "  t3.COL_001,",
     "  t4.COL_001",
     "FROM",
-    "  SCHEMA_001.TABLE_000001 t1",
+    "  " .. schema_for_index(1) .. ".TABLE_000001 t1",
     "JOIN",
-    "  SCHEMA_001.TABLE_000002 t2",
+    "  " .. schema_for_index(2) .. ".TABLE_000002 t2",
     "ON t2.COL_001 = t1.COL_001",
     "JOIN",
-    "  SCHEMA_001.TABLE_000003 t3",
+    "  " .. schema_for_index(3) .. ".TABLE_000003 t3",
     "ON t3.COL_001 = t2.COL_001",
     "JOIN",
-    "  SCHEMA_001.TABLE_000004 t4",
+    "  " .. schema_for_index(4) .. ".TABLE_000004 t4",
     "ON t4.COL_001 = t3.COL_001",
   }
   while #lines < 24 do
@@ -1176,11 +1176,11 @@ register_alias_completion(
   function()
     return {
       table.concat({
-        "SELECT * FROM SCHEMA_001.TABLE_000001 t1",
-        "JOIN SCHEMA_001.TABLE_000002 t2 ON t2.COL_001 = t1.COL_001",
-        "JOIN SCHEMA_001.TABLE_000003 t3 ON t3.COL_001 = t2.COL_001",
-        "JOIN SCHEMA_001.TABLE_000004 t4 ON t4.COL_001 = t3.COL_001",
-        "JOIN SCHEMA_001.TABLE_000005 t5 ON t5.COL_001 = t4.COL_001",
+        "SELECT * FROM " .. schema_for_index(1) .. ".TABLE_000001 t1",
+        "JOIN " .. schema_for_index(2) .. ".TABLE_000002 t2 ON t2.COL_001 = t1.COL_001",
+        "JOIN " .. schema_for_index(3) .. ".TABLE_000003 t3 ON t3.COL_001 = t2.COL_001",
+        "JOIN " .. schema_for_index(4) .. ".TABLE_000004 t4 ON t4.COL_001 = t3.COL_001",
+        "JOIN " .. schema_for_index(5) .. ".TABLE_000005 t5 ON t5.COL_001 = t4.COL_001",
         "WHERE t5.",
       }, " "),
     }
