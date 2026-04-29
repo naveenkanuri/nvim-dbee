@@ -1964,6 +1964,99 @@ register({
   after = startup_after,
 })
 
+local large_disk_seeded = {}
+
+local function seed_large_disk_cache(count)
+  clear_lsp_cache_dir()
+  local cache = make_cache(100, DEFAULT_COLUMNS_PER_TABLE, {
+    conn_id = DEFAULT_CONN_ID,
+  })
+  cache:save_to_disk()
+  for i = 1, count do
+    local schema = schema_for_index(i)
+    local table_name = table_for_index(i)
+    cache:_save_columns_to_disk(schema .. "." .. table_name, make_columns(schema, table_name, DEFAULT_COLUMNS_PER_TABLE))
+  end
+  large_disk_seeded[count] = true
+end
+
+local function large_disk_startup_before(count)
+  assert_isolated_state()
+  if not large_disk_seeded[count] then
+    seed_large_disk_cache(count)
+  end
+  local handler = make_handler({
+    table_count = 100,
+    columns_per_table = DEFAULT_COLUMNS_PER_TABLE,
+    connection_type = CONNECTION_TYPE_NO_METADATA,
+    auto_structure = false,
+  })
+  local bufnr = make_buffer({ "select * from " .. table_for_index(1) })
+  capture_defer_fn()
+  return {
+    label = "large-disk-" .. tostring(count),
+    handler = handler,
+    bufnr = bufnr,
+    count = count,
+  }
+end
+
+local function large_disk_startup_run(state, finish, slug)
+  local elapsed_ns = nil
+  with_fake_lsp_state(state.handler, function(lsp_module)
+    -- TIMER WINDOW START: production startup large disk load begins here.
+    local start_ns = uv.hrtime()
+    local lsp = start_lsp_via_lifecycle(lsp_module, state.bufnr, { label = slug })
+    elapsed_ns = uv.hrtime() - start_ns
+    -- TIMER WINDOW END: deferred load/prune evidence is checked outside timing.
+
+    local count = drain_deferred(0, slug)
+    if count ~= 0 then
+      scenario_sentinels[slug] = false
+    end
+
+    local stats = lsp._cache and lsp._cache:get_stats() or {}
+    emit("LSP01_STARTUP_LARGE_DISK_CACHE_SYNC_LOAD_COUNT", stats.sync_column_files_loaded or "NA")
+    local bounded = (stats.sync_column_files_loaded or math.huge) <= 100
+      and (state.count <= 100 or (stats.deferred_column_files_scheduled or 0) > 0)
+    emit("LSP11_DISK_LOAD_BOUNDED", bounded and "true" or "false")
+    if not bounded then
+      scenario_sentinels[slug] = false
+    end
+  end)
+  if not elapsed_ns then
+    fail("large disk startup sample did not record elapsed time: " .. slug)
+  end
+  finish(elapsed_ns)
+end
+
+local LARGE_DISK_STARTUP_SCENARIOS = {
+  { slug = "STARTUP_LARGE_DISK_CACHE_100", threshold_key = "startup_large_disk_cache_100", count = 100 },
+  { slug = "STARTUP_LARGE_DISK_CACHE_1000", threshold_key = "startup_large_disk_cache_1000", count = 1000 },
+  { slug = "STARTUP_LARGE_DISK_CACHE_10000", threshold_key = "startup_large_disk_cache_10000", count = 10000 },
+}
+
+local function register_large_disk_startup(entry)
+  local slug = entry.slug
+  local count = entry.count
+  register({
+    slug = slug,
+    threshold_key = entry.threshold_key,
+    corpus = "conn_type:dbee-perf-no-metadata,tables:100,column_files:" .. tostring(count) .. ",sync_load_cap:100",
+    before = function()
+      return large_disk_startup_before(count)
+    end,
+    run = function(state, finish)
+      large_disk_startup_run(state, finish, slug)
+    end,
+    after = startup_after,
+  })
+end
+
+for _, entry in ipairs(LARGE_DISK_STARTUP_SCENARIOS) do
+  register_large_disk_startup(entry)
+end
+
 run_representative_trace_workload = function()
   emit("LSP01_TRACE_WORKLOAD", "startup_cold+completion+diagnostics_didchange")
 
