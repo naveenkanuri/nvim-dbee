@@ -229,6 +229,7 @@ jobs:
       - name: Run Phase 11 LSP semantic checks
         run: |
           NIO_NVIM_DIR="$(make perf-bootstrap-print | awk -F= '/^NIO_NVIM_DIR=/{print $2}')"
+          printf '\n' | tee -a "${LSP01_PERF_ARTIFACT_DIR}/lsp01-stdout.log"
           for script in \
             check_lsp_schema_cache_optimization.lua \
             check_lsp_disk_cache_safety.lua \
