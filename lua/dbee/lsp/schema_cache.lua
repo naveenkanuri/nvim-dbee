@@ -46,12 +46,13 @@ local function fold(value)
   return value and value:upper() or nil
 end
 
----@param values string[]
+---@param ... string?
 ---@return string[]
-local function unique_nonempty(values)
+local function unique_nonempty(...)
   local out = {}
   local seen = {}
-  for _, value in ipairs(values) do
+  for i = 1, select("#", ...) do
+    local value = select(i, ...)
     if value and value ~= "" and not seen[value] then
       seen[value] = true
       out[#out + 1] = value
@@ -943,16 +944,16 @@ function SchemaCache:get_columns_async(schema, table_name, opts)
   local schema_candidates = { schema }
   local table_candidates = { table_name }
   if opts.probe_if_missing then
-    schema_candidates = unique_nonempty({
+    schema_candidates = unique_nonempty(
       self:find_schema(schema),
       schema,
       schema:upper(),
-      "_default",
-    })
-    table_candidates = unique_nonempty({
+      "_default"
+    )
+    table_candidates = unique_nonempty(
       table_name,
-      table_name:upper(),
-    })
+      table_name:upper()
+    )
   end
 
   local entry = {
@@ -965,7 +966,7 @@ function SchemaCache:get_columns_async(schema, table_name, opts)
     schema_index = 1,
     table_index = 1,
     materialization_index = 1,
-    future = nio.control and nio.control.future and nio.control.future() or nil,
+    nio = nio,
   }
 
   if not self:_queue_async_probe(entry) then
