@@ -1003,6 +1003,36 @@ local function run_consumer_rebootstrap_contracts()
 
   stale_env:cleanup()
 
+  local epoch_env = new_env()
+  local epoch_reopen_winid = epoch_env.winid
+  seed_drawer_root(epoch_env, "conn-alpha", epoch_env.handler:get_authoritative_root_epoch("conn-alpha"))
+  expand_connection(epoch_env, "conn-alpha")
+  local stale_schema_id = epoch_env.convert.structure_node_id("conn-alpha", {
+    type = "schema",
+    name = "public",
+    schema = "public",
+  })
+  assert_true("bootstrap_epoch_reconcile_seeded", epoch_env.drawer._struct_cache.root["conn-alpha"] ~= nil)
+  assert_true("bootstrap_epoch_reconcile_schema_visible", epoch_env.drawer.tree:get_node(stale_schema_id) ~= nil)
+  epoch_env.drawer:prepare_close()
+  local previous_epoch = epoch_env.handler:get_authoritative_root_epoch("conn-alpha")
+  epoch_env.handler:source_reload("source1")
+  Harness.drain()
+  assert_true(
+    "bootstrap_epoch_reconcile_epoch_bumped",
+    epoch_env.handler:get_authoritative_root_epoch("conn-alpha") > previous_epoch
+  )
+  epoch_env.runtime.structure_requests = {}
+  epoch_env.drawer:show(epoch_reopen_winid)
+  Harness.drain()
+  assert_eq("bootstrap_epoch_reconcile_root_cleared", epoch_env.drawer._struct_cache.root["conn-alpha"], nil)
+  assert_eq("bootstrap_epoch_reconcile_branches_cleared", epoch_env.drawer._struct_cache.branches["conn-alpha"], nil)
+  assert_true("bootstrap_epoch_reconcile_rewarm_requested", latest_request(epoch_env.runtime.structure_requests, "conn-alpha") ~= nil)
+  assert_true("bootstrap_epoch_reconcile_stale_schema_hidden", epoch_env.drawer.tree:get_node(stale_schema_id) == nil)
+  print("LIFECYCLE01_BOOTSTRAP_EPOCH_RECONCILE_OK=true")
+
+  epoch_env:cleanup()
+
   local original_snapshot = env.handler.get_connection_state_snapshot
   local drawer_overflow_bursts = 4
   env.drawer:prepare_close()

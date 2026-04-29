@@ -676,6 +676,31 @@ local function affected_connection_ids(data)
 end
 
 ---@param ui DrawerUI
+---@param snapshot_epoch table<connection_id, integer>
+---@return ConnectionInvalidatedEvent[]
+local function bootstrap_epoch_reconcile_events(ui, snapshot_epoch)
+  local events = {}
+  local conn_ids = vim.tbl_keys(ui._struct_cache.root or {})
+  table.sort(conn_ids)
+
+  for _, conn_id in ipairs(conn_ids) do
+    if ui._struct_cache.root[conn_id] ~= nil then
+      local authoritative_epoch = normalize_root_epoch(snapshot_epoch[conn_id])
+      if authoritative_epoch > current_root_epoch(ui, conn_id) then
+        events[#events + 1] = {
+          reason = "bootstrap_epoch_reconcile",
+          retired_conn_ids = { conn_id },
+          new_conn_ids = {},
+          authoritative_root_epoch = authoritative_epoch,
+        }
+      end
+    end
+  end
+
+  return events
+end
+
+---@param ui DrawerUI
 ---@param expansion_ids table<string, boolean>?
 ---@return table<string, boolean> unresolved_ids
 local function restore_expansion_state(ui, expansion_ids)
@@ -1503,6 +1528,9 @@ function DrawerUI:_bootstrap_connection_invalidated_consumer()
         return false, promoted.kind
       else
         collect_replay(promoted.events)
+        for _, event in ipairs(bootstrap_epoch_reconcile_events(self, snapshot.snapshot_authoritative_epoch or {})) do
+          replay_events[#replay_events + 1] = event
+        end
 
         self._connection_invalidated_consumer_live = true
         for _, event in ipairs(replay_events) do
