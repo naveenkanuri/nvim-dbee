@@ -189,88 +189,65 @@ local DiagnosticSeverity = {
 ---@return table[] diagnostics
 local function compute_diagnostics(text, cache)
   local diagnostics = {}
-  local lines = vim.split(text, "\n")
 
-  for line_idx, line in ipairs(lines) do
-    -- find table refs after FROM/JOIN (case-insensitive)
-    -- pattern: FROM/JOIN optional_schema.table_name
-    for kw, rest in line:gmatch("([Ff][Rr][Oo][Mm]%s+)(.-)$") do
-      -- extract first table reference
-      local schema_part, tbl = rest:match("^([%w_]+)%.([%w_]+)")
-      if schema_part and tbl then
-        local actual, _ = cache:find_table(tbl)
-        if not actual then
-          local col_start = #kw + line:find(kw, 1, true) - 1
-          diagnostics[#diagnostics + 1] = {
-            range = {
-              start = { line = line_idx - 1, character = #kw },
-              ["end"] = { line = line_idx - 1, character = #kw + #schema_part + 1 + #tbl },
-            },
-            severity = DiagnosticSeverity.Warning,
-            source = "dbee-lsp",
-            message = string.format("Unknown table: %s.%s", schema_part, tbl),
-          }
-        end
-      else
-        tbl = rest:match("^([%w_]+)")
-        if tbl and #tbl > 0 then
-          local actual, _ = cache:find_table(tbl)
-          if not actual then
-            diagnostics[#diagnostics + 1] = {
-              range = {
-                start = { line = line_idx - 1, character = #kw },
-                ["end"] = { line = line_idx - 1, character = #kw + #tbl },
-              },
-              severity = DiagnosticSeverity.Warning,
-              source = "dbee-lsp",
-              message = string.format("Unknown table: %s", tbl),
-            }
-          end
-        end
+  local function keyword_pattern(keyword)
+    local parts = {}
+    for i = 1, #keyword do
+      local ch = keyword:sub(i, i)
+      parts[#parts + 1] = "[" .. ch:lower() .. ch:upper() .. "]"
+    end
+    return table.concat(parts)
+  end
+
+  local function add_unknown(statement, ref, ref_start)
+    local schema_part, tbl = ref:match("^([%w_]+)%.([%w_]+)$")
+    local missing = false
+    local message
+    if schema_part and tbl then
+      local actual = cache:find_table_in_schema(schema_part, tbl)
+      missing = actual == nil
+      message = string.format("Unknown table: %s.%s", schema_part, tbl)
+    else
+      tbl = ref:match("^([%w_]+)$")
+      if not tbl then
+        return
       end
+      local actual = cache:find_table(tbl)
+      missing = actual == nil
+      message = string.format("Unknown table: %s", tbl)
     end
 
-    -- same for JOIN variants
-    for kw, rest in line:gmatch("([Jj][Oo][Ii][Nn]%s+)(.-)$") do
-      local schema_part, tbl = rest:match("^([%w_]+)%.([%w_]+)")
-      if schema_part and tbl then
-        local actual, _ = cache:find_table(tbl)
-        if not actual then
-          diagnostics[#diagnostics + 1] = {
-            range = {
-              start = { line = line_idx - 1, character = line:find(kw, 1, true) + #kw - 1 },
-              ["end"] = { line = line_idx - 1, character = line:find(kw, 1, true) + #kw - 1 + #schema_part + 1 + #tbl },
-            },
-            severity = DiagnosticSeverity.Warning,
-            source = "dbee-lsp",
-            message = string.format("Unknown table: %s.%s", schema_part, tbl),
-          }
-        end
-      else
-        tbl = rest:match("^([%w_]+)")
-        if tbl and #tbl > 0 then
-          local actual, _ = cache:find_table(tbl)
-          if not actual then
-            local kw_pos = line:find("[Jj][Oo][Ii][Nn]")
-            if kw_pos then
-              local after_kw = line:sub(kw_pos):match("^%w+%s+()")
-              if after_kw then
-                local char_start = kw_pos - 1 + after_kw - 1
-                diagnostics[#diagnostics + 1] = {
-                  range = {
-                    start = { line = line_idx - 1, character = char_start },
-                    ["end"] = { line = line_idx - 1, character = char_start + #tbl },
-                  },
-                  severity = DiagnosticSeverity.Warning,
-                  source = "dbee-lsp",
-                  message = string.format("Unknown table: %s", tbl),
-                }
-              end
-            end
-          end
-        end
-      end
+    if not missing then
+      return
     end
+
+    diagnostics[#diagnostics + 1] = {
+      range = {
+        start = context.statement_offset_to_position(statement, ref_start),
+        ["end"] = context.statement_offset_to_position(statement, ref_start + #ref),
+      },
+      severity = DiagnosticSeverity.Warning,
+      source = "dbee-lsp",
+      message = message,
+    }
+  end
+
+  local function scan_statement(statement, keyword)
+    local pattern = "()%f[%a]" .. keyword_pattern(keyword) .. "%f[%A]%s+()([%w_%.]+)"
+    local init = 1
+    while true do
+      local match_start, match_end, ref_start, ref = statement.text:find(pattern, init)
+      if not match_start then
+        break
+      end
+      add_unknown(statement, ref, ref_start)
+      init = match_end + 1
+    end
+  end
+
+  for _, statement in ipairs(context.extract_statements(text)) do
+    scan_statement(statement, "from")
+    scan_statement(statement, "join")
   end
 
   return diagnostics
