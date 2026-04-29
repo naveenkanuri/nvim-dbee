@@ -37,3 +37,11 @@
 
 - **Drawer cold start lacks visual orientation** (cosmetic, related):
   Connection list starts flat from line 1. Old v1.0 had `connections.json` parent header providing instant context for "what am I looking at". v1.3 candidate: optional section header `Connections` line OR active-connection highlight at top. Lower priority than badge fix.
+
+### v1.1 Phase 8 wizard highlight regression (surfaced 2026-04-29 during v1.1 live test) — UNUSABLE on dark colorschemes
+
+- **Wizard input field text invisible (text fg = bg)** (`lua/dbee/ui/wizard/*` or wherever Phase 8 compound modal lives):
+  Typing into the Name field shows cursor moving but typed characters don't render. Type/Mode dropdown either doesn't render or renders text on dark-on-dark. Repro: open Add Connection wizard, type any name → cursor advances, text invisible.
+  Likely root cause: nui.nvim Input/Select components in the wizard lack explicit `winhighlight` config. Inherits `Normal` over `NormalFloat` where fg/bg collide on user's dark colorscheme. Phase 8 D-XX may have defined highlight contract but implementation skipped applying it to child windows.
+  v1.3 fix: explicit `winhighlight = "Normal:NormalFloat,FloatBorder:FloatBorder,..."` on each wizard Input/Select component. Test against multiple dark colorschemes (Naveen's current scheme + e.g. tokyonight, catppuccin-mocha, gruvbox-dark) before close.
+  Severity: **HIGH** — wizard is a headline v1.1 deliverable but unusable on Naveen's daily colorscheme. Workaround: edit `connections.json` directly to add connections.
