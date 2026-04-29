@@ -1649,6 +1649,83 @@ local function run_no_auto_activate_contract()
 end
 
 local function run_wizard_highlight_contract()
+  local function run_menu_winhighlight_threading_contract()
+    Harness.reset_modules({
+      "dbee.ui.drawer.menu",
+      "nui.menu",
+      "nui.input",
+    })
+
+    local captured = {
+      select = {},
+      input = {},
+    }
+
+    package.loaded["nui.menu"] = setmetatable({
+      item = function(text)
+        return { text = text }
+      end,
+    }, {
+      __call = function(_, popup_opts)
+        captured.select[#captured.select + 1] = popup_opts
+        return {
+          tree = {
+            get_node = function()
+              return { text = "Submit" }
+            end,
+          },
+          map = function() end,
+          mount = function() end,
+          unmount = function() end,
+        }
+      end,
+    })
+
+    package.loaded["nui.input"] = setmetatable({}, {
+      __call = function(_, popup_opts)
+        captured.input[#captured.input + 1] = popup_opts
+        return {
+          bufnr = vim.api.nvim_create_buf(false, true),
+          map = function() end,
+          mount = function() end,
+          unmount = function(self)
+            if self.bufnr and vim.api.nvim_buf_is_valid(self.bufnr) then
+              pcall(vim.api.nvim_buf_delete, self.bufnr, { force = true })
+            end
+          end,
+        }
+      end,
+    })
+
+    local host_buf, winid = Harness.with_window()
+    local real_menu = require("dbee.ui.drawer.menu")
+    real_menu.select({
+      relative_winid = winid,
+      title = "Submit",
+      items = { "Submit", "Cancel" },
+      mappings = {
+        { key = "<CR>", mode = "n", action = "menu_confirm" },
+      },
+      winhighlight = UX13_WIZARD_WINHIGHLIGHT,
+      on_confirm = function() end,
+      on_yank = function() end,
+    })
+    real_menu.input({
+      relative_winid = winid,
+      title = "Cancel",
+      default_value = "Visible Wizard Text",
+      mappings = {
+        { key = "<CR>", mode = "n", action = "menu_confirm" },
+      },
+      winhighlight = UX13_WIZARD_WINHIGHLIGHT,
+      on_confirm = function() end,
+    })
+
+    assert_winhighlight("real menu select win_options", captured.select[#captured.select])
+    assert_winhighlight("real menu input win_options", captured.input[#captured.input])
+    Harness.close_window_and_buffer(host_buf, winid)
+  end
+
   local function open_highlight_wizard(label, configure_highlights)
     if configure_highlights then
       configure_highlights()
@@ -1664,6 +1741,8 @@ local function run_wizard_highlight_contract()
     end)
     assert_winhighlight(label .. "_main", wizard.popup.opts)
     assert_buffer_contains(label .. "_main_text", wizard.popup.bufnr, "Type: Postgres")
+    assert_buffer_contains(label .. "_submit_text", wizard.popup.bufnr, "Submit")
+    assert_buffer_contains(label .. "_cancel_text", wizard.popup.bufnr, "Cancel")
     return env, wizard
   end
 
@@ -1728,6 +1807,8 @@ local function run_wizard_highlight_contract()
   print("UX13_WIZARD_WINHIGHLIGHT_SELECT=true")
   print("UX13_WIZARD_WINHIGHLIGHT_MULTILINE=true")
   print("UX13_WIZARD_TEXT_RENDER_STATE_OK=true")
+  run_menu_winhighlight_threading_contract()
+  print("UX13_WIZARD_NUI_WIN_OPTIONS_THREADED=true")
   print("UX13_WIZARD_ALL_PASS=true")
 end
 
