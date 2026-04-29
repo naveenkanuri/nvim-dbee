@@ -1,6 +1,7 @@
 local context = require("dbee.lsp.context")
 
 local M = {}
+local DIAGNOSTIC_NS = vim.api.nvim_create_namespace("dbee/lsp")
 
 local CompletionItemKind = {
   Text = 1,
@@ -183,6 +184,45 @@ local DiagnosticSeverity = {
   Hint = 4,
 }
 
+local function get_lsp_diagnostics_config()
+  local defaults = {
+    diagnostics_mode = "debounce_didchange",
+    diagnostics_debounce_ms = 250,
+  }
+  local ok, state = pcall(require, "dbee.api.state")
+  if not ok or not state or type(state.config) ~= "function" then
+    return defaults
+  end
+  local config_ok, cfg = pcall(state.config)
+  local lsp = config_ok and cfg and cfg.lsp or nil
+  if type(lsp) ~= "table" then
+    return defaults
+  end
+  return {
+    diagnostics_mode = lsp.diagnostics_mode or defaults.diagnostics_mode,
+    diagnostics_debounce_ms = lsp.diagnostics_debounce_ms or defaults.diagnostics_debounce_ms,
+  }
+end
+
+local function to_vim_diagnostics(diagnostics)
+  local converted = {}
+  for _, diagnostic in ipairs(diagnostics or {}) do
+    local range = diagnostic.range or {}
+    local start = range.start or {}
+    local finish = range["end"] or {}
+    converted[#converted + 1] = {
+      lnum = start.line or 0,
+      col = start.character or 0,
+      end_lnum = finish.line or start.line or 0,
+      end_col = finish.character or start.character or 0,
+      severity = diagnostic.severity,
+      source = diagnostic.source,
+      message = diagnostic.message,
+    }
+  end
+  return converted
+end
+
 --- Extract table references from SQL text and validate against cache.
 ---@param text string full buffer text
 ---@param cache SchemaCache
@@ -260,8 +300,89 @@ end
 function M.create(cache)
   local closing = false
   local msg_id = 0
+  local diagnostic_timers = {}
+  local diagnostic_buffers = {}
 
   return function(dispatchers, config)
+    local function clear_timer(uri)
+      local timer = diagnostic_timers[uri]
+      if timer then
+        timer:stop()
+        timer:close()
+        diagnostic_timers[uri] = nil
+      end
+    end
+
+    local function clear_all_diagnostics()
+      for bufnr in pairs(diagnostic_buffers) do
+        if vim.api.nvim_buf_is_valid(bufnr) then
+          vim.diagnostic.set(DIAGNOSTIC_NS, bufnr, {})
+        end
+      end
+      diagnostic_buffers = {}
+      for uri in pairs(diagnostic_timers) do
+        clear_timer(uri)
+      end
+    end
+
+    local function publish_diagnostics(uri, diagnostics)
+      local bufnr = vim.uri_to_bufnr(uri)
+      if vim.api.nvim_buf_is_valid(bufnr) then
+        diagnostic_buffers[bufnr] = true
+        vim.diagnostic.set(DIAGNOSTIC_NS, bufnr, to_vim_diagnostics(diagnostics))
+      end
+      local notify = dispatchers and (dispatchers.notification or dispatchers.on_notify)
+      if notify then
+        notify("textDocument/publishDiagnostics", {
+          uri = uri,
+          diagnostics = diagnostics,
+        })
+      end
+    end
+
+    local function compute_and_publish(uri)
+      local bufnr = vim.uri_to_bufnr(uri)
+      if not vim.api.nvim_buf_is_valid(bufnr) then
+        return
+      end
+      local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+      local text = table.concat(lines, "\n")
+      local ok, diags = pcall(compute_diagnostics, text, cache)
+      if not ok then
+        diags = {}
+      end
+      publish_diagnostics(uri, diags)
+    end
+
+    local function handle_diagnostics(method, params)
+      local cfg = get_lsp_diagnostics_config()
+      local mode = cfg.diagnostics_mode or "debounce_didchange"
+      local uri = params.textDocument.uri
+      if mode == "off" then
+        clear_timer(uri)
+        publish_diagnostics(uri, {})
+        return
+      end
+      if method == "textDocument/didSave" then
+        clear_timer(uri)
+        compute_and_publish(uri)
+        return
+      end
+      if mode == "save_only" then
+        return
+      end
+
+      clear_timer(uri)
+      local timer = (vim.uv or vim.loop).new_timer()
+      diagnostic_timers[uri] = timer
+      timer:start(cfg.diagnostics_debounce_ms or 250, 0, function()
+        clear_timer(uri)
+        vim.schedule(function()
+          compute_and_publish(uri)
+        end)
+      end)
+    end
+
     return {
       request = function(method, params, callback, notify_reply_callback)
         msg_id = msg_id + 1
@@ -308,31 +429,12 @@ function M.create(cache)
       notify = function(method, params)
         if method == "exit" then
           closing = true
+          clear_all_diagnostics()
           if dispatchers and dispatchers.on_exit then
             dispatchers.on_exit(0, 0)
           end
         elseif method == "textDocument/didSave" or method == "textDocument/didChange" then
-          -- publish diagnostics on save or change
-          vim.schedule(function()
-            local uri = params.textDocument.uri
-            local bufnr = vim.uri_to_bufnr(uri)
-            if not vim.api.nvim_buf_is_valid(bufnr) then
-              return
-            end
-            local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-            local text = table.concat(lines, "\n")
-            local ok, diags = pcall(compute_diagnostics, text, cache)
-            if not ok then
-              diags = {}
-            end
-            local notify = dispatchers and (dispatchers.notification or dispatchers.on_notify)
-            if notify then
-              notify("textDocument/publishDiagnostics", {
-                uri = uri,
-                diagnostics = diags,
-              })
-            end
-          end)
+          handle_diagnostics(method, params)
         end
         return true
       end,
@@ -343,6 +445,7 @@ function M.create(cache)
 
       terminate = function()
         closing = true
+        clear_all_diagnostics()
       end,
     }
   end
