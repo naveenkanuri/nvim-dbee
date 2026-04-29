@@ -1105,6 +1105,45 @@ local function run_local_validation_contract()
   assert_eq("local validation ping calls", #env.runtime.connection_test_spec_calls, 0)
   assert_match("local validation error message", wizard.state.last_error, "Host is required.")
   wizard:close()
+
+  local multiline_descriptor = table.concat({
+    "(",
+    "  DESCRIPTION=",
+    "    (ADDRESS=(PROTOCOL=tcp)(HOST=oracle-host)(PORT=1521))",
+    "    (CONNECT_DATA=(SERVICE_NAME=XE))",
+    ")",
+  }, "\n")
+  local oracle_submits = 0
+  local oracle_wizard = env.connection_wizard.open({
+    title = "Oracle Validation",
+    seed = {
+      params = {
+        name = "Oracle JDBC",
+        type = "oracle",
+        url = "",
+      },
+      wizard = {
+        db_kind = "oracle",
+        mode = "oracle_custom_jdbc",
+        fields = {
+          name = "Oracle JDBC",
+          username = "scott",
+          password = "tiger",
+          descriptor = multiline_descriptor,
+        },
+      },
+    },
+    on_submit = function(submission)
+      oracle_submits = oracle_submits + 1
+      assert_eq("oracle descriptor preserved", submission.wizard.fields.descriptor, multiline_descriptor)
+      return nil
+    end,
+  })
+
+  local oracle_submission, oracle_errors = oracle_wizard:submit()
+  assert_true("oracle descriptor submission", oracle_submission ~= nil)
+  assert_eq("oracle descriptor errors", oracle_errors, nil)
+  assert_eq("oracle descriptor submit callback", oracle_submits, 1)
   env:cleanup()
   print("DCFG02_LOCAL_VALIDATION_OK=true")
 end

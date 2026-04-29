@@ -709,7 +709,8 @@ local function validate_submission(state)
     required("password", "Password")
     required("descriptor", "Descriptor")
     local descriptor = tostring(fields.descriptor or "")
-    if descriptor ~= "" and descriptor:upper():find("(DESCRIPTION=", 1, true) == nil then
+    local normalized = normalize_descriptor_text(descriptor):upper()
+    if normalized ~= "" and normalized:find("(DESCRIPTION=", 1, true) == nil then
       errors[#errors + 1] = "Descriptor must contain a `(DESCRIPTION=...)` block."
     end
   elseif state.mode == "postgres_url" then
