@@ -640,12 +640,19 @@ local function normalize_seed(seed)
 
   seed_other_raw()
 
-  if type(wizard.fields) == "table" and wizard.mode and FIELD_DEFS[wizard.mode] then
-    state.mode = wizard.mode
-    state.db_kind = wizard.db_kind or mode_db_kind(wizard.mode)
-    state.fields[wizard.mode] = vim.tbl_extend("force", state.fields[wizard.mode], deepcopy(wizard.fields))
-    if params.name and not state.fields[wizard.mode].name then
-      state.fields[wizard.mode].name = params.name
+  if type(wizard.fields) == "table" and wizard.mode then
+    if FIELD_DEFS[wizard.mode] then
+      state.mode = wizard.mode
+      state.db_kind = wizard.db_kind or mode_db_kind(wizard.mode)
+      state.fields[wizard.mode] = vim.tbl_extend("force", state.fields[wizard.mode], deepcopy(wizard.fields))
+      if params.name and not state.fields[wizard.mode].name then
+        state.fields[wizard.mode].name = params.name
+      end
+    else
+      state.db_kind = "other"
+      state.mode = "other_raw"
+      state.preserve_existing_wizard = true
+      state.preserved_wizard = deepcopy(wizard)
     end
     refresh_derived_state(state)
     refresh_wallet_alias_state(state)
@@ -790,12 +797,17 @@ local function serialize_submission(state)
   local fields = ensure_mode_fields(state, state.mode)
   -- Password placeholders are preserved byte-for-byte in wizard fields and the
   -- rendered runtime params; no templating or auto-expansion happens here.
-  local wizard = {
-    db_kind = state.db_kind,
-    mode = state.mode,
-    fields = deepcopy(fields),
-  }
   local metadata_action = derive_metadata_action(state)
+  local wizard = nil
+  if state.preserve_existing_wizard and type(state.preserved_wizard) == "table" then
+    wizard = deepcopy(state.preserved_wizard)
+  else
+    wizard = {
+      db_kind = state.db_kind,
+      mode = state.mode,
+      fields = deepcopy(fields),
+    }
+  end
 
   if state.mode == "oracle_cloud_wallet" then
     local descriptor = state.wallet_alias_map[fields.service_alias or ""]

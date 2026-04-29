@@ -1453,6 +1453,71 @@ local function run_missing_filesource_edit_failure_contract()
   env:cleanup()
 end
 
+local function run_unknown_wizard_mode_contract()
+  local original_wizard = {
+    db_kind = "postgres",
+    mode = "postgres_future",
+    custom_unknown_key = "preserve_top",
+    fields = {
+      name = "Future PG",
+      url = "postgres://future_user:future_pass@future-host:5432/future_db?sslmode=require",
+      custom_unknown_key = "preserve_me",
+    },
+  }
+  local file_records = default_file_records()
+  file_records[#file_records + 1] = {
+    id = "conn-future-unchanged",
+    name = "Future PG",
+    type = "postgres",
+    url = "postgres://future_user:future_pass@future-host:5432/future_db?sslmode=require",
+    wizard = vim.deepcopy(original_wizard),
+  }
+  file_records[#file_records + 1] = {
+    id = "conn-future-edited",
+    name = "Future PG Edited",
+    type = "postgres",
+    url = "postgres://future_user:future_pass@future-host:5432/future_db?sslmode=require",
+    wizard = vim.deepcopy(original_wizard),
+  }
+  local env = new_env({
+    current_conn_id = "conn-meta",
+    file_records = file_records,
+  })
+
+  clear_runtime_observations(env.runtime)
+  local unchanged = expect_wizard(env, function()
+    env.drawer:open_edit_connection_with_wizard(env:file_source_meta(), "conn-future-unchanged")
+  end)
+  assert_eq("unknown mode fallback", unchanged.state.mode, "other_raw")
+  assert_eq("unknown mode type", unchanged:current_fields().type, "postgres")
+  assert_eq(
+    "unknown mode url",
+    unchanged:current_fields().url,
+    "postgres://future_user:future_pass@future-host:5432/future_db?sslmode=require"
+  )
+  submit_and_assert_success(unchanged)
+  local unchanged_record = find_record(read_json(env.file_path), "conn-future-unchanged")
+  assert_eq("unknown mode unchanged wizard", vim.inspect(unchanged_record.wizard), vim.inspect(original_wizard))
+  assert_eq("unknown mode no delete directive", env.file_source.update_calls[1].details.__remove_keys, nil)
+  assert_eq("unknown mode no replacement wizard", env.file_source.update_calls[1].details.wizard, nil)
+
+  clear_runtime_observations(env.runtime)
+  local edited = expect_wizard(env, function()
+    env.drawer:open_edit_connection_with_wizard(env:file_source_meta(), "conn-future-edited")
+  end)
+  assert_eq("unknown mode edited fallback", edited.state.mode, "other_raw")
+  edited:set_field("name", "Future PG Renamed")
+  submit_and_assert_success(edited)
+  local edited_record = find_record(read_json(env.file_path), "conn-future-edited")
+  assert_eq("unknown mode edited name", edited_record.name, "Future PG Renamed")
+  assert_eq("unknown mode preserved mode", edited_record.wizard.mode, "postgres_future")
+  assert_eq("unknown mode preserved top-level key", edited_record.wizard.custom_unknown_key, "preserve_top")
+  assert_eq("unknown mode preserved nested key", edited_record.wizard.fields.custom_unknown_key, "preserve_me")
+
+  env:cleanup()
+  print("DCFG02_UNKNOWN_WIZARD_MODE_PRESERVED_OK=true")
+end
+
 local function run_partial_failure_contract()
   local env = new_env({
     current_conn_id = false,
@@ -1563,6 +1628,7 @@ run_transient_ping_and_fail_closed_contracts()
 run_other_mode_contracts()
 run_filesource_raw_fallback_contract()
 run_missing_filesource_edit_failure_contract()
+run_unknown_wizard_mode_contract()
 run_partial_failure_contract()
 run_no_auto_activate_contract()
 
