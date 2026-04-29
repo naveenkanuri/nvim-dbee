@@ -214,9 +214,15 @@ function SchemaCache:_rebuild_structure_indexes()
       if not seen[item.label] then
         seen[item.label] = true
         self.all_table_items[#self.all_table_items + 1] = vim.deepcopy(item)
-        self.all_table_names[#self.all_table_names + 1] = item.label
       end
     end
+  end
+
+  table.sort(self.all_table_items, function(a, b)
+    return a.label < b.label
+  end)
+  for _, item in ipairs(self.all_table_items) do
+    self.all_table_names[#self.all_table_names + 1] = item.label
   end
 end
 
