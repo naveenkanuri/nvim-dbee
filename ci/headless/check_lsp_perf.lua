@@ -1616,6 +1616,8 @@ local function run_flame_trace_subprocess()
   end
 end
 
+local run_representative_trace_workload
+
 local function run_trace_only_mode()
   local real_install_plugin = benchmark.install_plugin
   benchmark.install_plugin = function(path)
@@ -1632,10 +1634,7 @@ local function run_trace_only_mode()
 
   local complete = false
   flame_profile_start()
-  local start = uv.hrtime()
-  while ns_to_ms(uv.hrtime() - start) < 1 do
-    -- keep a tiny deterministic trace body
-  end
+  local ok, err = xpcall(run_representative_trace_workload, debug.traceback)
   flame_profile_stop(function()
     complete = true
   end)
@@ -1644,6 +1643,9 @@ local function run_trace_only_mode()
   end, 10)
   if not wrote_trace then
     fail("flame trace timeout: " .. trace_path)
+  end
+  if not ok then
+    fail(err)
   end
   vim.cmd("qa!")
 end
@@ -1809,6 +1811,60 @@ register({
   end,
   after = startup_after,
 })
+
+run_representative_trace_workload = function()
+  emit("LSP01_TRACE_WORKLOAD", "startup_cold+completion+diagnostics_didchange")
+
+  local startup_state = startup_before("cold")
+  local startup_ok, startup_err = xpcall(function()
+    with_fake_lsp_state(startup_state.handler, function(lsp_module)
+      local lsp = start_lsp_via_lifecycle(lsp_module, startup_state.bufnr, {
+        label = "TRACE_STARTUP_COLD",
+      })
+      drain_deferred(0, "TRACE_STARTUP_COLD")
+      local status = lsp.status()
+      if status.running ~= true or not status.client_id then
+        error("trace startup did not reach running state")
+      end
+    end)
+  end, debug.traceback)
+  startup_after(startup_state)
+  if not startup_ok then
+    error(startup_err)
+  end
+
+  local direct_state = completion_before(100, {
+    preload_columns = true,
+  })
+  direct_state.scenario_slug = "TRACE_DIRECT_LSP"
+  direct_state.iteration = WARMUP_COUNT + MEASURED_COUNT
+
+  local trace_start = uv.hrtime()
+  local iterations = 0
+  local trace_ok, trace_err = xpcall(function()
+    repeat
+      local items = request_completion(
+        direct_state,
+        "SELECT * FROM SCHEMA_001.TABLE_000001 t WHERE t.",
+        #"SELECT * FROM SCHEMA_001.TABLE_000001 t WHERE t."
+      )
+      require_completion_labels("TRACE_COMPLETION", items, { "COL_001", "COL_010" }, { "COL_999" })
+      local lines, expected_line = make_diagnostic_lines(100)
+      request_diagnostics(direct_state, "textDocument/didChange", lines, expected_line)
+      iterations = iterations + 1
+    until ns_to_ms(uv.hrtime() - trace_start) >= 100 or iterations >= 50
+  end, debug.traceback)
+
+  completion_after(direct_state)
+  if not trace_ok then
+    error(trace_err)
+  end
+  if iterations == 0 then
+    error("trace workload ran zero iterations")
+  end
+  emit("LSP01_TRACE_WORKLOAD_ITERATIONS", iterations)
+  emit("LSP01_TRACE_WORKLOAD_DURATION_MS", format_float(ns_to_ms(uv.hrtime() - trace_start)))
+end
 
 if trace_only then
   run_trace_only_mode()
