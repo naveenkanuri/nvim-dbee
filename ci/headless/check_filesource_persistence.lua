@@ -120,6 +120,69 @@ local function run_atomic_write_contract()
     assert_eq("atomic temp cleanup", vim.fn.glob(path .. ".*.tmp"), "")
   end)
 
+  with_source({
+    {
+      id = "conn-atomic",
+      name = "Atomic",
+      type = "postgres",
+      url = "postgres://atomic",
+    },
+  }, function(source, path)
+    local original_records = read_json(path)
+    local original_open = io.open
+
+    local function assert_io_failure(method_name, expected_pattern)
+      io.open = function(target, mode)
+        local real_file, err = original_open(target, mode)
+        if not real_file then
+          return real_file, err
+        end
+
+        if mode == "w" and target ~= path and target:find(path .. ".", 1, true) == 1 then
+          return {
+            write = function(_, data)
+              if method_name == "write" then
+                return nil, "write exploded"
+              end
+              return real_file:write(data)
+            end,
+            flush = function()
+              if method_name == "flush" then
+                return nil, "flush exploded"
+              end
+              return real_file:flush()
+            end,
+            close = function()
+              if method_name == "close" then
+                return nil, "close exploded"
+              end
+              return real_file:close()
+            end,
+          }
+        end
+
+        return real_file, err
+      end
+
+      local ok, update_err = pcall(source.update, source, "conn-atomic", {
+        name = "Atomic Updated",
+        type = "postgres",
+        url = "postgres://atomic-updated",
+      })
+
+      io.open = original_open
+
+      assert_true(method_name .. " failure propagated", not ok)
+      assert_match(method_name .. " failure message", tostring(update_err), expected_pattern)
+      assert_eq(method_name .. " keeps original file", vim.inspect(read_json(path)), vim.inspect(original_records))
+      assert_eq(method_name .. " temp cleanup", vim.fn.glob(path .. ".*.tmp"), "")
+    end
+
+    assert_io_failure("write", "could not write temp file")
+    assert_io_failure("flush", "could not flush temp file")
+    assert_io_failure("close", "could not close temp file")
+  end)
+
   print("DCFG02_ATOMIC_WRITE_OK=true")
 end
 

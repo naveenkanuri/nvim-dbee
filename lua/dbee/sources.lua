@@ -74,6 +74,14 @@ local function cleanup_file(path)
   pcall(uv.fs_unlink, path)
 end
 
+local function abort_atomic_write(file, temp_path, prefix, err)
+  if file then
+    pcall(file.close, file)
+  end
+  cleanup_file(temp_path)
+  error(prefix .. tostring(err))
+end
+
 local function write_records_atomically(path, records)
   local ok, json = pcall(vim.fn.json_encode, records)
   if not ok then
@@ -86,24 +94,20 @@ local function write_records_atomically(path, records)
     error("could not open temp file: " .. tostring(open_err))
   end
 
-  local ok_write, write_err = pcall(file.write, file, json)
-  if not ok_write then
-    pcall(file.close, file)
-    cleanup_file(temp_path)
-    error("could not write temp file: " .. tostring(write_err))
+  local ok_write, write_result, write_err = pcall(file.write, file, json)
+  if not ok_write or write_result == nil then
+    abort_atomic_write(file, temp_path, "could not write temp file: ", ok_write and write_err or write_result)
   end
 
-  local ok_flush, flush_err = pcall(file.flush, file)
-  if not ok_flush then
-    pcall(file.close, file)
-    cleanup_file(temp_path)
-    error("could not flush temp file: " .. tostring(flush_err))
+  local ok_flush, flush_result, flush_err = pcall(file.flush, file)
+  if not ok_flush or flush_result == nil then
+    abort_atomic_write(file, temp_path, "could not flush temp file: ", ok_flush and flush_err or flush_result)
   end
 
-  local ok_close, close_err = pcall(file.close, file)
-  if not ok_close then
+  local ok_close, close_result, close_err = pcall(file.close, file)
+  if not ok_close or close_result == nil then
     cleanup_file(temp_path)
-    error("could not close temp file: " .. tostring(close_err))
+    error("could not close temp file: " .. tostring(ok_close and close_err or close_result))
   end
 
   local ok_rename, rename_err = uv.fs_rename(temp_path, path)
