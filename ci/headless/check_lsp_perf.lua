@@ -1189,6 +1189,10 @@ register_alias_completion(
   "lines:1,joins:5,aliases:5,cursor:t5_dot"
 )
 
+local function clear_lsp_cache_dir()
+  vim.fn.delete(vim.fn.stdpath("state") .. "/dbee/lsp_cache", "rf")
+end
+
 local function new_empty_cache(table_count, conn_id)
   local SchemaCache = require("dbee.lsp.schema_cache")
   local handler = make_handler({
@@ -1579,10 +1583,6 @@ local function run_trace_only_mode()
     fail("flame trace timeout: " .. trace_path)
   end
   vim.cmd("qa!")
-end
-
-local function clear_lsp_cache_dir()
-  vim.fn.delete(vim.fn.stdpath("state") .. "/dbee/lsp_cache", "rf")
 end
 
 local function seed_warm_disk_cache(handler)
