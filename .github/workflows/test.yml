@@ -15,6 +15,7 @@ defaults:
 
 env:
   GO_VERSION: "1.23.x"
+  NVIM_PERF_VERSION: "v0.12.2"
 
 jobs:
   go-unit-test:
@@ -94,6 +95,46 @@ jobs:
           nvim --headless -u NONE -i NONE -n \
             --cmd "set rtp^=${RUNNER_TEMP}/nui.nvim | set rtp+=${GITHUB_WORKSPACE}" \
             -c "luafile ${GITHUB_WORKSPACE}/ci/headless/${{ matrix.script }}"
+
+  lua-real-nui-perf-advisory:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: linux
+            archive: nvim-linux-x86_64.tar.gz
+            dir: nvim-linux-x86_64
+          - os: macos-14
+            platform: macos
+            archive: nvim-macos-arm64.tar.gz
+            dir: nvim-macos-arm64
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    name: Lua Real-Nui Perf Advisory (${{ matrix.platform }})
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Neovim ${{ env.NVIM_PERF_VERSION }}
+        run: |
+          curl -fsSLO https://github.com/neovim/neovim/releases/download/${{ env.NVIM_PERF_VERSION }}/${{ matrix.archive }}
+          tar xzf ${{ matrix.archive }}
+          echo "${PWD}/${{ matrix.dir }}/bin" >> "${GITHUB_PATH}"
+      - name: Bootstrap pinned perf plugins
+        env:
+          PERF_PLUGIN_ROOT: ${{ runner.temp }}/nvim-dbee-perf-plugins
+        run: make perf-bootstrap
+      - name: Run advisory real-nui perf harness
+        env:
+          PERF_PLUGIN_ROOT: ${{ runner.temp }}/nvim-dbee-perf-plugins
+          DRAW01_PERF_ARTIFACT_DIR: ${{ runner.temp }}/draw01-perf/${{ matrix.platform }}
+        run: DRAW01_PERF_GATE_MODE=advisory make perf PERF_PLATFORM=${{ matrix.platform }}
+      - name: Advisory promotion seam
+        run: |
+          echo "Phase 9 perf remains advisory in this workflow until ci/headless/perf_thresholds.lua is frozen."
+          echo "Promotion flips DRAW01_PERF_GATE_MODE=blocking in the same change that freezes Linux and macOS thresholds."
 
   bootstrap-testcontainers:
     runs-on: ubuntu-22.04
