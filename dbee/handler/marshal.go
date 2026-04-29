@@ -86,15 +86,17 @@ func (cw *connectionWrap) MarshalMsgPack(enc *msgpack.Encoder) error {
 		return enc.Encode(nil)
 	}
 	return enc.Encode(&struct {
-		ID   string `msgpack:"id"`
-		Name string `msgpack:"name"`
-		Type string `msgpack:"type"`
-		URL  string `msgpack:"url"`
+		ID           string                    `msgpack:"id"`
+		Name         string                    `msgpack:"name"`
+		Type         string                    `msgpack:"type"`
+		URL          string                    `msgpack:"url"`
+		SchemaFilter *core.SchemaFilterOptions `msgpack:"schema_filter,omitempty"`
 	}{
-		ID:   string(cw.connection.GetID()),
-		Name: cw.connection.GetName(),
-		Type: cw.connection.GetType(),
-		URL:  cw.connection.GetURL(),
+		ID:           string(cw.connection.GetID()),
+		Name:         cw.connection.GetName(),
+		Type:         cw.connection.GetType(),
+		URL:          cw.connection.GetURL(),
+		SchemaFilter: cw.connection.GetSchemaFilter(),
 	})
 }
 
@@ -114,15 +116,17 @@ func (cw *connectionParamsWrap) MarshalMsgPack(enc *msgpack.Encoder) error {
 		return enc.Encode(nil)
 	}
 	return enc.Encode(&struct {
-		ID   string `msgpack:"id"`
-		Name string `msgpack:"name"`
-		Type string `msgpack:"type"`
-		URL  string `msgpack:"url"`
+		ID           string                    `msgpack:"id"`
+		Name         string                    `msgpack:"name"`
+		Type         string                    `msgpack:"type"`
+		URL          string                    `msgpack:"url"`
+		SchemaFilter *core.SchemaFilterOptions `msgpack:"schema_filter,omitempty"`
 	}{
-		ID:   string(cw.params.ID),
-		Name: cw.params.Name,
-		Type: cw.params.Type,
-		URL:  cw.params.URL,
+		ID:           string(cw.params.ID),
+		Name:         cw.params.Name,
+		Type:         cw.params.Type,
+		URL:          cw.params.URL,
+		SchemaFilter: cw.params.SchemaFilter.Clone(),
 	})
 }
 
@@ -147,6 +151,29 @@ func WrapStructures(structures []*core.Structure) []*structureWrap {
 	}
 
 	return wraps
+}
+
+type schemaWrap struct {
+	schema *core.SchemaInfo
+}
+
+func WrapSchemas(schemas []*core.SchemaInfo) []*schemaWrap {
+	wraps := make([]*schemaWrap, len(schemas))
+	for i := range schemas {
+		wraps[i] = &schemaWrap{schema: schemas[i]}
+	}
+	return wraps
+}
+
+func (sw *schemaWrap) MarshalMsgPack(enc *msgpack.Encoder) error {
+	if sw.schema == nil {
+		return enc.Encode(nil)
+	}
+	return enc.Encode(&struct {
+		Name string `msgpack:"name"`
+	}{
+		Name: sw.schema.Name,
+	})
 }
 
 func (cw *structureWrap) MarshalMsgPack(enc *msgpack.Encoder) error {

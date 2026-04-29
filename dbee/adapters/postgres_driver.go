@@ -15,8 +15,11 @@ import (
 )
 
 var (
-	_ core.Driver           = (*postgresDriver)(nil)
-	_ core.DatabaseSwitcher = (*postgresDriver)(nil)
+	_ core.Driver                  = (*postgresDriver)(nil)
+	_ core.FilteredStructureDriver = (*postgresDriver)(nil)
+	_ core.SchemaListDriver        = (*postgresDriver)(nil)
+	_ core.SchemaStructureDriver   = (*postgresDriver)(nil)
+	_ core.DatabaseSwitcher        = (*postgresDriver)(nil)
 )
 
 type postgresDriver struct {
@@ -50,17 +53,63 @@ func (c *postgresDriver) Columns(opts *core.TableOptions) ([]*core.Column, error
 }
 
 func (c *postgresDriver) Structure() ([]*core.Structure, error) {
+	return c.StructureWithOptions(nil)
+}
+
+func (c *postgresDriver) StructureWithOptions(opts *core.StructureOptions) ([]*core.Structure, error) {
+	where, args, _ := schemaPredicate("schema_name", opts, schemaDialectPostgres, 1)
+	if where != "" {
+		where = "WHERE " + where
+	}
 	query := `
-		SELECT table_schema, table_name, table_type FROM information_schema.tables UNION ALL
-		SELECT schemaname, matviewname, 'VIEW' FROM pg_matviews;
+		SELECT schema_name, object_name, object_type FROM (
+			SELECT table_schema AS schema_name, table_name AS object_name, table_type AS object_type FROM information_schema.tables
+			UNION ALL
+			SELECT schemaname AS schema_name, matviewname AS object_name, 'VIEW' AS object_type FROM pg_matviews
+		) dbee_objects ` + where + ` ORDER BY schema_name, object_name
 	`
 
-	rows, err := c.Query(context.TODO(), query)
+	rows, err := c.c.QueryWithArgs(context.TODO(), query, args...)
 	if err != nil {
 		return nil, err
 	}
 
 	return core.GetGenericStructure(rows, getPGStructureType)
+}
+
+func (c *postgresDriver) ListSchemas() ([]*core.SchemaInfo, error) {
+	rows, err := c.c.QueryWithArgs(context.TODO(), `
+		SELECT schema_name
+		FROM information_schema.schemata
+		WHERE schema_name NOT IN ('pg_catalog', 'information_schema')
+		ORDER BY schema_name`)
+	if err != nil {
+		return nil, err
+	}
+	return schemasFromRows(rows)
+}
+
+func (c *postgresDriver) StructureForSchema(schema string, opts *core.StructureOptions) ([]*core.Structure, error) {
+	if !schemaAllowedByOptions(schema, opts) {
+		return []*core.Structure{}, nil
+	}
+	query := `
+		SELECT schema_name, object_name, object_type FROM (
+			SELECT table_schema AS schema_name, table_name AS object_name, table_type AS object_type FROM information_schema.tables
+			UNION ALL
+			SELECT schemaname AS schema_name, matviewname AS object_name, 'VIEW' AS object_type FROM pg_matviews
+		) dbee_objects
+		WHERE schema_name = $1
+		ORDER BY schema_name, object_name`
+	rows, err := c.c.QueryWithArgs(context.TODO(), query, schema)
+	if err != nil {
+		return nil, err
+	}
+	structure, err := core.GetGenericStructure(rows, getPGStructureType)
+	if err != nil {
+		return nil, err
+	}
+	return schemaObjectsFromStructure(structure, schema), nil
 }
 
 func (c *postgresDriver) Close() {

@@ -24,8 +24,13 @@ import (
 // is excluded.
 const oracleDefaultQueryTimeout = 24 * time.Hour
 
-var _ core.Driver = (*oracleDriver)(nil)
-var _ core.BindDriver = (*oracleDriver)(nil)
+var (
+	_ core.Driver                  = (*oracleDriver)(nil)
+	_ core.BindDriver              = (*oracleDriver)(nil)
+	_ core.FilteredStructureDriver = (*oracleDriver)(nil)
+	_ core.SchemaListDriver        = (*oracleDriver)(nil)
+	_ core.SchemaStructureDriver   = (*oracleDriver)(nil)
+)
 
 type oracleDriver struct {
 	c        *builders.Client
@@ -383,7 +388,14 @@ func (d *oracleDriver) Columns(opts *core.TableOptions) ([]*core.Column, error) 
 }
 
 func (d *oracleDriver) Structure() ([]*core.Structure, error) {
-	query := `
+	return d.StructureWithOptions(nil)
+}
+
+func oracleStructureQuery(where string) string {
+	if where != "" {
+		where = " AND " + where
+	}
+	return `
 		SELECT owner, object_name, object_type
 		FROM (
 			SELECT owner, table_name as object_name, 'TABLE' as object_type
@@ -402,9 +414,14 @@ func (d *oracleDriver) Structure() ([]*core.Structure, error) {
 			FROM all_objects
 			WHERE object_type IN ('PROCEDURE', 'FUNCTION')
 		)
-		WHERE owner IN (SELECT username FROM all_users WHERE common = 'NO')
+		WHERE owner IN (SELECT username FROM all_users WHERE common = 'NO')` + where + `
 		ORDER BY owner, object_name
 	`
+}
+
+func (d *oracleDriver) StructureWithOptions(opts *core.StructureOptions) ([]*core.Structure, error) {
+	where, args, _ := schemaPredicate("owner", opts, schemaDialectOracle, 1)
+	query := oracleStructureQuery(where)
 
 	// Use pool connection, not session conn. Structure queries are fully
 	// schema-qualified and don't need session state. Using pool avoids
@@ -412,7 +429,7 @@ func (d *oracleDriver) Structure() ([]*core.Structure, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	rows, err := d.c.QueryWithArgs(ctx, query)
+	rows, err := d.c.QueryWithArgs(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -436,6 +453,57 @@ func (d *oracleDriver) Structure() ([]*core.Structure, error) {
 	}
 
 	return oracleGroupedStructure(rows, decodeStructureType)
+}
+
+func (d *oracleDriver) ListSchemas() ([]*core.SchemaInfo, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	rows, err := d.c.QueryWithArgs(ctx, `
+		SELECT username
+		FROM all_users
+		WHERE common = 'NO'
+		ORDER BY username`)
+	if err != nil {
+		return nil, err
+	}
+	return schemasFromRows(rows)
+}
+
+func (d *oracleDriver) StructureForSchema(schema string, opts *core.StructureOptions) ([]*core.Structure, error) {
+	if !schemaAllowedByOptions(schema, opts) {
+		return []*core.Structure{}, nil
+	}
+	query := oracleStructureQuery("owner = :1")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	rows, err := d.c.QueryWithArgs(ctx, query, schema)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	decodeStructureType := func(s string) core.StructureType {
+		switch s {
+		case "TABLE", "EXTERNAL TABLE":
+			return core.StructureTypeTable
+		case "VIEW":
+			return core.StructureTypeView
+		case "MATERIALIZED VIEW":
+			return core.StructureTypeMaterializedView
+		case "PROCEDURE":
+			return core.StructureTypeProcedure
+		case "FUNCTION":
+			return core.StructureTypeFunction
+		default:
+			return core.StructureTypeNone
+		}
+	}
+
+	structure, err := oracleGroupedStructure(rows, decodeStructureType)
+	if err != nil {
+		return nil, err
+	}
+	return schemaObjectsFromStructure(structure, schema), nil
 }
 
 // oracleGroupedStructure builds a grouped structure tree:

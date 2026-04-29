@@ -11,6 +11,7 @@ import (
 )
 
 var ErrDatabaseSwitchingNotSupported = errors.New("database switching not supported")
+var ErrSchemaMetadataNotSupported = errors.New("schema metadata not supported")
 
 // TableOptions contain options for gathering information about specific table.
 type TableOptions struct {
@@ -35,6 +36,24 @@ type (
 		Columns(opts *TableOptions) ([]*Column, error)
 		Ping(ctx context.Context) error
 		Close()
+	}
+
+	// FilteredStructureDriver is implemented by adapters that can apply the
+	// handler-normalized schema scope in the database metadata query itself.
+	FilteredStructureDriver interface {
+		StructureWithOptions(opts *StructureOptions) ([]*Structure, error)
+	}
+
+	// SchemaListDriver is implemented by adapters that can list schemas without
+	// fetching their object lists.
+	SchemaListDriver interface {
+		ListSchemas() ([]*SchemaInfo, error)
+	}
+
+	// SchemaStructureDriver is implemented by adapters that can fetch objects for
+	// one schema without scanning the whole catalog.
+	SchemaStructureDriver interface {
+		StructureForSchema(schema string, opts *StructureOptions) ([]*Structure, error)
 	}
 
 	// BindDriver is an optional interface for drivers that support
@@ -105,6 +124,10 @@ func (c *Connection) GetType() string {
 
 func (c *Connection) GetURL() string {
 	return c.params.URL
+}
+
+func (c *Connection) GetSchemaFilter() *SchemaFilterOptions {
+	return c.params.SchemaFilter.Clone()
 }
 
 // GetParams returns the original source for this connection
@@ -195,9 +218,19 @@ func (c *Connection) GetColumns(opts *TableOptions) ([]*Column, error) {
 	return cols, nil
 }
 
-func (c *Connection) GetStructure() ([]*Structure, error) {
-	// structure
-	structure, err := c.driver.Structure()
+func (c *Connection) GetStructure(opts ...*StructureOptions) ([]*Structure, error) {
+	var scope *StructureOptions
+	if len(opts) > 0 {
+		scope = opts[0]
+	}
+
+	var structure []*Structure
+	var err error
+	if filtered, ok := c.driver.(FilteredStructureDriver); ok {
+		structure, err = filtered.StructureWithOptions(scope.Clone())
+	} else {
+		structure, err = c.driver.Structure()
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -212,6 +245,22 @@ func (c *Connection) GetStructure() ([]*Structure, error) {
 		}
 	}
 	return structure, nil
+}
+
+func (c *Connection) ListSchemas() ([]*SchemaInfo, error) {
+	lister, ok := c.driver.(SchemaListDriver)
+	if !ok {
+		return nil, ErrSchemaMetadataNotSupported
+	}
+	return lister.ListSchemas()
+}
+
+func (c *Connection) GetSchemaObjects(schema string, opts *StructureOptions) ([]*Structure, error) {
+	lister, ok := c.driver.(SchemaStructureDriver)
+	if !ok {
+		return nil, ErrSchemaMetadataNotSupported
+	}
+	return lister.StructureForSchema(schema, opts.Clone())
 }
 
 func (c *Connection) GetHelpers(opts *TableOptions) map[string]string {

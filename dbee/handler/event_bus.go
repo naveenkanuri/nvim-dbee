@@ -128,6 +128,83 @@ func (eb *eventBus) StructureLoaded(
 	eb.callLua("structure_loaded", data)
 }
 
+func (eb *eventBus) SchemasLoaded(
+	id core.ConnectionID,
+	requestID int,
+	rootEpoch int,
+	callerToken string,
+	schemas []*core.SchemaInfo,
+	loadErr error,
+) {
+	errMsg := "nil"
+	if loadErr != nil {
+		errMsg = luaStringLiteral(loadErr.Error())
+	}
+
+	schemasLua := "nil"
+	if schemas != nil {
+		schemasLua = schemasToLua(schemas)
+	}
+
+	rootEpochLua := "nil"
+	if rootEpoch > 0 {
+		rootEpochLua = fmt.Sprintf("%d", rootEpoch)
+	}
+
+	callerTokenLua := "nil"
+	if callerToken != "" {
+		callerTokenLua = luaStringLiteral(callerToken)
+	}
+
+	data := fmt.Sprintf(`{
+		conn_id = %q,
+		request_id = %d,
+		root_epoch = %s,
+		caller_token = %s,
+		schemas = %s,
+		error = %s,
+	}`, id, requestID, rootEpochLua, callerTokenLua, schemasLua, errMsg)
+
+	eb.callLua("schemas_loaded", data)
+}
+
+func (eb *eventBus) SchemaObjectsLoaded(
+	id core.ConnectionID,
+	requestID int,
+	rootEpoch int,
+	callerToken string,
+	schema string,
+	objects []*core.Structure,
+	loadErr error,
+) {
+	errMsg := "nil"
+	if loadErr != nil {
+		errMsg = luaStringLiteral(loadErr.Error())
+	}
+
+	objectsLua := "nil"
+	if objects != nil {
+		objectsLua = structuresToLua(objects)
+	}
+
+	callerTokenLua := "nil"
+	if callerToken != "" {
+		callerTokenLua = luaStringLiteral(callerToken)
+	}
+
+	data := fmt.Sprintf(`{
+		conn_id = %q,
+		request_id = %d,
+		root_epoch = %d,
+		caller_token = %s,
+		schema = %q,
+		objects = %s,
+		error = %s,
+	}`, id, requestID, rootEpoch, callerTokenLua, schema, objectsLua, errMsg)
+
+	eb.callLua("schema_objects_loaded", data)
+}
+
 // StructureChildrenLoaded is called when async child loading completes.
 func (eb *eventBus) StructureChildrenLoaded(
 	id core.ConnectionID,
@@ -213,6 +290,23 @@ func columnsToLua(columns []*core.Column) string {
 			b.WriteString(",")
 		}
 		b.WriteString(fmt.Sprintf(`{name=%q,type=%q}`, c.Name, c.Type))
+	}
+	b.WriteString("}")
+	return b.String()
+}
+
+func schemasToLua(schemas []*core.SchemaInfo) string {
+	var b strings.Builder
+	b.WriteString("{")
+	for i, schema := range schemas {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		if schema == nil {
+			b.WriteString("nil")
+			continue
+		}
+		b.WriteString(fmt.Sprintf(`{name=%q}`, schema.Name))
 	}
 	b.WriteString("}")
 	return b.String()

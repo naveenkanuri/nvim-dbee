@@ -80,6 +80,12 @@
 ---@field name string
 ---@field type string
 ---@field url string
+---@field schema_filter? SchemaFilterOptions
+
+---@class SchemaFilterOptions
+---@field include? string[] SQL-glob include patterns. Missing include means all schemas.
+---@field exclude? string[] SQL-glob exclude patterns.
+---@field lazy_per_schema? boolean opt-in per-schema lazy loading for capable adapters
 
 ---Raw persisted source record used only for metadata-first edit seeding.
 ---Runtime connection APIs still expose `ConnectionParams` only.
@@ -204,6 +210,8 @@
 ---| '"current_connection_changed"' {conn_id?, cleared?}
 ---| '"database_selected"' {conn_id, database_name}
 ---| '"source_reload_failed"' SourceReloadFailedEvent
+---| '"schemas_loaded"' {conn_id, request_id, root_epoch?, caller_token?, schemas, error}
+---| '"schema_objects_loaded"' {conn_id, request_id, root_epoch, caller_token?, schema, objects, error}
 ---| '"structure_loaded"' {conn_id, request_id, root_epoch?, caller_token?, structures, error}
 ---| '"structure_children_loaded"' {conn_id, request_id, branch_id, root_epoch, kind = "columns", columns, error}
 

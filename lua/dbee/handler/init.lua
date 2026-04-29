@@ -1,4 +1,5 @@
 local event_bus = require("dbee.handler.__events")
+local schema_filter = require("dbee.schema_filter")
 local utils = require("dbee.utils")
 local register_remote_plugin = require("dbee.api.__register")
 
@@ -24,6 +25,7 @@ local function copy_connections(conns)
         name = conn.name,
         type = conn.type,
         url = conn.url,
+        schema_filter = vim.deepcopy(conn.schema_filter),
       }
     end
   end
@@ -78,9 +80,29 @@ local function find_unique_connection(candidates, predicate)
   return match, false
 end
 
+---@param conn_type string?
+---@param filter table?
+---@return string
+local function schema_filter_signature(conn_type, filter)
+  local normalized = schema_filter.normalize(filter, conn_type)
+  return normalized and normalized.schema_filter_signature or ""
+end
+
+---@param previous ConnectionParams?
+---@param current ConnectionParams?
+---@return boolean
+local function same_schema_scope(previous, current)
+  if not previous or not current then
+    return false
+  end
+  return tostring(previous.type or "") == tostring(current.type or "")
+    and schema_filter_signature(previous.type, previous.schema_filter)
+      == schema_filter_signature(current.type, current.schema_filter)
+end
+
 ---@param previous ConnectionParams[]
 ---@param current ConnectionParams[]
----@return { old_conn_id: connection_id, new_conn_id: connection_id }[]
+---@return { old_conn_id: connection_id, new_conn_id: connection_id, schema_scope_matches?: boolean }[]
 local function build_rewrites(previous, current)
   local rewrites = {}
   local used_new_ids = {}
@@ -124,6 +146,7 @@ local function build_rewrites(previous, current)
       rewrites[#rewrites + 1] = {
         old_conn_id = old.id,
         new_conn_id = match.id,
+        schema_scope_matches = same_schema_scope(old, match),
       }
     end
 
@@ -154,7 +177,7 @@ local function connection_in_list(conns, conn_id)
   return false
 end
 
----@param rewrites { old_conn_id: connection_id, new_conn_id: connection_id }[]
+---@param rewrites { old_conn_id: connection_id, new_conn_id: connection_id, schema_scope_matches?: boolean }[]
 ---@param old_conn_id connection_id?
 ---@return connection_id|nil
 local function rewrite_target_for(rewrites, old_conn_id)
@@ -164,6 +187,21 @@ local function rewrite_target_for(rewrites, old_conn_id)
   for _, rewrite in ipairs(rewrites or {}) do
     if rewrite.old_conn_id == old_conn_id then
       return rewrite.new_conn_id
+    end
+  end
+  return nil
+end
+
+---@param rewrites { old_conn_id: connection_id, new_conn_id: connection_id, schema_scope_matches?: boolean }[]
+---@param old_conn_id connection_id?
+---@return table|nil
+local function rewrite_entry_for(rewrites, old_conn_id)
+  if not old_conn_id or old_conn_id == "" then
+    return nil
+  end
+  for _, rewrite in ipairs(rewrites or {}) do
+    if rewrite.old_conn_id == old_conn_id then
+      return rewrite
     end
   end
   return nil
@@ -256,6 +294,12 @@ function Handler:new(sources)
     _next_singleflight_request_id = 0,
     _structure_flights = {},
     _structure_request_lookup = {},
+    _schema_list_flights = {},
+    _schema_list_request_lookup = {},
+    _schema_object_flights = {},
+    _schema_object_request_lookup = {},
+    _schema_object_queues = {},
+    _schema_spec_request_lookup = {},
     _connection_invalidated_consumers = {},
   }
   setmetatable(o, self)
@@ -263,6 +307,12 @@ function Handler:new(sources)
 
   event_bus.register("structure_loaded", function(data)
     o:_on_singleflight_structure_loaded(data)
+  end)
+  event_bus.register("schemas_loaded", function(data)
+    o:_on_schema_list_loaded(data)
+  end)
+  event_bus.register("schema_objects_loaded", function(data)
+    o:_on_schema_objects_loaded(data)
   end)
   event_bus.register("connection_invalidated", function(data)
     o:_dispatch_connection_invalidated(data)
@@ -342,6 +392,7 @@ function Handler:_bump_authoritative_root_epoch(conn_ids)
 
   for _, conn_id in ipairs(ordered) do
     self:_supersede_structure_flights(conn_id, next_epoch)
+    self:_supersede_schema_flights(conn_id, next_epoch, "superseded")
   end
 
   return next_epoch
@@ -601,6 +652,230 @@ function Handler:_supersede_structure_flights(conn_id, new_epoch)
   end
 end
 
+---@param conn_id connection_id
+---@param epoch integer
+---@param purpose? string
+---@return string
+local function schema_list_key(conn_id, epoch, purpose)
+  return table.concat({ tostring(conn_id or ""), tostring(epoch or 0), tostring(purpose or "default") }, "\x1f")
+end
+
+---@param conn_id connection_id
+---@param schema string
+---@param epoch integer
+---@return string
+local function schema_object_key(conn_id, schema, epoch)
+  return table.concat({ tostring(conn_id or ""), tostring(schema or ""), tostring(epoch or 0) }, "\x1f")
+end
+
+---@private
+---@param waiter table
+---@param payload table
+function Handler:_notify_schema_waiter(waiter, payload)
+  if type(waiter.callback) ~= "function" then
+    return
+  end
+  local ok, err = pcall(waiter.callback, copy_payload(payload))
+  if not ok then
+    utils.log("error", "schema metadata singleflight waiter failed: " .. tostring(err), "core")
+  end
+end
+
+---@private
+---@param conn_id connection_id
+---@param schema string
+---@return string
+function Handler:_fold_schema_name(conn_id, schema)
+  local params = self:connection_get_params(conn_id)
+  local normalized = schema_filter.normalize(params and params.schema_filter or nil, params and params.type or nil)
+  return schema_filter.fold(schema, normalized and normalized.fold or nil)
+end
+
+---@private
+---@param conn_id connection_id
+---@param new_epoch integer
+---@param error_kind string
+function Handler:_supersede_schema_flights(conn_id, new_epoch, error_kind)
+  local list_drop = {}
+  for key, flight in pairs(self._schema_list_flights or {}) do
+    if flight.conn_id == conn_id and flight.epoch < new_epoch then
+      for _, waiter in ipairs(flight.waiters or {}) do
+        self:_notify_schema_waiter(waiter, {
+          conn_id = conn_id,
+          request_id = waiter.request_id,
+          root_epoch = flight.epoch,
+          caller_token = waiter.caller_token,
+          error_kind = error_kind or "superseded",
+          new_epoch = new_epoch,
+        })
+      end
+      list_drop[#list_drop + 1] = key
+    end
+  end
+  for _, key in ipairs(list_drop) do
+    local flight = self._schema_list_flights[key]
+    if flight then
+      self._schema_list_request_lookup[flight.request_id] = nil
+    end
+    self._schema_list_flights[key] = nil
+  end
+
+  local object_drop = {}
+  for key, flight in pairs(self._schema_object_flights or {}) do
+    if flight.conn_id == conn_id and flight.epoch < new_epoch then
+      for _, waiter in ipairs(flight.waiters or {}) do
+        self:_notify_schema_waiter(waiter, {
+          conn_id = conn_id,
+          request_id = waiter.request_id,
+          root_epoch = flight.epoch,
+          schema = flight.schema,
+          caller_token = waiter.caller_token,
+          error_kind = error_kind or "superseded",
+          new_epoch = new_epoch,
+        })
+      end
+      object_drop[#object_drop + 1] = key
+    end
+  end
+  for _, key in ipairs(object_drop) do
+    local flight = self._schema_object_flights[key]
+    if flight then
+      self._schema_object_request_lookup[flight.request_id] = nil
+      self:_schema_object_active_decrement(flight.conn_id)
+    end
+    self._schema_object_flights[key] = nil
+  end
+
+  local queue = self._schema_object_queues and self._schema_object_queues[conn_id]
+  if queue then
+    local kept = {}
+    for _, entry in ipairs(queue.queue or {}) do
+      if entry.epoch >= new_epoch then
+        kept[#kept + 1] = entry
+      else
+        queue.queued_keys[entry.key] = nil
+        for _, waiter in ipairs(entry.waiters or {}) do
+          self:_notify_schema_waiter(waiter, {
+            conn_id = conn_id,
+            request_id = waiter.request_id,
+            root_epoch = entry.epoch,
+            schema = entry.schema,
+            caller_token = waiter.caller_token,
+            error_kind = error_kind or "superseded",
+            new_epoch = new_epoch,
+          })
+        end
+      end
+    end
+    queue.queue = kept
+  end
+end
+
+function Handler:_schema_object_queue(conn_id)
+  self._schema_object_queues[conn_id] = self._schema_object_queues[conn_id] or {
+    active = 0,
+    queue = {},
+    queued_keys = {},
+    max_active = 4,
+    max_queue = 32,
+  }
+  return self._schema_object_queues[conn_id]
+end
+
+function Handler:_schema_object_active_decrement(conn_id)
+  local queue = self._schema_object_queues and self._schema_object_queues[conn_id]
+  if queue then
+    queue.active = math.max((queue.active or 0) - 1, 0)
+  end
+end
+
+function Handler:_start_schema_object_entry(entry)
+  local queue = self:_schema_object_queue(entry.conn_id)
+  queue.active = (queue.active or 0) + 1
+  self._schema_object_flights[entry.key] = entry
+  self._schema_object_request_lookup[entry.request_id] = entry.key
+
+  local ok, err = pcall(vim.fn.DbeeStructureForSchemaAsync, entry.conn_id, entry.request_id, entry.epoch, SINGLEFLIGHT_CALLER_TOKEN, entry.schema, entry.opts)
+  if not ok then
+    self._schema_object_request_lookup[entry.request_id] = nil
+    self._schema_object_flights[entry.key] = nil
+    self:_schema_object_active_decrement(entry.conn_id)
+    for _, waiter in ipairs(entry.waiters or {}) do
+      self:_notify_schema_waiter(waiter, {
+        conn_id = entry.conn_id,
+        request_id = waiter.request_id,
+        root_epoch = entry.epoch,
+        schema = entry.schema,
+        caller_token = waiter.caller_token,
+        error = tostring(err),
+        error_kind = is_invalid_channel_error(err) and "invalid_channel" or "transport",
+      })
+    end
+    return false
+  end
+  return true
+end
+
+function Handler:_drain_schema_object_queue(conn_id)
+  local queue = self:_schema_object_queue(conn_id)
+  while (queue.active or 0) < (queue.max_active or 4) and #(queue.queue or {}) > 0 do
+    local entry = table.remove(queue.queue, 1)
+    queue.queued_keys[entry.key] = nil
+    self:_start_schema_object_entry(entry)
+  end
+end
+
+---@private
+---@param conn_id connection_id
+---@param newest table
+---@return boolean queued
+function Handler:_enqueue_schema_object_entry(conn_id, newest)
+  local queue = self:_schema_object_queue(conn_id)
+  if #queue.queue < queue.max_queue then
+    queue.queue[#queue.queue + 1] = newest
+    queue.queued_keys[newest.key] = newest
+    return true
+  end
+
+  local drop_index = nil
+  for index, entry in ipairs(queue.queue) do
+    if entry.priority ~= "drawer" then
+      drop_index = index
+      break
+    end
+  end
+
+  if drop_index then
+    local dropped = table.remove(queue.queue, drop_index)
+    queue.queued_keys[dropped.key] = nil
+    for _, waiter in ipairs(dropped.waiters or {}) do
+      self:_notify_schema_waiter(waiter, {
+        conn_id = conn_id,
+        request_id = waiter.request_id,
+        root_epoch = dropped.epoch,
+        schema = dropped.schema,
+        caller_token = waiter.caller_token,
+        error_kind = "queue_full",
+      })
+    end
+    queue.queue[#queue.queue + 1] = newest
+    queue.queued_keys[newest.key] = newest
+    return true
+  end
+
+  for _, waiter in ipairs(newest.waiters or {}) do
+    self:_notify_schema_waiter(waiter, {
+      conn_id = conn_id,
+      request_id = waiter.request_id,
+      root_epoch = newest.epoch,
+      schema = newest.schema,
+      caller_token = waiter.caller_token,
+      error_kind = "queue_full",
+    })
+  end
+  return false
+end
+
 ---@param opts { conn_id: connection_id, consumer: string, request_id?: integer, caller_token?: string, callback?: fun(payload: table) }
 ---@return { epoch: integer, request_id: integer, joined: boolean }
 function Handler:connection_get_structure_singleflight(opts)
@@ -661,12 +936,132 @@ function Handler:connection_get_structure_singleflight(opts)
   self._structure_flights[key] = flight
   self._structure_request_lookup[internal_request_id] = key
 
-  vim.fn.DbeeConnectionGetStructureAsync(opts.conn_id, internal_request_id, epoch, SINGLEFLIGHT_CALLER_TOKEN)
+  vim.fn.DbeeConnectionGetStructureAsync(
+    opts.conn_id,
+    internal_request_id,
+    epoch,
+    SINGLEFLIGHT_CALLER_TOKEN,
+    self:get_schema_filter(opts.conn_id)
+  )
 
   return {
     epoch = epoch,
     request_id = waiter.request_id,
     joined = false,
+  }
+end
+
+---@param opts { conn_id: connection_id, purpose?: string, consumer: string, request_id?: integer, caller_token?: string, callback?: fun(payload: table) }
+---@return { epoch: integer, request_id: integer, joined: boolean }
+function Handler:connection_list_schemas_singleflight(opts)
+  if not opts or not opts.conn_id or opts.conn_id == "" then
+    error("missing connection id for schema list load")
+  end
+  if not opts.consumer or opts.consumer == "" then
+    error("missing schema list consumer")
+  end
+
+  local epoch = self:get_authoritative_root_epoch(opts.conn_id)
+  local purpose = opts.purpose or "default"
+  local key = schema_list_key(opts.conn_id, epoch, purpose)
+  local waiter = {
+    consumer = opts.consumer,
+    request_id = opts.request_id or 0,
+    caller_token = opts.caller_token,
+    callback = opts.callback,
+  }
+
+  local flight = self._schema_list_flights[key]
+  if flight then
+    for _, existing_waiter in ipairs(flight.waiters or {}) do
+      if existing_waiter.consumer == waiter.consumer then
+        existing_waiter.request_id = waiter.request_id
+        existing_waiter.caller_token = waiter.caller_token
+        existing_waiter.callback = waiter.callback
+        return { epoch = epoch, request_id = waiter.request_id, joined = true }
+      end
+    end
+    flight.waiters[#flight.waiters + 1] = waiter
+    return { epoch = epoch, request_id = waiter.request_id, joined = true }
+  end
+
+  self._next_singleflight_request_id = self._next_singleflight_request_id + 1
+  local internal_request_id = self._next_singleflight_request_id
+  flight = {
+    conn_id = opts.conn_id,
+    epoch = epoch,
+    purpose = purpose,
+    request_id = internal_request_id,
+    waiters = { waiter },
+  }
+  self._schema_list_flights[key] = flight
+  self._schema_list_request_lookup[internal_request_id] = key
+  vim.fn.DbeeConnectionListSchemasAsync(opts.conn_id, internal_request_id, epoch, SINGLEFLIGHT_CALLER_TOKEN)
+  return { epoch = epoch, request_id = waiter.request_id, joined = false }
+end
+
+---@param opts { conn_id: connection_id, schema: string, consumer: string, priority?: "drawer"|"lsp", request_id?: integer, caller_token?: string, callback?: fun(payload: table) }
+---@return { epoch: integer, request_id: integer, joined: boolean, queued?: boolean, error_kind?: string }
+function Handler:connection_get_schema_objects_singleflight(opts)
+  if not opts or not opts.conn_id or opts.conn_id == "" then
+    error("missing connection id for schema object load")
+  end
+  if not opts.schema or opts.schema == "" then
+    error("missing schema for schema object load")
+  end
+  if not opts.consumer or opts.consumer == "" then
+    error("missing schema object consumer")
+  end
+
+  local epoch = self:get_authoritative_root_epoch(opts.conn_id)
+  local folded_schema = self:_fold_schema_name(opts.conn_id, opts.schema)
+  local key = schema_object_key(opts.conn_id, folded_schema, epoch)
+  local waiter = {
+    consumer = opts.consumer,
+    request_id = opts.request_id or 0,
+    caller_token = opts.caller_token,
+    callback = opts.callback,
+  }
+
+  local active = self._schema_object_flights[key]
+  if active then
+    active.waiters[#active.waiters + 1] = waiter
+    return { epoch = epoch, request_id = waiter.request_id, joined = true }
+  end
+
+  local queue = self:_schema_object_queue(opts.conn_id)
+  local queued = queue.queued_keys[key]
+  if queued then
+    queued.waiters[#queued.waiters + 1] = waiter
+    return { epoch = epoch, request_id = waiter.request_id, joined = true, queued = true }
+  end
+
+  self._next_singleflight_request_id = self._next_singleflight_request_id + 1
+  local internal_request_id = self._next_singleflight_request_id
+  local entry = {
+    key = key,
+    conn_id = opts.conn_id,
+    schema = opts.schema,
+    folded_schema = folded_schema,
+    epoch = epoch,
+    request_id = internal_request_id,
+    priority = opts.priority or "lsp",
+    opts = self:get_schema_filter(opts.conn_id),
+    waiters = { waiter },
+  }
+
+  if (queue.active or 0) < (queue.max_active or 4) then
+    self:_start_schema_object_entry(entry)
+    return { epoch = epoch, request_id = waiter.request_id, joined = false, queued = false }
+  end
+
+  local enqueued = self:_enqueue_schema_object_entry(opts.conn_id, entry)
+  return {
+    epoch = epoch,
+    request_id = waiter.request_id,
+    joined = false,
+    queued = enqueued,
+    error_kind = enqueued and nil or "queue_full",
   }
 end
 
@@ -690,12 +1085,67 @@ function Handler:teardown_structure_consumer(consumer)
   for _, key in ipairs(keys_to_drop) do
     self:_drop_structure_flight(key)
   end
+
+  for key, flight in pairs(self._schema_list_flights or {}) do
+    local kept = {}
+    for _, waiter in ipairs(flight.waiters or {}) do
+      if waiter.consumer ~= consumer then
+        kept[#kept + 1] = waiter
+      end
+    end
+    flight.waiters = kept
+    if #kept == 0 then
+      self._schema_list_request_lookup[flight.request_id] = nil
+      self._schema_list_flights[key] = nil
+    end
+  end
+
+  for key, flight in pairs(self._schema_object_flights or {}) do
+    local kept = {}
+    for _, waiter in ipairs(flight.waiters or {}) do
+      if waiter.consumer ~= consumer then
+        kept[#kept + 1] = waiter
+      end
+    end
+    flight.waiters = kept
+    if #kept == 0 then
+      self._schema_object_request_lookup[flight.request_id] = nil
+      self._schema_object_flights[key] = nil
+      self:_schema_object_active_decrement(flight.conn_id)
+      self:_drain_schema_object_queue(flight.conn_id)
+    end
+  end
+
+  for _, queue in pairs(self._schema_object_queues or {}) do
+    local kept = {}
+    queue.queued_keys = {}
+    for _, entry in ipairs(queue.queue or {}) do
+      local waiters = {}
+      for _, waiter in ipairs(entry.waiters or {}) do
+        if waiter.consumer ~= consumer then
+          waiters[#waiters + 1] = waiter
+        end
+      end
+      entry.waiters = waiters
+      if #waiters > 0 then
+        kept[#kept + 1] = entry
+        queue.queued_keys[entry.key] = entry
+      end
+    end
+    queue.queue = kept
+  end
 end
 
 ---@param old_conn_id connection_id
 ---@param new_conn_id connection_id
-function Handler:migrate_structure_flights(old_conn_id, new_conn_id)
+---@param rewrite? { schema_scope_matches?: boolean }
+function Handler:migrate_structure_flights(old_conn_id, new_conn_id, rewrite)
   if not old_conn_id or not new_conn_id or old_conn_id == new_conn_id then
+    return
+  end
+  if rewrite and rewrite.schema_scope_matches == false then
+    self:_supersede_structure_flights(old_conn_id, math.huge)
+    self:_supersede_schema_flights(old_conn_id, math.huge, "reconnect_migration_dropped")
     return
   end
 
@@ -741,6 +1191,35 @@ function Handler:migrate_structure_flights(old_conn_id, new_conn_id)
   for key, flight in pairs(migrated) do
     self._structure_flights[key] = flight
   end
+
+  local list_migrated = {}
+  for key, flight in pairs(self._schema_list_flights or {}) do
+    if flight.conn_id == old_conn_id then
+      self._schema_list_flights[key] = nil
+      local new_key = schema_list_key(new_conn_id, flight.epoch, flight.purpose)
+      flight.conn_id = new_conn_id
+      self._schema_list_request_lookup[flight.request_id] = new_key
+      list_migrated[new_key] = flight
+    end
+  end
+  for key, flight in pairs(list_migrated) do
+    self._schema_list_flights[key] = flight
+  end
+
+  local object_migrated = {}
+  for key, flight in pairs(self._schema_object_flights or {}) do
+    if flight.conn_id == old_conn_id then
+      self._schema_object_flights[key] = nil
+      local new_key = schema_object_key(new_conn_id, flight.folded_schema, flight.epoch)
+      flight.conn_id = new_conn_id
+      flight.key = new_key
+      self._schema_object_request_lookup[flight.request_id] = new_key
+      object_migrated[new_key] = flight
+    end
+  end
+  for key, flight in pairs(object_migrated) do
+    self._schema_object_flights[key] = flight
+  end
 end
 
 ---@private
@@ -778,6 +1257,104 @@ function Handler:_on_singleflight_structure_loaded(data)
       root_epoch = payload_root_epoch,
       caller_token = waiter.caller_token,
       structures = data.error and nil or copy_payload(data.structures),
+      error = data.error,
+    })
+  end
+end
+
+---@private
+---@param data { conn_id?: connection_id, request_id?: integer, root_epoch?: integer, caller_token?: string, schemas?: table[], error?: any }
+function Handler:_on_schema_list_loaded(data)
+  if not data or not data.request_id then
+    return
+  end
+
+  local spec_waiter = self._schema_spec_request_lookup[data.request_id]
+  if spec_waiter then
+    self._schema_spec_request_lookup[data.request_id] = nil
+    self:_notify_schema_waiter(spec_waiter, {
+      conn_id = data.conn_id,
+      request_id = spec_waiter.request_id,
+      root_epoch = tonumber(data.root_epoch) or 0,
+      caller_token = spec_waiter.caller_token,
+      schemas = data.error and nil or copy_payload(data.schemas),
+      error = data.error,
+    })
+    return
+  end
+
+  if data.caller_token ~= SINGLEFLIGHT_CALLER_TOKEN then
+    return
+  end
+
+  local key = self._schema_list_request_lookup[data.request_id]
+  if not key then
+    return
+  end
+
+  local flight = self._schema_list_flights[key]
+  self._schema_list_request_lookup[data.request_id] = nil
+  self._schema_list_flights[key] = nil
+  if not flight then
+    return
+  end
+
+  local payload_epoch = tonumber(data.root_epoch) or 0
+  if flight.conn_id ~= data.conn_id or flight.epoch ~= payload_epoch then
+    return
+  end
+
+  for _, waiter in ipairs(flight.waiters or {}) do
+    self:_notify_schema_waiter(waiter, {
+      conn_id = flight.conn_id,
+      request_id = waiter.request_id,
+      root_epoch = payload_epoch,
+      caller_token = waiter.caller_token,
+      schemas = data.error and nil or copy_payload(data.schemas),
+      error = data.error,
+    })
+  end
+end
+
+---@private
+---@param data { conn_id?: connection_id, request_id?: integer, root_epoch?: integer, caller_token?: string, schema?: string, objects?: table[], error?: any }
+function Handler:_on_schema_objects_loaded(data)
+  if not data or data.caller_token ~= SINGLEFLIGHT_CALLER_TOKEN or not data.request_id then
+    return
+  end
+
+  local key = self._schema_object_request_lookup[data.request_id]
+  if not key then
+    return
+  end
+
+  local flight = self._schema_object_flights[key]
+  self._schema_object_request_lookup[data.request_id] = nil
+  self._schema_object_flights[key] = nil
+  if not flight then
+    return
+  end
+  self:_schema_object_active_decrement(flight.conn_id)
+  self:_drain_schema_object_queue(flight.conn_id)
+
+  local payload_epoch = tonumber(data.root_epoch) or 0
+  if flight.conn_id ~= data.conn_id or flight.epoch ~= payload_epoch then
+    return
+  end
+
+  local payload_schema = self:_fold_schema_name(flight.conn_id, data.schema or "")
+  if payload_schema ~= flight.folded_schema then
+    return
+  end
+
+  for _, waiter in ipairs(flight.waiters or {}) do
+    self:_notify_schema_waiter(waiter, {
+      conn_id = flight.conn_id,
+      request_id = waiter.request_id,
+      root_epoch = payload_epoch,
+      caller_token = waiter.caller_token,
+      schema = flight.schema,
+      objects = data.error and nil or copy_payload(data.objects),
       error = data.error,
     })
   end
@@ -992,7 +1569,7 @@ function Handler:_source_reload_silent(source_id, opts)
       and current_conn_id_before ~= sticky_target
       and type(self.migrate_structure_flights) == "function"
     then
-      self:migrate_structure_flights(current_conn_id_before, sticky_target)
+      self:migrate_structure_flights(current_conn_id_before, sticky_target, rewrite_entry_for(rewrites, current_conn_id_before))
     end
 
     local ok_set, set_err = pcall(self.set_current_connection, self, sticky_target)
@@ -1426,9 +2003,32 @@ function Handler:connection_execute(id, query, opts)
 end
 
 ---@param id connection_id
+---@return table
+function Handler:get_schema_filter(id)
+  local params = self:connection_get_params(id)
+  local opts, err = schema_filter.to_structure_options(params and params.schema_filter or nil, params and params.type or nil)
+  if not opts then
+    error(err or "invalid schema_filter")
+  end
+  return opts
+end
+
+---@param id connection_id
+---@return table
+function Handler:get_schema_filter_normalized(id)
+  local params = self:connection_get_params(id)
+  local normalized, err = schema_filter.normalize(params and params.schema_filter or nil, params and params.type or nil)
+  if not normalized then
+    error(err or "invalid schema_filter")
+  end
+  return normalized
+end
+
+---@param id connection_id
+---@param opts? table
 ---@return DBStructure[]
-function Handler:connection_get_structure(id)
-  local ret = vim.fn.DbeeConnectionGetStructure(id)
+function Handler:connection_get_structure(id, opts)
+  local ret = vim.fn.DbeeConnectionGetStructure(id, opts or self:get_schema_filter(id))
   if not ret or ret == vim.NIL then
     return {}
   end
@@ -1439,12 +2039,85 @@ end
 ---@param request_id? integer
 ---@param root_epoch? integer
 ---@param caller_token? string
-function Handler:connection_get_structure_async(id, request_id, root_epoch, caller_token)
+---@param opts? table
+function Handler:connection_get_structure_async(id, request_id, root_epoch, caller_token, opts)
   if request_id == nil and root_epoch == nil and caller_token == nil then
-    vim.fn.DbeeConnectionGetStructureAsync(id)
+    vim.fn.DbeeConnectionGetStructureAsync(id, 0, 0, "", opts or self:get_schema_filter(id))
     return
   end
-  vim.fn.DbeeConnectionGetStructureAsync(id, request_id or 0, root_epoch or 0, caller_token or "")
+  vim.fn.DbeeConnectionGetStructureAsync(id, request_id or 0, root_epoch or 0, caller_token or "", opts or self:get_schema_filter(id))
+end
+
+---@param id connection_id
+---@return table[]
+function Handler:connection_list_schemas(id)
+  local ret = vim.fn.DbeeConnectionListSchemas(id)
+  if not ret or ret == vim.NIL then
+    return {}
+  end
+  return ret
+end
+
+---@param id connection_id
+---@param request_id integer
+---@param root_epoch integer
+---@param caller_token? string
+function Handler:connection_list_schemas_async(id, request_id, root_epoch, caller_token)
+  vim.fn.DbeeConnectionListSchemasAsync(id, request_id or 0, root_epoch or 0, caller_token or "")
+end
+
+---@param params ConnectionParams
+---@return table[]
+function Handler:connection_list_schemas_spec(params)
+  local ret = vim.fn.DbeeConnectionListSchemasSpec(params)
+  if not ret or ret == vim.NIL then
+    return {}
+  end
+  return ret
+end
+
+---@param params ConnectionParams
+---@param callback fun(payload: table)
+---@return integer request_id
+function Handler:connection_list_schemas_spec_async(params, callback)
+  self._next_singleflight_request_id = self._next_singleflight_request_id + 1
+  local request_id = self._next_singleflight_request_id
+  self._schema_spec_request_lookup[request_id] = {
+    request_id = request_id,
+    caller_token = "wizard",
+    callback = callback,
+  }
+  vim.fn.DbeeConnectionListSchemasSpecAsync(params, request_id, 0, "wizard")
+  return request_id
+end
+
+---@param id connection_id
+---@param schema string
+---@param opts? table
+---@return DBStructure[]
+function Handler:connection_get_schema_objects(id, schema, opts)
+  local ret = vim.fn.DbeeStructureForSchema(id, schema, opts or self:get_schema_filter(id))
+  if not ret or ret == vim.NIL then
+    return {}
+  end
+  return ret
+end
+
+---@param id connection_id
+---@param request_id integer
+---@param root_epoch integer
+---@param schema string
+---@param opts? table
+---@param caller_token? string
+function Handler:connection_get_schema_objects_async(id, request_id, root_epoch, schema, opts, caller_token)
+  vim.fn.DbeeStructureForSchemaAsync(
+    id,
+    request_id or 0,
+    root_epoch or 0,
+    caller_token or "",
+    schema,
+    opts or self:get_schema_filter(id)
+  )
 end
 
 ---@param id connection_id

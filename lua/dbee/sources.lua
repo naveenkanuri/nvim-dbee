@@ -165,6 +165,7 @@ local function record_to_connection_params(record)
     name = record.name,
     type = record.type,
     url = record.url,
+    schema_filter = vim.deepcopy(record.schema_filter),
   }
 end
 

@@ -30,6 +30,10 @@ return function()
     { type = "function", name = "DbeeConnectionGetParams", sync = true, opts = vim.empty_dict() },
     { type = "function", name = "DbeeConnectionGetStructure", sync = true, opts = vim.empty_dict() },
     { type = "function", name = "DbeeConnectionGetStructureAsync", sync = true, opts = vim.empty_dict() },
+    { type = "function", name = "DbeeConnectionListSchemas", sync = true, opts = vim.empty_dict() },
+    { type = "function", name = "DbeeConnectionListSchemasAsync", sync = true, opts = vim.empty_dict() },
+    { type = "function", name = "DbeeConnectionListSchemasSpec", sync = true, opts = vim.empty_dict() },
+    { type = "function", name = "DbeeConnectionListSchemasSpecAsync", sync = true, opts = vim.empty_dict() },
     { type = "function", name = "DbeeConnectionListDatabases", sync = true, opts = vim.empty_dict() },
     { type = "function", name = "DbeeConnectionListDatabasesAsync", sync = true, opts = vim.empty_dict() },
     { type = "function", name = "DbeeConnectionSelectDatabase", sync = true, opts = vim.empty_dict() },
@@ -40,5 +44,7 @@ return function()
     { type = "function", name = "DbeeGetConnections", sync = true, opts = vim.empty_dict() },
     { type = "function", name = "DbeeGetCurrentConnection", sync = true, opts = vim.empty_dict() },
     { type = "function", name = "DbeeSetCurrentConnection", sync = true, opts = vim.empty_dict() },
+    { type = "function", name = "DbeeStructureForSchema", sync = true, opts = vim.empty_dict() },
+    { type = "function", name = "DbeeStructureForSchemaAsync", sync = true, opts = vim.empty_dict() },
   })
 end

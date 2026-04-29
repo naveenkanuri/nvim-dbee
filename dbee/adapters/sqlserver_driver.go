@@ -12,8 +12,11 @@ import (
 )
 
 var (
-	_ core.Driver           = (*sqlServerDriver)(nil)
-	_ core.DatabaseSwitcher = (*sqlServerDriver)(nil)
+	_ core.Driver                  = (*sqlServerDriver)(nil)
+	_ core.FilteredStructureDriver = (*sqlServerDriver)(nil)
+	_ core.SchemaListDriver        = (*sqlServerDriver)(nil)
+	_ core.SchemaStructureDriver   = (*sqlServerDriver)(nil)
+	_ core.DatabaseSwitcher        = (*sqlServerDriver)(nil)
 )
 
 type sqlServerDriver struct {
@@ -44,16 +47,58 @@ func (c *sqlServerDriver) Columns(opts *core.TableOptions) ([]*core.Column, erro
 }
 
 func (c *sqlServerDriver) Structure() ([]*core.Structure, error) {
+	return c.StructureWithOptions(nil)
+}
+
+func (c *sqlServerDriver) StructureWithOptions(opts *core.StructureOptions) ([]*core.Structure, error) {
+	where, args, _ := schemaPredicate("table_schema", opts, schemaDialectSQLServer, 1)
+	if where != "" {
+		where = " WHERE " + where
+	}
 	query := `
     SELECT table_schema, table_name, table_type
-    FROM INFORMATION_SCHEMA.TABLES`
+    FROM INFORMATION_SCHEMA.TABLES` + where + `
+    ORDER BY table_schema, table_name`
 
-	rows, err := c.Query(context.TODO(), query)
+	rows, err := c.c.QueryWithArgs(context.TODO(), query, args...)
 	if err != nil {
 		return nil, err
 	}
 
 	return core.GetGenericStructure(rows, getPGStructureType)
+}
+
+func (c *sqlServerDriver) ListSchemas() ([]*core.SchemaInfo, error) {
+	rows, err := c.c.QueryWithArgs(context.TODO(), `
+		SELECT name
+		FROM sys.schemas
+		ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	return schemasFromRows(rows)
+}
+
+func (c *sqlServerDriver) StructureForSchema(schema string, opts *core.StructureOptions) ([]*core.Structure, error) {
+	if !schemaAllowedByOptions(schema, opts) {
+		return []*core.Structure{}, nil
+	}
+	rows, err := c.c.QueryWithArgs(
+		context.TODO(),
+		`SELECT table_schema, table_name, table_type
+		FROM INFORMATION_SCHEMA.TABLES
+		WHERE table_schema = @p1
+		ORDER BY table_schema, table_name`,
+		schema,
+	)
+	if err != nil {
+		return nil, err
+	}
+	structure, err := core.GetGenericStructure(rows, getPGStructureType)
+	if err != nil {
+		return nil, err
+	}
+	return schemaObjectsFromStructure(structure, schema), nil
 }
 
 func (c *sqlServerDriver) Close() {

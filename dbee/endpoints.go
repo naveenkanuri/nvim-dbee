@@ -154,16 +154,32 @@ func classifyConnectionTestError(err error) string {
 	}
 }
 
+type connectionParamsRPC struct {
+	ID           string                    `msgpack:"id"`
+	URL          string                    `msgpack:"url"`
+	Type         string                    `msgpack:"type"`
+	Name         string                    `msgpack:"name"`
+	SchemaFilter *core.SchemaFilterOptions `msgpack:"schema_filter"`
+}
+
+func (p *connectionParamsRPC) toCore() *core.ConnectionParams {
+	if p == nil {
+		return &core.ConnectionParams{}
+	}
+	return &core.ConnectionParams{
+		ID:           core.ConnectionID(p.ID),
+		Name:         p.Name,
+		Type:         p.Type,
+		URL:          p.URL,
+		SchemaFilter: p.SchemaFilter.Clone(),
+	}
+}
+
 func mountEndpoints(p *plugin.Plugin, h *handler.Handler) {
 	p.RegisterEndpoint(
 		"DbeeCreateConnection",
 		func(args *struct {
-			Opts *struct {
-				ID   string `msgpack:"id"`
-				URL  string `msgpack:"url"`
-				Type string `msgpack:"type"`
-				Name string `msgpack:"name"`
-			} `msgpack:",array"`
+			Opts       *connectionParamsRPC `msgpack:",array"`
 			CreateOpts *struct {
 				PreserveNilCurrent bool `msgpack:"preserve_nil_current"`
 			}
@@ -174,12 +190,7 @@ func mountEndpoints(p *plugin.Plugin, h *handler.Handler) {
 				createOpts.PreserveNilCurrent = args.CreateOpts.PreserveNilCurrent
 			}
 
-			return h.CreateConnection(&core.ConnectionParams{
-				ID:   core.ConnectionID(args.Opts.ID),
-				Name: args.Opts.Name,
-				Type: args.Opts.Type,
-				URL:  args.Opts.URL,
-			}, createOpts)
+			return h.CreateConnection(args.Opts.toCore(), createOpts)
 		})
 
 	p.RegisterEndpoint(
@@ -306,20 +317,10 @@ func mountEndpoints(p *plugin.Plugin, h *handler.Handler) {
 	p.RegisterEndpoint(
 		"DbeeConnectionTestSpec",
 		func(args *struct {
-			Opts *struct {
-				ID   string `msgpack:"id"`
-				URL  string `msgpack:"url"`
-				Type string `msgpack:"type"`
-				Name string `msgpack:"name"`
-			} `msgpack:",array"`
+			Opts *connectionParamsRPC `msgpack:",array"`
 		},
 		) (any, error) {
-			err := h.ConnectionTestSpec(&core.ConnectionParams{
-				ID:   core.ConnectionID(args.Opts.ID),
-				Name: args.Opts.Name,
-				Type: args.Opts.Type,
-				URL:  args.Opts.URL,
-			})
+			err := h.ConnectionTestSpec(args.Opts.toCore())
 			if err == nil {
 				return nil, nil
 			}
@@ -333,10 +334,11 @@ func mountEndpoints(p *plugin.Plugin, h *handler.Handler) {
 	p.RegisterEndpoint(
 		"DbeeConnectionGetStructure",
 		func(args *struct {
-			ID core.ConnectionID `msgpack:",array"`
+			ID   core.ConnectionID `msgpack:",array"`
+			Opts *core.StructureOptions
 		},
 		) (any, error) {
-			str, err := h.ConnectionGetStructure(args.ID)
+			str, err := h.ConnectionGetStructure(args.ID, args.Opts)
 			return handler.WrapStructures(str), err
 		})
 
@@ -347,9 +349,83 @@ func mountEndpoints(p *plugin.Plugin, h *handler.Handler) {
 			RequestID   int
 			RootEpoch   int
 			CallerToken string
+			Opts        *core.StructureOptions
 		},
 		) (any, error) {
-			h.ConnectionGetStructureAsync(args.ID, args.RequestID, args.RootEpoch, args.CallerToken)
+			h.ConnectionGetStructureAsync(args.ID, args.RequestID, args.RootEpoch, args.CallerToken, args.Opts)
+			return nil, nil
+		})
+
+	p.RegisterEndpoint(
+		"DbeeConnectionListSchemas",
+		func(args *struct {
+			ID core.ConnectionID `msgpack:",array"`
+		},
+		) (any, error) {
+			schemas, err := h.ConnectionListSchemas(args.ID)
+			return handler.WrapSchemas(schemas), err
+		})
+
+	p.RegisterEndpoint(
+		"DbeeConnectionListSchemasAsync",
+		func(args *struct {
+			ID          core.ConnectionID `msgpack:",array"`
+			RequestID   int
+			RootEpoch   int
+			CallerToken string
+		},
+		) (any, error) {
+			h.ConnectionListSchemasAsync(args.ID, args.RequestID, args.RootEpoch, args.CallerToken)
+			return nil, nil
+		})
+
+	p.RegisterEndpoint(
+		"DbeeConnectionListSchemasSpec",
+		func(args *struct {
+			Opts *connectionParamsRPC `msgpack:",array"`
+		},
+		) (any, error) {
+			schemas, err := h.ConnectionListSchemasSpec(args.Opts.toCore())
+			return handler.WrapSchemas(schemas), err
+		})
+
+	p.RegisterEndpoint(
+		"DbeeConnectionListSchemasSpecAsync",
+		func(args *struct {
+			Opts        *connectionParamsRPC `msgpack:",array"`
+			RequestID   int
+			RootEpoch   int
+			CallerToken string
+		},
+		) (any, error) {
+			h.ConnectionListSchemasSpecAsync(args.Opts.toCore(), args.RequestID, args.RootEpoch, args.CallerToken)
+			return nil, nil
+		})
+
+	p.RegisterEndpoint(
+		"DbeeStructureForSchema",
+		func(args *struct {
+			ID     core.ConnectionID `msgpack:",array"`
+			Schema string
+			Opts   *core.StructureOptions
+		},
+		) (any, error) {
+			objects, err := h.ConnectionGetSchemaObjects(args.ID, args.Schema, args.Opts)
+			return handler.WrapStructures(objects), err
+		})
+
+	p.RegisterEndpoint(
+		"DbeeStructureForSchemaAsync",
+		func(args *struct {
+			ID          core.ConnectionID `msgpack:",array"`
+			RequestID   int
+			RootEpoch   int
+			CallerToken string
+			Schema      string
+			Opts        *core.StructureOptions
+		},
+		) (any, error) {
+			h.ConnectionGetSchemaObjectsAsync(args.ID, args.RequestID, args.RootEpoch, args.CallerToken, args.Schema, args.Opts)
 			return nil, nil
 		})
 

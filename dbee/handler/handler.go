@@ -275,13 +275,17 @@ func (h *Handler) ConnectionTestSpec(params *core.ConnectionParams) error {
 	return connectionTestParams(params)
 }
 
-func (h *Handler) ConnectionGetStructure(connID core.ConnectionID) ([]*core.Structure, error) {
+func (h *Handler) ConnectionGetStructure(connID core.ConnectionID, opts ...*core.StructureOptions) ([]*core.Structure, error) {
 	c, ok := h.lookupConnection[connID]
 	if !ok {
 		return nil, fmt.Errorf("unknown connection with id: %q", connID)
 	}
 
-	layout, err := c.GetStructure()
+	var scope *core.StructureOptions
+	if len(opts) > 0 {
+		scope = opts[0]
+	}
+	layout, err := c.GetStructure(scope)
 	if err != nil {
 		return nil, fmt.Errorf("c.GetStructure: %w", err)
 	}
@@ -289,7 +293,13 @@ func (h *Handler) ConnectionGetStructure(connID core.ConnectionID) ([]*core.Stru
 	return layout, nil
 }
 
-func (h *Handler) ConnectionGetStructureAsync(connID core.ConnectionID, requestID int, rootEpoch int, callerToken string) {
+func (h *Handler) ConnectionGetStructureAsync(
+	connID core.ConnectionID,
+	requestID int,
+	rootEpoch int,
+	callerToken string,
+	opts ...*core.StructureOptions,
+) {
 	if requestID <= 0 {
 		requestID = int(h.nextStructureReqID.Add(1))
 	}
@@ -308,12 +318,148 @@ func (h *Handler) ConnectionGetStructureAsync(connID core.ConnectionID, requestI
 	}
 
 	go func() {
-		layout, err := c.GetStructure()
+		var scope *core.StructureOptions
+		if len(opts) > 0 {
+			scope = opts[0]
+		}
+		layout, err := c.GetStructure(scope)
 		if err != nil {
 			h.events.StructureLoaded(connID, requestID, rootEpoch, callerToken, nil, fmt.Errorf("c.GetStructure: %w", err))
 			return
 		}
 		h.events.StructureLoaded(connID, requestID, rootEpoch, callerToken, layout, nil)
+	}()
+}
+
+func (h *Handler) ConnectionListSchemas(connID core.ConnectionID) ([]*core.SchemaInfo, error) {
+	c, ok := h.lookupConnection[connID]
+	if !ok {
+		return nil, fmt.Errorf("unknown connection with id: %q", connID)
+	}
+
+	schemas, err := c.ListSchemas()
+	if err != nil {
+		return nil, fmt.Errorf("c.ListSchemas: %w", err)
+	}
+	return schemas, nil
+}
+
+func (h *Handler) ConnectionListSchemasSpec(params *core.ConnectionParams) ([]*core.SchemaInfo, error) {
+	if params == nil {
+		return nil, fmt.Errorf("connection params are required")
+	}
+
+	temp, err := adapters.NewConnection(params)
+	if err != nil {
+		return nil, fmt.Errorf("adapters.NewConnection: %w", err)
+	}
+	defer temp.Close()
+
+	schemas, err := temp.ListSchemas()
+	if err != nil {
+		return nil, fmt.Errorf("temp.ListSchemas: %w", err)
+	}
+	return schemas, nil
+}
+
+func (h *Handler) ConnectionListSchemasAsync(connID core.ConnectionID, requestID int, rootEpoch int, callerToken string) {
+	if requestID <= 0 {
+		requestID = int(h.nextStructureReqID.Add(1))
+	}
+
+	c, ok := h.lookupConnection[connID]
+	if !ok {
+		h.events.SchemasLoaded(
+			connID,
+			requestID,
+			rootEpoch,
+			callerToken,
+			nil,
+			fmt.Errorf("unknown connection with id: %q", connID),
+		)
+		return
+	}
+
+	go func() {
+		schemas, err := c.ListSchemas()
+		if err != nil {
+			h.events.SchemasLoaded(connID, requestID, rootEpoch, callerToken, nil, fmt.Errorf("c.ListSchemas: %w", err))
+			return
+		}
+		h.events.SchemasLoaded(connID, requestID, rootEpoch, callerToken, schemas, nil)
+	}()
+}
+
+func (h *Handler) ConnectionListSchemasSpecAsync(
+	params *core.ConnectionParams,
+	requestID int,
+	rootEpoch int,
+	callerToken string,
+) {
+	if requestID <= 0 {
+		requestID = int(h.nextStructureReqID.Add(1))
+	}
+
+	go func() {
+		schemas, err := h.ConnectionListSchemasSpec(params)
+		if err != nil {
+			h.events.SchemasLoaded("", requestID, rootEpoch, callerToken, nil, err)
+			return
+		}
+		h.events.SchemasLoaded("", requestID, rootEpoch, callerToken, schemas, nil)
+	}()
+}
+
+func (h *Handler) ConnectionGetSchemaObjects(
+	connID core.ConnectionID,
+	schema string,
+	opts *core.StructureOptions,
+) ([]*core.Structure, error) {
+	c, ok := h.lookupConnection[connID]
+	if !ok {
+		return nil, fmt.Errorf("unknown connection with id: %q", connID)
+	}
+
+	layout, err := c.GetSchemaObjects(schema, opts)
+	if err != nil {
+		return nil, fmt.Errorf("c.GetSchemaObjects: %w", err)
+	}
+	return layout, nil
+}
+
+func (h *Handler) ConnectionGetSchemaObjectsAsync(
+	connID core.ConnectionID,
+	requestID int,
+	rootEpoch int,
+	callerToken string,
+	schema string,
+	opts *core.StructureOptions,
+) {
+	if requestID <= 0 {
+		requestID = int(h.nextStructureReqID.Add(1))
+	}
+
+	c, ok := h.lookupConnection[connID]
+	if !ok {
+		h.events.SchemaObjectsLoaded(
+			connID,
+			requestID,
+			rootEpoch,
+			callerToken,
+			schema,
+			nil,
+			fmt.Errorf("unknown connection with id: %q", connID),
+		)
+		return
+	}
+
+	go func() {
+		objects, err := c.GetSchemaObjects(schema, opts)
+		if err != nil {
+			h.events.SchemaObjectsLoaded(connID, requestID, rootEpoch, callerToken, schema, nil, fmt.Errorf("c.GetSchemaObjects: %w", err))
+			return
+		}
+		h.events.SchemaObjectsLoaded(connID, requestID, rootEpoch, callerToken, schema, objects, nil)
 	}()
 }
 

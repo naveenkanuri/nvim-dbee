@@ -26,6 +26,29 @@ type (
 )
 
 type (
+	// SchemaFilterOptions is persisted on ConnectionParams. Missing Include means
+	// all schemas; an explicitly empty Include is rejected by Lua validation.
+	SchemaFilterOptions struct {
+		Include       []string `json:"include,omitempty" msgpack:"include,omitempty"`
+		Exclude       []string `json:"exclude,omitempty" msgpack:"exclude,omitempty"`
+		LazyPerSchema bool     `json:"lazy_per_schema,omitempty" msgpack:"lazy_per_schema,omitempty"`
+	}
+
+	// StructureOptions is the normalized schema scope passed from Lua handler
+	// middleware into Go metadata calls. Adapters must not rebuild it from raw
+	// ConnectionParams.schema_filter.
+	StructureOptions struct {
+		SchemaFilter          *SchemaFilterOptions `json:"schema_filter,omitempty" msgpack:"schema_filter,omitempty"`
+		SchemaFilterSignature string               `json:"schema_filter_signature,omitempty" msgpack:"schema_filter_signature,omitempty"`
+		Fold                  string               `json:"fold,omitempty" msgpack:"fold,omitempty"`
+		ConnectionType        string               `json:"connection_type,omitempty" msgpack:"connection_type,omitempty"`
+	}
+
+	// SchemaInfo is the schema discovery payload for ListSchemas.
+	SchemaInfo struct {
+		Name string
+	}
+
 	// Row and Header are attributes of IterResult iterator
 	Row    []any
 	Header []string
@@ -184,4 +207,36 @@ type Column struct {
 	Name string
 	// Database data type
 	Type string
+}
+
+func cloneStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, len(values))
+	copy(out, values)
+	return out
+}
+
+func (f *SchemaFilterOptions) Clone() *SchemaFilterOptions {
+	if f == nil {
+		return nil
+	}
+	return &SchemaFilterOptions{
+		Include:       cloneStrings(f.Include),
+		Exclude:       cloneStrings(f.Exclude),
+		LazyPerSchema: f.LazyPerSchema,
+	}
+}
+
+func (o *StructureOptions) Clone() *StructureOptions {
+	if o == nil {
+		return nil
+	}
+	return &StructureOptions{
+		SchemaFilter:          o.SchemaFilter.Clone(),
+		SchemaFilterSignature: o.SchemaFilterSignature,
+		Fold:                  o.Fold,
+		ConnectionType:        o.ConnectionType,
+	}
 }
