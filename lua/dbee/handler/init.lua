@@ -1342,6 +1342,16 @@ function Handler:connection_test(id)
   return ret
 end
 
+---@param params ConnectionParams
+---@return { error_kind: string, message: string }|nil
+function Handler:connection_test_spec(params)
+  local ret = vim.fn.DbeeConnectionTestSpec(params)
+  if not ret or ret == vim.NIL then
+    return nil
+  end
+  return ret
+end
+
 ---@param id connection_id
 ---@return string current_db
 ---@return string[] available_dbs

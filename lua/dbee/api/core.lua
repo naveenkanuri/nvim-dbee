@@ -154,6 +154,13 @@ function core.connection_get_params(id)
   return state.handler():connection_get_params(id)
 end
 
+---Test an unsaved connection spec without mutating handler state.
+---@param params ConnectionParams
+---@return { error_kind: string, message: string }|nil
+function core.connection_test_spec(params)
+  return state.handler():connection_test_spec(params)
+end
+
 ---List databases of a connection.
 ---Some databases might not support this - in that case, a call to this
 ---function returns an error.

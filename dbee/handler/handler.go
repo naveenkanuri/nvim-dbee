@@ -232,13 +232,8 @@ func (h *Handler) ConnectionGetParams(connID core.ConnectionID) (*core.Connectio
 	return c.GetParams(), nil
 }
 
-func (h *Handler) ConnectionTest(connID core.ConnectionID) error {
-	c, ok := h.lookupConnection[connID]
-	if !ok {
-		return fmt.Errorf("unknown connection with id: %q", connID)
-	}
-
-	temp, err := adapters.NewConnection(c.GetParams())
+func connectionTestParams(params *core.ConnectionParams) error {
+	temp, err := adapters.NewConnection(params)
 	if err != nil {
 		return fmt.Errorf("adapters.NewConnection: %w", err)
 	}
@@ -252,6 +247,23 @@ func (h *Handler) ConnectionTest(connID core.ConnectionID) error {
 	}
 
 	return nil
+}
+
+func (h *Handler) ConnectionTest(connID core.ConnectionID) error {
+	c, ok := h.lookupConnection[connID]
+	if !ok {
+		return fmt.Errorf("unknown connection with id: %q", connID)
+	}
+
+	return connectionTestParams(c.GetParams())
+}
+
+func (h *Handler) ConnectionTestSpec(params *core.ConnectionParams) error {
+	if params == nil {
+		return fmt.Errorf("connection params are required")
+	}
+
+	return connectionTestParams(params)
 }
 
 func (h *Handler) ConnectionGetStructure(connID core.ConnectionID) ([]*core.Structure, error) {

@@ -296,6 +296,33 @@ func mountEndpoints(p *plugin.Plugin, h *handler.Handler) {
 		})
 
 	p.RegisterEndpoint(
+		"DbeeConnectionTestSpec",
+		func(args *struct {
+			Opts *struct {
+				ID   string `msgpack:"id"`
+				URL  string `msgpack:"url"`
+				Type string `msgpack:"type"`
+				Name string `msgpack:"name"`
+			} `msgpack:",array"`
+		},
+		) (any, error) {
+			err := h.ConnectionTestSpec(&core.ConnectionParams{
+				ID:   core.ConnectionID(args.Opts.ID),
+				Name: args.Opts.Name,
+				Type: args.Opts.Type,
+				URL:  args.Opts.URL,
+			})
+			if err == nil {
+				return nil, nil
+			}
+
+			return map[string]any{
+				"error_kind": classifyConnectionTestError(err),
+				"message":    err.Error(),
+			}, nil
+		})
+
+	p.RegisterEndpoint(
 		"DbeeConnectionGetStructure",
 		func(args *struct {
 			ID core.ConnectionID `msgpack:",array"`

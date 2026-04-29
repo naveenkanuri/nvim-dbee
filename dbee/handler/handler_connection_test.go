@@ -96,3 +96,47 @@ func TestConnectionTestUsesDriverProbeWithoutMutatingHandlerState(t *testing.T) 
 	require.Same(t, validConn, h.lookupConnection[validConn.GetID()])
 	require.Same(t, unreachableConn, h.lookupConnection[unreachableConn.GetID()])
 }
+
+func TestConnectionTestSpecUsesTemporaryConnectionWithoutMutatingHandlerState(t *testing.T) {
+	typeName := "handler-connection-test-spec-probe"
+	require.NoError(t, new(adapters.Mux).AddAdapter(typeName, &connectionTestProbeAdapter{}))
+
+	existingConn, err := adapters.NewConnection(&core.ConnectionParams{
+		ID:   "conn-existing",
+		Name: "Existing",
+		Type: typeName,
+		URL:  "probe://ok",
+	})
+	require.NoError(t, err)
+	t.Cleanup(existingConn.Close)
+
+	h := &Handler{
+		lookupConnection: map[core.ConnectionID]*core.Connection{
+			existingConn.GetID(): existingConn,
+		},
+		lookupCall:           make(map[core.CallID]*core.Call),
+		lookupConnectionCall: make(map[core.ConnectionID][]core.CallID),
+		currentConnectionID:  existingConn.GetID(),
+	}
+
+	err = h.ConnectionTestSpec(&core.ConnectionParams{
+		Name: "Probe OK",
+		Type: typeName,
+		URL:  "probe://ok",
+	})
+	require.NoError(t, err)
+	require.Len(t, h.lookupConnection, 1)
+	require.Equal(t, existingConn.GetID(), h.currentConnectionID)
+	require.Same(t, existingConn, h.lookupConnection[existingConn.GetID()])
+
+	err = h.ConnectionTestSpec(&core.ConnectionParams{
+		Name: "Probe Down",
+		Type: typeName,
+		URL:  "probe://unreachable",
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "connection refused")
+	require.Len(t, h.lookupConnection, 1)
+	require.Equal(t, existingConn.GetID(), h.currentConnectionID)
+	require.Same(t, existingConn, h.lookupConnection[existingConn.GetID()])
+}

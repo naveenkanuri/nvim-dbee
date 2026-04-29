@@ -156,8 +156,8 @@
 ---@field new_conn_ids connection_id[]
 ---@field authoritative_root_epoch integer?
 
----Failure detail returned by the `DbeeConnectionTest(conn_id)` RPC and the
----Lua `handler:connection_test(conn_id)` wrapper.
+---Failure detail returned by the `DbeeConnectionTest(conn_id)` and
+---`DbeeConnectionTestSpec(params)` RPCs plus their Lua handler wrappers.
 ---@class ConnectionTestFailure
 ---@field error_kind '"auth"'|'"network"'|'"driver"'|'"unknown"'
 ---@field message string
