@@ -637,7 +637,13 @@ local function normalize_seed(seed)
     end
   elseif params.type == "oracle" then
     local parsed = parse_oracle_url(params.url or "")
-    if parsed and #parsed.unsupported_query == 0 and parsed.wallet_path and parsed.wallet_path ~= "" then
+    if (params.url or "") == "" then
+      state.db_kind = "oracle"
+      state.mode = "oracle_cloud_wallet"
+      state.fields.oracle_cloud_wallet = vim.tbl_extend("force", state.fields.oracle_cloud_wallet, {
+        name = params.name or "",
+      })
+    elseif parsed and #parsed.unsupported_query == 0 and parsed.wallet_path and parsed.wallet_path ~= "" then
       local service_alias = find_wallet_alias_for_descriptor(parsed.wallet_path, parsed.descriptor)
       if service_alias then
         state.db_kind = "oracle"
@@ -1004,7 +1010,19 @@ function Wizard:submit()
 
   self.state.last_error = nil
   if self.opts.on_submit then
-    self.opts.on_submit(submission)
+    local ok_submit, submit_err = pcall(self.opts.on_submit, submission)
+    if not ok_submit then
+      self.state.last_error = tostring(submit_err)
+      self:render()
+      return nil, submit_err
+    end
+
+    if submit_err then
+      self.state.last_error = type(submit_err) == "table" and tostring(submit_err.message or submit_err.error or submit_err)
+        or tostring(submit_err)
+      self:render()
+      return nil, submit_err
+    end
   end
   self:close()
   return submission

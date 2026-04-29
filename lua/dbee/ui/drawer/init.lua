@@ -5,6 +5,7 @@ local menu = require("dbee.ui.drawer.menu")
 local convert = require("dbee.ui.drawer.convert")
 local drawer_model = require("dbee.ui.drawer.model")
 local expansion = require("dbee.ui.drawer.expansion")
+local connection_wizard = require("dbee.ui.connection_wizard")
 local reconnect = require("dbee.reconnect")
 local utils = require("dbee.utils")
 
@@ -486,7 +487,11 @@ local function searchable_node_to_tree_node(ui, node, inherited_conn_id, childre
   }, children) --[[@as DrawerUINode]]
 
   if node.type == "connection" and node.source_meta then
-    convert.decorate_connection_node(tree_node, ui.handler, node.source_meta, conn_id or node.id)
+    convert.decorate_connection_node(tree_node, ui.handler, node.source_meta, conn_id or node.id, {
+      open_edit_connection = function(source_meta, target_conn_id, on_done)
+        ui:open_edit_connection_with_wizard(source_meta, target_conn_id, nil, on_done)
+      end,
+    })
   elseif SEARCHABLE_TYPES[node.type] then
     local struct_meta = node.struct_meta or {
       id = node.id,
@@ -597,27 +602,6 @@ local function create_capable_sources(handler)
     end
   end
   return out
-end
-
----@param title string
----@param defaults? { name?: string, type?: string, url?: string }
----@param callback fun(spec: ConnectionParams)
-local function prompt_connection_details(title, defaults, callback)
-  defaults = defaults or {}
-  common.float_prompt({
-    { key = "name", value = defaults.name or "" },
-    { key = "type", value = defaults.type or "" },
-    { key = "url", value = defaults.url or "" },
-  }, {
-    title = title,
-    callback = function(res)
-      callback({
-        name = res.name,
-        type = res.type,
-        url = res.url,
-      })
-    end,
-  })
 end
 
 ---@param data ConnectionInvalidatedEvent
@@ -2313,6 +2297,104 @@ function DrawerUI:prepare_close()
 end
 
 ---@private
+---@param source_meta { id: string, name: string, can_create: boolean, can_update: boolean, can_delete: boolean, file: string|nil }
+---@param conn_id? connection_id
+---@param conn? ConnectionParams
+---@param defaults? { name?: string, type?: string, url?: string }
+---@return ConnectionWizardSeed
+function DrawerUI:_build_connection_wizard_seed(source_meta, conn_id, conn, defaults)
+  defaults = defaults or {}
+
+  local record = nil
+  if conn_id and conn_id ~= "" then
+    record = self.handler:source_get_connection_record(source_meta.id, conn_id)
+  end
+
+  local params_source = record or conn or defaults
+  return {
+    params = {
+      name = params_source.name or "",
+      type = params_source.type or defaults.type or "",
+      url = params_source.url or defaults.url or "",
+    },
+    wizard = record and type(record.wizard) == "table" and vim.deepcopy(record.wizard) or nil,
+  }
+end
+
+---@private
+---@param source_meta { id: string, name: string, can_create: boolean, can_update: boolean, can_delete: boolean, file: string|nil }
+---@param opts { conn_id?: connection_id, title: string, mode: "add"|"edit", seed: ConnectionWizardSeed, on_done?: fun() }
+function DrawerUI:_open_connection_wizard(source_meta, opts)
+  opts = opts or {}
+
+  connection_wizard.open({
+    relative_winid = self.winid,
+    mode = opts.mode,
+    title = opts.title,
+    source_meta = source_meta,
+    seed = opts.seed,
+    on_submit = function(submission)
+      local err = self.handler:submit_connection_wizard({
+        source_id = source_meta.id,
+        conn_id = opts.conn_id,
+        source_meta = source_meta,
+        submission = submission,
+      })
+      if err then
+        return err
+      end
+
+      if type(opts.on_done) == "function" then
+        opts.on_done()
+      end
+      return nil
+    end,
+    on_cancel = function()
+      if type(opts.on_done) == "function" then
+        opts.on_done()
+      end
+    end,
+  })
+end
+
+---@private
+---@param source_meta { id: string, name: string, can_create: boolean, can_update: boolean, can_delete: boolean, file: string|nil }
+---@param defaults? { name?: string, type?: string, url?: string }
+---@param on_done? fun()
+function DrawerUI:open_add_connection_with_wizard(source_meta, defaults, on_done)
+  self:_open_connection_wizard(source_meta, {
+    mode = "add",
+    title = "Add Connection",
+    seed = self:_build_connection_wizard_seed(source_meta, nil, nil, defaults),
+    on_done = on_done,
+  })
+end
+
+---@private
+---@param source_meta { id: string, name: string, can_create: boolean, can_update: boolean, can_delete: boolean, file: string|nil }
+---@param conn_id connection_id
+---@param conn? ConnectionParams
+---@param on_done? fun()
+function DrawerUI:open_edit_connection_with_wizard(source_meta, conn_id, conn, on_done)
+  local existing = conn or self.handler:connection_get_params(conn_id)
+  if not existing then
+    utils.log("warn", "Unable to resolve the selected connection for editing")
+    if type(on_done) == "function" then
+      on_done()
+    end
+    return
+  end
+
+  self:_open_connection_wizard(source_meta, {
+    conn_id = conn_id,
+    mode = "edit",
+    title = "Edit Connection",
+    seed = self:_build_connection_wizard_seed(source_meta, conn_id, existing),
+    on_done = on_done,
+  })
+end
+
+---@private
 ---@return table<string, fun()>
 function DrawerUI:get_actions()
   local function collapse_node(node)
@@ -2427,22 +2509,12 @@ function DrawerUI:get_actions()
     }
   end
 
-  local function open_add_connection(source_meta, defaults)
-    prompt_connection_details("Add Connection", defaults, function(spec)
-      local ok, err = pcall(self.handler.source_add_connection, self.handler, source_meta.id, spec)
-      if not ok then
-        utils.log("error", "Failed to add connection: " .. tostring(err))
-      end
-    end)
+  local function open_add_connection(source_meta, defaults, on_done)
+    self:open_add_connection_with_wizard(source_meta, defaults, on_done)
   end
 
-  local function open_edit_connection(source_meta, conn_id, conn)
-    prompt_connection_details("Edit Connection", conn or {}, function(spec)
-      local ok, err = pcall(self.handler.source_update_connection, self.handler, source_meta.id, conn_id, spec)
-      if not ok then
-        utils.log("error", "Failed to update connection: " .. tostring(err))
-      end
-    end)
+  local function open_edit_connection(source_meta, conn_id, conn, on_done)
+    self:open_edit_connection_with_wizard(source_meta, conn_id, conn, on_done)
   end
 
   local function open_source_file_editor(source_meta)
@@ -2571,9 +2643,9 @@ function DrawerUI:get_actions()
 
       perform_action({
         mode = "close_only",
-        action = function()
+        action = function(on_done)
           local begin_add = function(source_meta)
-            open_add_connection(source_meta, default_spec)
+            open_add_connection(source_meta, default_spec, on_done)
           end
 
           if preferred_source then
@@ -2606,9 +2678,9 @@ function DrawerUI:get_actions()
 
       perform_action({
         mode = "close_only",
-        action = function(_, select)
+        action = function(on_done, select)
           local open_connection_editor = function()
-            open_edit_connection(source_meta, node:get_id(), conn)
+            open_edit_connection(source_meta, node:get_id(), conn, on_done)
           end
 
           if can_edit_connection and can_edit_source then

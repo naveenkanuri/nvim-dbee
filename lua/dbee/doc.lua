@@ -162,6 +162,12 @@
 ---@field error_kind '"auth"'|'"network"'|'"driver"'|'"unknown"'
 ---@field message string
 
+---Failure detail returned by `handler:submit_connection_wizard(...)`.
+---@class ConnectionWizardSubmitFailure
+---@field error_kind string
+---@field message string
+---@field stage? '"ping"'|'"save"'
+
 ---Snapshot entry used by bootstrap consumers to reconcile source-owned
 ---connections before switching to live `connection_invalidated` events.
 ---@class ConnectionStateSnapshotSource

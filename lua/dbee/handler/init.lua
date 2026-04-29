@@ -185,6 +185,46 @@ local function copy_payload(payload)
   return vim.deepcopy(payload)
 end
 
+local SCOPED_WIZARD_MODES = {
+  oracle_cloud_wallet = true,
+  oracle_custom_jdbc = true,
+  postgres_url = true,
+  postgres_form = true,
+}
+
+---@param source Source|nil
+---@return boolean
+local function source_is_filesource(source)
+  return source ~= nil
+    and type(source.get_record) == "function"
+    and type(source.file) == "function"
+    and type(source.path) == "string"
+    and source.path ~= ""
+end
+
+---@param submission ConnectionWizardSubmission|table|nil
+---@return boolean
+local function wizard_submission_persists_metadata(submission)
+  local wizard = submission and submission.wizard or {}
+  if type(wizard) ~= "table" then
+    return false
+  end
+
+  return SCOPED_WIZARD_MODES[wizard.mode] == true and wizard.raw_fallback ~= true
+end
+
+---@param message any
+---@param error_kind? string
+---@param stage? string
+---@return { message: string, error_kind: string, stage?: string }
+local function wizard_submit_error(message, error_kind, stage)
+  return {
+    message = tostring(message),
+    error_kind = error_kind or "unknown",
+    stage = stage,
+  }
+end
+
 -- Handler is an aggregator of connections
 ---@class Handler
 ---@field private sources table<source_id, Source>
@@ -254,6 +294,16 @@ end
 function Handler:_current_connection_id()
   local current = self:get_current_connection()
   return current and current.id or nil
+end
+
+---@private
+---@return integer
+function Handler:_total_connection_count()
+  local count = 0
+  for _, conn_ids in pairs(self.source_conn_lookup or {}) do
+    count = count + #(conn_ids or {})
+  end
+  return count
 end
 
 ---@private
@@ -856,7 +906,7 @@ end
 
 ---@private
 ---@param source_id source_id
----@param opts? { eventful?: boolean }
+---@param opts? { eventful?: boolean, preserve_nil_current?: boolean }
 ---@return { source_id: source_id, retired_conn_ids: connection_id[], new_conn_ids: connection_id[], current_conn_id_before: connection_id|nil, current_conn_id_after: connection_id|nil, rewrites: { old_conn_id: connection_id, new_conn_id: connection_id }[], authoritative_root_epoch: integer|nil, reload_error: { error_kind: string, message: string }|nil }
 function Handler:_source_reload_silent(source_id, opts)
   opts = opts or {}
@@ -943,6 +993,13 @@ function Handler:_source_reload_silent(source_id, opts)
     end
   end
 
+  if opts.preserve_nil_current == true and current_conn_id_before == nil then
+    local ok_clear, clear_err = pcall(self.connection_clear_current, self)
+    if not ok_clear then
+      utils.log("warn", "Failed preserving nil current connection after reload: " .. tostring(clear_err), "core")
+    end
+  end
+
   if current_missing_after_reload and not sticky_target and not sticky_warning and previous_current then
     sticky_warning = string.format(
       'Sticky current connection for "%s" vanished after reload',
@@ -1017,7 +1074,8 @@ end
 ---@param id source_id
 ---@param details ConnectionParams
 ---@return connection_id
-function Handler:source_add_connection(id, details)
+function Handler:_source_add_connection(id, details, opts)
+  opts = opts or {}
   if not details then
     error("no connection details provided")
   end
@@ -1042,7 +1100,10 @@ function Handler:source_add_connection(id, details)
     error(conn_id_or_err)
   end
 
-  local result = self:_source_reload_silent(id, { eventful = true })
+  local result = self:_source_reload_silent(id, {
+    eventful = true,
+    preserve_nil_current = opts.preserve_nil_current == true,
+  })
   self:_emit_connection_invalidated("source_add", result)
 
   if result.reload_error then
@@ -1057,6 +1118,13 @@ function Handler:source_add_connection(id, details)
   end
 
   return conn_id_or_err
+end
+
+---@param id source_id
+---@param details ConnectionParams
+---@return connection_id
+function Handler:source_add_connection(id, details)
+  return self:_source_add_connection(id, details)
 end
 
 ---@param id source_id
@@ -1104,7 +1172,8 @@ end
 ---@param id source_id
 ---@param conn_id connection_id
 ---@param details ConnectionParams
-function Handler:source_update_connection(id, conn_id, details)
+function Handler:_source_update_connection(id, conn_id, details, opts)
+  opts = opts or {}
   local source = self.sources[id]
   if not source then
     error("no source with id: " .. id)
@@ -1133,7 +1202,10 @@ function Handler:source_update_connection(id, conn_id, details)
     error(update_err)
   end
 
-  local result = self:_source_reload_silent(id, { eventful = true })
+  local result = self:_source_reload_silent(id, {
+    eventful = true,
+    preserve_nil_current = opts.preserve_nil_current == true,
+  })
   self:_emit_connection_invalidated("source_update", result)
 
   if result.reload_error then
@@ -1146,6 +1218,13 @@ function Handler:source_update_connection(id, conn_id, details)
     ))
     error(result.reload_error.message)
   end
+end
+
+---@param id source_id
+---@param conn_id connection_id
+---@param details ConnectionParams
+function Handler:source_update_connection(id, conn_id, details)
+  self:_source_update_connection(id, conn_id, details)
 end
 
 ---@param id source_id
@@ -1193,6 +1272,58 @@ function Handler:source_get_connection_record(id, conn_id)
   end
 
   return vim.deepcopy(record_or_err)
+end
+
+---@param opts { source_id: source_id, conn_id?: connection_id, submission: ConnectionWizardSubmission }
+---@return { message: string, error_kind: string, stage?: string }|nil
+function Handler:submit_connection_wizard(opts)
+  opts = opts or {}
+
+  if not opts.source_id or opts.source_id == "" then
+    return wizard_submit_error("Wizard submission is missing a source id.", "mutation", "save")
+  end
+
+  local source = self.sources[opts.source_id]
+  if not source then
+    return wizard_submit_error("No source with id: " .. tostring(opts.source_id), "mutation", "save")
+  end
+
+  local submission = opts.submission
+  if type(submission) ~= "table" or type(submission.params) ~= "table" then
+    return wizard_submit_error("Wizard submission is missing connection params.", "mutation", "save")
+  end
+
+  local ping_failure = self:connection_test_spec(submission.params)
+  if ping_failure then
+    ping_failure.stage = "ping"
+    return ping_failure
+  end
+
+  local persist_metadata = source_is_filesource(source) and wizard_submission_persists_metadata(submission)
+  local persisted = vim.deepcopy(submission.params or {})
+  if persist_metadata then
+    persisted.wizard = vim.deepcopy(submission.wizard)
+  elseif source_is_filesource(source) and opts.conn_id and submission.wizard and submission.wizard.mode then
+    persisted.__remove_keys = { "wizard" }
+  end
+
+  local preserve_nil_current = self:get_current_connection() == nil and self:_total_connection_count() > 0
+  local ok_save, save_err = nil, nil
+  if opts.conn_id and opts.conn_id ~= "" then
+    ok_save, save_err = pcall(self._source_update_connection, self, opts.source_id, opts.conn_id, persisted, {
+      preserve_nil_current = preserve_nil_current,
+    })
+  else
+    ok_save, save_err = pcall(self._source_add_connection, self, opts.source_id, persisted, {
+      preserve_nil_current = preserve_nil_current,
+    })
+  end
+
+  if ok_save then
+    return nil
+  end
+
+  return wizard_submit_error(save_err, "mutation", "save")
 end
 
 ---Return an authoritative, side-effect-free connection snapshot for bootstrap

@@ -1,5 +1,4 @@
 local utils = require("dbee.utils")
-local common = require("dbee.ui.common")
 local NuiTree = require("nui.tree")
 
 local M = {}
@@ -174,8 +173,11 @@ end
 ---@param handler Handler
 ---@param source_meta { id: string, name?: string, can_create?: boolean, can_update: boolean, can_delete: boolean, file?: string|nil }
 ---@param conn_id string
+---@param opts? { open_edit_connection?: fun(source_meta: table, conn_id: string, on_done?: fun()) }
 --- INVARIANT: source_meta.id MUST equal source:name().
-function M.decorate_connection_node(node, handler, source_meta, conn_id)
+function M.decorate_connection_node(node, handler, source_meta, conn_id, opts)
+  opts = opts or {}
+
   node.action_1 = function(cb)
     handler:set_current_connection(conn_id)
     cb()
@@ -184,31 +186,13 @@ function M.decorate_connection_node(node, handler, source_meta, conn_id)
   node.action_2 = nil
   if source_meta.can_update then
     node.action_2 = function(cb)
-      local original_details = handler:connection_get_params(conn_id)
-      if not original_details then
+      if type(opts.open_edit_connection) ~= "function" then
+        utils.log("warn", "Wizard-backed connection editing is unavailable")
+        cb()
         return
       end
 
-      local prompt = {
-        { key = "name", value = original_details.name },
-        { key = "type", value = original_details.type },
-        { key = "url", value = original_details.url },
-      }
-      common.float_prompt(prompt, {
-        title = "Edit Connection",
-        callback = function(res)
-          local spec = {
-            name = res.name,
-            url = res.url,
-            type = res.type,
-          }
-          local ok, err = pcall(handler.source_update_connection, handler, source_meta.id, conn_id, spec)
-          if not ok then
-            utils.log("error", "Failed to update connection: " .. tostring(err))
-          end
-          cb()
-        end,
-      })
+      opts.open_edit_connection(source_meta, conn_id, cb)
     end
   end
 
