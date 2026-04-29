@@ -1245,6 +1245,30 @@ local function count_cached_tables(cache)
   return #cache:get_all_table_names()
 end
 
+local function install_schema_cache_load_spy(state)
+  local SchemaCache = require("dbee.lsp.schema_cache")
+  local original = SchemaCache.load_from_disk
+  state.disk_load_called = 0
+  state.disk_load_result = false
+  state.disk_load_table_count = 0
+  state.disk_load_schema_count = 0
+  state.disk_load_has_seed_table = false
+  SchemaCache.load_from_disk = function(cache, ...)
+    local loaded = original(cache, ...)
+    state.disk_load_called = state.disk_load_called + 1
+    state.disk_load_result = loaded == true
+    state.disk_load_table_count = count_cached_tables(cache)
+    state.disk_load_schema_count = #cache:get_schemas()
+    local seed_schema = schema_for_index(1)
+    local seed_table = table_for_index(1)
+    state.disk_load_has_seed_table = cache:get_tables(seed_schema)[seed_table] ~= nil
+    return loaded
+  end
+  return function()
+    SchemaCache.load_from_disk = original
+  end
+end
+
 local function cache_index_path(conn_id)
   return vim.fn.stdpath("state") .. "/dbee/lsp_cache/" .. conn_id .. ".json"
 end
@@ -1678,6 +1702,10 @@ end
 
 local function startup_run(state, finish, _, slug)
   local elapsed_ns = nil
+  local restore_load_spy = nil
+  if state.label == "warm" then
+    restore_load_spy = install_schema_cache_load_spy(state)
+  end
   with_fake_lsp_state(state.handler, function(lsp_module)
     local lsp
     -- TIMER WINDOW START: production startup begins here.
@@ -1710,6 +1738,15 @@ local function startup_run(state, finish, _, slug)
         end
       else
         emit("LSP01_WARM_DISK_DEFERRED_CALLBACK_COUNT", count)
+        local disk_loaded = state.disk_load_called == 1
+          and state.disk_load_result == true
+          and state.disk_load_table_count == 100
+          and state.disk_load_schema_count == 10
+          and state.disk_load_has_seed_table == true
+        emit("LSP01_STARTUP_WARM_DISK_LOADED", disk_loaded and "true" or "false")
+        if not disk_loaded then
+          scenario_sentinels[slug] = false
+        end
       end
       if state.handler.metadata_execute_count ~= 0 then
         scenario_sentinels[slug] = false
@@ -1725,6 +1762,9 @@ local function startup_run(state, finish, _, slug)
       scenario_sentinels[slug] = false
     end
   end)
+  if restore_load_spy then
+    restore_load_spy()
+  end
   if not elapsed_ns then
     fail("startup sample did not record elapsed time: " .. slug)
   end
