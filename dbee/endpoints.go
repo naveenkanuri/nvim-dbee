@@ -164,14 +164,22 @@ func mountEndpoints(p *plugin.Plugin, h *handler.Handler) {
 				Type string `msgpack:"type"`
 				Name string `msgpack:"name"`
 			} `msgpack:",array"`
+			CreateOpts *struct {
+				PreserveNilCurrent bool `msgpack:"preserve_nil_current"`
+			}
 		},
 		) (core.ConnectionID, error) {
+			createOpts := handler.CreateConnectionOpts{}
+			if args.CreateOpts != nil {
+				createOpts.PreserveNilCurrent = args.CreateOpts.PreserveNilCurrent
+			}
+
 			return h.CreateConnection(&core.ConnectionParams{
 				ID:   core.ConnectionID(args.Opts.ID),
 				Name: args.Opts.Name,
 				Type: args.Opts.Type,
 				URL:  args.Opts.URL,
-			})
+			}, createOpts)
 		})
 
 	p.RegisterEndpoint(

@@ -51,3 +51,31 @@ func TestClearCurrentConnectionResetsSelectionAndAllowsFreshAutoSelect(t *testin
 
 	require.Equal(t, newConnID, h.currentConnectionID)
 }
+
+func TestCreateConnectionPreserveNilCurrentSuppressesAutoSelect(t *testing.T) {
+	typeName := "handler-preserve-nil-current-probe"
+	require.NoError(t, new(adapters.Mux).AddAdapter(typeName, &connectionTestProbeAdapter{}))
+
+	h := &Handler{
+		events:               &eventBus{},
+		lookupConnection:     map[core.ConnectionID]*core.Connection{},
+		lookupCall:           make(map[core.CallID]*core.Call),
+		lookupConnectionCall: make(map[core.ConnectionID][]core.CallID),
+	}
+
+	newConnID, err := h.CreateConnection(&core.ConnectionParams{
+		ID:   "conn-preserve-nil",
+		Name: "Preserve Nil",
+		Type: typeName,
+		URL:  "probe://ok",
+	}, CreateConnectionOpts{PreserveNilCurrent: true})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if conn := h.lookupConnection[newConnID]; conn != nil {
+			conn.Close()
+		}
+	})
+
+	require.Empty(t, h.currentConnectionID)
+	require.Len(t, h.lookupConnection, 1)
+}

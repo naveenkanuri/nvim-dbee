@@ -267,7 +267,7 @@ local function install_dbee_functions(runtime)
     runtime.connections[conn_id] = nil
   end
 
-  vim.fn.DbeeCreateConnection = function(spec)
+  vim.fn.DbeeCreateConnection = function(spec, create_opts)
     local copy = {
       id = spec.id,
       name = spec.name,
@@ -276,8 +276,12 @@ local function install_dbee_functions(runtime)
     }
     runtime.connections[copy.id] = copy
     runtime.created_connections[#runtime.created_connections + 1] = copy
-    if runtime.current_conn_id == nil then
+    if runtime.current_conn_id == nil and not (create_opts and create_opts.preserve_nil_current == true) then
       runtime.current_conn_id = copy.id
+      events.trigger("current_connection_changed", {
+        conn_id = copy.id,
+        cleared = false,
+      })
     end
     return copy.id
   end
@@ -300,6 +304,9 @@ local function install_dbee_functions(runtime)
   end
 
   vim.fn.DbeeSetCurrentConnection = function(conn_id)
+    if runtime.current_conn_id == conn_id then
+      return
+    end
     runtime.current_conn_id = conn_id
     events.trigger("current_connection_changed", {
       conn_id = conn_id,
@@ -308,6 +315,9 @@ local function install_dbee_functions(runtime)
   end
 
   vim.fn.DbeeClearCurrentConnection = function()
+    if runtime.current_conn_id == nil then
+      return
+    end
     runtime.current_conn_id = nil
     events.trigger("current_connection_changed", {
       conn_id = vim.NIL,
@@ -598,6 +608,7 @@ local function new_env(opts)
     connection_test_spec_calls = {},
     connection_invalidated_events = {},
     source_reload_failed_events = {},
+    current_connection_changed_events = {},
     created_connections = {},
     structure_requests = {},
     column_requests = {},
@@ -699,6 +710,9 @@ local function new_env(opts)
   handler:register_event_listener("source_reload_failed", function(data)
     runtime.source_reload_failed_events[#runtime.source_reload_failed_events + 1] = vim.deepcopy(data)
   end)
+  handler:register_event_listener("current_connection_changed", function(data)
+    runtime.current_connection_changed_events[#runtime.current_connection_changed_events + 1] = vim.deepcopy(data)
+  end)
 
   local host_buf, winid = Harness.with_window()
   drawer:show(winid)
@@ -760,6 +774,7 @@ local function clear_runtime_observations(runtime)
   runtime.connection_test_spec_calls = {}
   runtime.connection_invalidated_events = {}
   runtime.source_reload_failed_events = {}
+  runtime.current_connection_changed_events = {}
   runtime.call_order = {}
   if runtime.last_wizard and runtime.last_wizard.close then
     pcall(runtime.last_wizard.close, runtime.last_wizard)
@@ -1317,6 +1332,7 @@ local function run_partial_failure_contract()
   assert_true("partial failure reload failed emitted: " .. vim.inspect(env.runtime.source_reload_failed_events), reload_failed ~= nil)
   assert_eq("partial failure current nil", env.runtime.current_conn_id, nil)
   assert_eq("partial failure event current nil", invalidated.current_conn_id_after, nil)
+  assert_eq("partial failure no transient activation", #env.runtime.current_connection_changed_events, 0)
   assert_eq("partial failure reload stage", reload_failed.stage, "reload")
 
   local persisted = find_record(read_json(env.file_path), "conn-form")
@@ -1379,6 +1395,7 @@ local function run_no_auto_activate_contract()
     local event = latest_connection_invalidated(env.runtime, "source_add")
     assert_eq("nil current preserved", env.runtime.current_conn_id, nil)
     assert_eq("event nil current preserved", event.current_conn_id_after, nil)
+    assert_eq("nil current no transient activation", #env.runtime.current_connection_changed_events, 0)
     env:cleanup()
   end
 

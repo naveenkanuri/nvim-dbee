@@ -943,7 +943,17 @@ function Handler:_source_reload_silent(source_id, opts)
         break
       end
 
-      local ok_create, conn_id_or_err = pcall(vim.fn.DbeeCreateConnection, spec)
+      local create_opts = nil
+      if opts.preserve_nil_current == true and current_conn_id_before == nil then
+        create_opts = { preserve_nil_current = true }
+      end
+
+      local ok_create, conn_id_or_err = nil, nil
+      if create_opts then
+        ok_create, conn_id_or_err = pcall(vim.fn.DbeeCreateConnection, spec, create_opts)
+      else
+        ok_create, conn_id_or_err = pcall(vim.fn.DbeeCreateConnection, spec)
+      end
       if not ok_create then
         reload_error = {
           error_kind = "reload_failed",

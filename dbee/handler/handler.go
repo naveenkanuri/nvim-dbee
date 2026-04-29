@@ -35,6 +35,10 @@ type Handler struct {
 	nextStructureReqID  atomic.Uint64
 }
 
+type CreateConnectionOpts struct {
+	PreserveNilCurrent bool
+}
+
 func New(vim *nvim.Nvim, logger *plugin.Logger) *Handler {
 	h := &Handler{
 		vim: vim,
@@ -81,7 +85,12 @@ func (h *Handler) Close() {
 	}
 }
 
-func (h *Handler) CreateConnection(params *core.ConnectionParams) (core.ConnectionID, error) {
+func (h *Handler) CreateConnection(params *core.ConnectionParams, opts ...CreateConnectionOpts) (core.ConnectionID, error) {
+	createOpts := CreateConnectionOpts{}
+	if len(opts) > 0 {
+		createOpts = opts[0]
+	}
+
 	c, err := adapters.NewConnection(params)
 	if err != nil {
 		return "", fmt.Errorf("adapters.NewConnection: %w", err)
@@ -96,7 +105,7 @@ func (h *Handler) CreateConnection(params *core.ConnectionParams) (core.Connecti
 	h.lookupConnection[c.GetID()] = c
 	// Keep initial startup behavior, but do not auto-select unrelated survivors
 	// after a reload deleted the previous logical current connection.
-	if h.currentConnectionID == "" {
+	if h.currentConnectionID == "" && !createOpts.PreserveNilCurrent {
 		_ = h.SetCurrentConnection(c.GetID())
 	}
 
