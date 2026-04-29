@@ -764,7 +764,7 @@ register_cached_completion(
   "COMPLETION_TABLE_100",
   "completion_table_100",
   100,
-  "select * from ",
+  "select * from T",
   { "TABLE_000001", "TABLE_000100" },
   {
     forbidden = { "TABLE_999999" },
@@ -777,7 +777,7 @@ register_cached_completion(
   "COMPLETION_TABLE_1000",
   "completion_table_1000",
   1000,
-  "select * from ",
+  "select * from T",
   { "TABLE_000001", "TABLE_001000" },
   {
     forbidden = { "TABLE_999999" },
@@ -790,7 +790,7 @@ register_cached_completion(
   "COMPLETION_TABLE_10000",
   "completion_table_10000",
   10000,
-  "select * from ",
+  "select * from T",
   { "TABLE_000001", "TABLE_010000" },
   {
     forbidden = { "TABLE_999999" },
@@ -803,7 +803,7 @@ register_cached_completion(
   "COMPLETION_SCHEMA",
   "completion_schema",
   100,
-  "select * from ",
+  "select * from S",
   { "SCHEMA_001" },
   {
     forbidden = { "_missing_schema" },
