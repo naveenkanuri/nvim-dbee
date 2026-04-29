@@ -61,6 +61,12 @@ local function unique_nonempty(...)
   return out
 end
 
+---@param materializations string[]
+---@return string
+local function materialization_identity(materializations)
+  return table.concat(materializations or MATERIALIZATIONS, ",")
+end
+
 ---@param items table[]
 ---@return table[]
 local function copy_items(items)
@@ -337,13 +343,15 @@ end
 ---@param conn_id connection_id
 ---@param schema string
 ---@param table_name string
+---@param materializations string
 ---@param root_epoch integer
 ---@return string
-function SchemaCache:_async_chain_key(conn_id, schema, table_name, root_epoch)
+function SchemaCache:_async_chain_key(conn_id, schema, table_name, materializations, root_epoch)
   return table.concat({
     tostring(conn_id or ""),
     tostring(schema or ""),
     tostring(table_name or ""),
+    tostring(materializations or ""),
     tostring(root_epoch or 0),
   }, "|")
 end
@@ -980,7 +988,16 @@ function SchemaCache:get_columns_async(schema, table_name, opts)
   end
 
   local root_epoch = self:_root_epoch(opts)
-  local chain_key = self:_async_chain_key(self.conn_id, schema, table_name, root_epoch)
+  local materializations = opts.materializations
+    or (opts.materialization and { opts.materialization })
+    or MATERIALIZATIONS
+  local chain_key = self:_async_chain_key(
+    self.conn_id,
+    schema,
+    table_name,
+    materialization_identity(materializations),
+    root_epoch
+  )
   if self.async_failed[chain_key] then
     return {
       columns = {},
@@ -1029,7 +1046,7 @@ function SchemaCache:get_columns_async(schema, table_name, opts)
     chain_key = chain_key,
     schema_candidates = schema_candidates,
     table_candidates = table_candidates,
-    materializations = opts.materializations or MATERIALIZATIONS,
+    materializations = materializations,
     schema_index = 1,
     table_index = 1,
     materialization_index = 1,

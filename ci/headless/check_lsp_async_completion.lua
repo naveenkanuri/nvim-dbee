@@ -187,6 +187,25 @@ deliver(view_env.cache, view_env.calls[2], {
 local view_warm = request(view_env.client, view_env.bufnr, view_line)
 assert_true("view warm label", has_label(view_warm, "VIEW_COL"))
 
+local materialization_env = new_async_env("async-materialization")
+local table_only = materialization_env.cache:get_columns_async("S", "T", { materialization = "table" })
+local view_only = materialization_env.cache:get_columns_async("S", "T", { materialization = "view" })
+assert_eq("table-only incomplete", table_only.is_incomplete, true)
+assert_eq("view-only incomplete", view_only.is_incomplete, true)
+assert_eq("materialization distinct call count", #materialization_env.calls, 2)
+assert_eq("materialization call 1", materialization_env.calls[1].opts.materialization, "table")
+assert_eq("materialization call 2", materialization_env.calls[2].opts.materialization, "view")
+assert_true("materialization branch differs", materialization_env.calls[1].branch_id ~= materialization_env.calls[2].branch_id)
+deliver(materialization_env.cache, materialization_env.calls[1], {
+  { name = "TABLE_ONLY_COL", type = "NUMBER" },
+})
+assert_true("table materialization resolved", #materialization_env.cache:get_column_completion_items("S", "T") == 1)
+deliver(materialization_env.cache, materialization_env.calls[2], {
+  { name = "VIEW_ONLY_COL", type = "VARCHAR2" },
+})
+local materialized_items = materialization_env.cache:get_column_completion_items("S", "T")
+assert_eq("view materialization resolved", materialized_items[1].label, "VIEW_ONLY_COL")
+
 local listeners = {}
 local fake_state = {}
 local event_calls = {}
@@ -263,6 +282,7 @@ print("LSP11_ASYNC_NO_SYNC_FETCH=true")
 print("LSP11_ASYNC_FAILURE_HANDLED=true")
 print("LSP11_ASYNC_PAYLOAD_ERROR_HANDLED=true")
 print("LSP11_ASYNC_MATERIALIZATION_PROBE_CHAIN_OK=true")
+print("LSP11_ASYNC_DEDUPE_MATERIALIZATION_AWARE=true")
 print("LSP11_ASYNC_EVENT_WIRING_OK=true")
 print("LSP11_ASYNC_AUTO_RETRIGGER_OK=true")
 
