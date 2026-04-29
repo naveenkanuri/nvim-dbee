@@ -276,7 +276,7 @@ local function compute_diagnostics(text, cache)
     local pattern = "()%f[%a]" .. keyword_pattern(keyword) .. "%f[%A]%s+()([%w_%.]+)"
     local init = 1
     while true do
-      local match_start, match_end, ref_start, ref = statement.text:find(pattern, init)
+      local match_start, match_end, _, ref_start, ref = statement.text:find(pattern, init)
       if not match_start then
         break
       end
