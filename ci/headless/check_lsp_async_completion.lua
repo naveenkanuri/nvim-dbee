@@ -174,6 +174,39 @@ local after_error = request(error_env.client, error_env.bufnr, line)
 assert_eq("payload error not incomplete", after_error.isIncomplete, false)
 assert_eq("payload error empty", #after_error.items, 0)
 
+local sync_delivery_cache = nil
+local sync_delivery_calls = 0
+local sync_delivery_handler = {
+  get_authoritative_root_epoch = function()
+    return 1
+  end,
+  connection_get_columns_async = function(_, id, request_id, branch_id, root_epoch)
+    sync_delivery_calls = sync_delivery_calls + 1
+    sync_delivery_cache:on_columns_loaded({
+      conn_id = id,
+      request_id = request_id,
+      branch_id = branch_id,
+      root_epoch = root_epoch,
+      kind = "columns",
+      columns = {
+        { name = "SYNC_DELIVERED_COL", type = "NUMBER" },
+      },
+    })
+  end,
+}
+sync_delivery_cache = SchemaCache:new(sync_delivery_handler, "async-sync-delivery")
+sync_delivery_cache:build_from_metadata_rows({
+  { schema_name = "S", table_name = "T", obj_type = "table" },
+})
+local sync_delivery_first = sync_delivery_cache:get_columns_async("S", "T")
+assert_eq("sync delivery first incomplete", sync_delivery_first.is_incomplete, true)
+assert_eq("sync delivery call count", sync_delivery_calls, 1)
+assert_eq("sync delivery inflight drained", vim.tbl_count(sync_delivery_cache.async_inflight), 0)
+assert_eq("sync delivery chains drained", vim.tbl_count(sync_delivery_cache.async_chains), 0)
+local sync_delivery_warm = sync_delivery_cache:get_columns_async("S", "T")
+assert_eq("sync delivery warm complete", sync_delivery_warm.is_incomplete, false)
+assert_eq("sync delivery warmed column count", #sync_delivery_warm.columns, 1)
+
 local view_env = new_async_env("async-view")
 local view_line = "select * from S.VIEW_ONLY v where v."
 local view_first = request(view_env.client, view_env.bufnr, view_line)
@@ -233,6 +266,54 @@ deliver(overlap_reversed_env.cache, overlap_reversed_env.calls[2], {
   { name = "OVERLAP_VIEW_COL", type = "VARCHAR2" },
 })
 assert_true("overlap reversed view warmed", #overlap_reversed_env.cache:get_column_completion_items("S", "T") == 1)
+
+local incremental_calls = {}
+local incremental_handler = {
+  get_authoritative_root_epoch = function()
+    return 1
+  end,
+  connection_get_columns_async = function(_, id, request_id, branch_id, root_epoch, opts)
+    incremental_calls[#incremental_calls + 1] = {
+      conn_id = id,
+      request_id = request_id,
+      branch_id = branch_id,
+      root_epoch = root_epoch,
+      opts = opts,
+    }
+  end,
+}
+local incremental_cache = SchemaCache:new(incremental_handler, "async-incremental")
+local incremental_rows = {}
+for i = 1, 100 do
+  incremental_rows[#incremental_rows + 1] = {
+    schema_name = "S",
+    table_name = string.format("INC_%03d", i),
+    obj_type = "table",
+  }
+end
+incremental_cache:build_from_metadata_rows(incremental_rows)
+local full_rebuilds = 0
+local column_updates = 0
+local original_rebuild = incremental_cache._rebuild_structure_indexes
+local original_update = incremental_cache._update_column_index
+incremental_cache._rebuild_structure_indexes = function(self)
+  full_rebuilds = full_rebuilds + 1
+  return original_rebuild(self)
+end
+incremental_cache._update_column_index = function(self, schema_name, table_name)
+  column_updates = column_updates + 1
+  return original_update(self, schema_name, table_name)
+end
+for i = 1, 100 do
+  local table_name = string.format("INC_%03d", i)
+  local result = incremental_cache:get_columns_async("S", table_name)
+  assert_eq("incremental incomplete " .. table_name, result.is_incomplete, true)
+  deliver(incremental_cache, incremental_calls[#incremental_calls], {
+    { name = "COL_" .. table_name, type = "NUMBER" },
+  })
+end
+assert_eq("async full rebuild count", full_rebuilds, 0)
+assert_true("async incremental column updates", column_updates >= 100)
 
 local listeners = {}
 local fake_state = {}
@@ -309,8 +390,10 @@ print("LSP11_ASYNC_WARM_LABELS=true")
 print("LSP11_ASYNC_NO_SYNC_FETCH=true")
 print("LSP11_ASYNC_FAILURE_HANDLED=true")
 print("LSP11_ASYNC_PAYLOAD_ERROR_HANDLED=true")
+print("LSP11_ASYNC_SYNC_DELIVERY_OK=true")
 print("LSP11_ASYNC_MATERIALIZATION_PROBE_CHAIN_OK=true")
 print("LSP11_ASYNC_DEDUPE_MATERIALIZATION_AWARE=true")
+print("LSP11_ASYNC_INDEX_INCREMENTAL=true")
 print("LSP11_ASYNC_EVENT_WIRING_OK=true")
 print("LSP11_ASYNC_AUTO_RETRIGGER_OK=true")
 

@@ -2106,13 +2106,32 @@ local function large_disk_startup_run(state, finish, slug)
     end
 
     local stats = lsp._cache and lsp._cache:get_stats() or {}
+    if state.count > (stats.sync_column_file_load_limit or 100) then
+      vim.wait(1000, function()
+        stats = lsp._cache and lsp._cache:get_stats() or {}
+        return (stats.deferred_column_files_scheduled or 0) > 0
+          or (stats.deferred_column_files_processed or 0) > 0
+          or stats.deferred_disk_work_drained == true
+      end, 10)
+    end
     emit("LSP01_STARTUP_LARGE_DISK_CACHE_DISCOVERY_COUNT", stats.sync_column_files_discovered or "NA")
+    emit("LSP01_STARTUP_LARGE_DISK_CACHE_TOTAL_FS_OPS", stats.sync_column_files_scanned or "NA")
     emit("LSP01_STARTUP_LARGE_DISK_CACHE_SYNC_LOAD_COUNT", stats.sync_column_files_loaded or "NA")
+    emit("LSP01_STARTUP_LARGE_DISK_CACHE_DEFERRED_SCHEDULED_COUNT", stats.deferred_column_files_scheduled or "NA")
     local deferred_scheduled = (stats.deferred_column_files_scheduled or 0) > 0
+      or (stats.deferred_column_files_processed or 0) > 0
     emit("LSP01_STARTUP_LARGE_DISK_CACHE_DEFERRED_WORK_SCHEDULED", deferred_scheduled and "true" or "false")
-    local discovery_bounded = (stats.sync_column_files_discovered or math.huge) <= 100
-    local deferred_bounded = deferred_scheduled
-    local bounded = discovery_bounded and deferred_bounded and (stats.sync_column_files_loaded or math.huge) <= 100
+    local load_limit = stats.sync_column_file_load_limit or 100
+    local scan_limit = stats.sync_column_file_scan_limit or 200
+    local discovery_count_bounded = (stats.sync_column_files_discovered or math.huge) <= load_limit
+    local scan_bounded = (stats.sync_column_files_scanned or math.huge) <= scan_limit
+    local discovery_bounded = discovery_count_bounded and scan_bounded
+    local deferred_expected = state.count > load_limit
+    local deferred_bounded = (not deferred_expected) or deferred_scheduled
+    local bounded = discovery_bounded
+      and scan_bounded
+      and deferred_bounded
+      and (stats.sync_column_files_loaded or math.huge) <= load_limit
     emit("LSP11_DISK_DISCOVERY_BOUNDED", discovery_bounded and "true" or "false")
     emit("LSP11_DISK_LOAD_BOUNDED", bounded and "true" or "false")
     if not bounded then

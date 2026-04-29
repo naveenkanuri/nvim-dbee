@@ -44,6 +44,13 @@ local function new_cache(conn_id)
   return cache
 end
 
+local function new_isolated_cache(conn_id)
+  local cache = SchemaCache:new({}, conn_id)
+  cache.cache_dir = root .. "/" .. conn_id .. "/lsp_cache"
+  vim.fn.mkdir(cache.cache_dir, "p")
+  return cache
+end
+
 local function write_file(path, content)
   vim.fn.mkdir(vim.fn.fnamemodify(path, ":h"), "p")
   local f = assert(io.open(path, "w"))
@@ -97,6 +104,7 @@ local malformed_schema_payloads = {
   [[{"schemas":"bad","tables":{}}]],
   [[{"schemas":["S"],"tables":"bad"}]],
   [[{"schemas":["S"],"tables":{"S":[]}}]],
+  [[{"schemas":[],"tables":{"S":{"T":{"type":"table"}}}}]],
   [[null]],
   [[]],
 }
@@ -133,7 +141,7 @@ for index, payload in ipairs(malformed_column_payloads) do
   assert_true("malformed column removed " .. index, vim.fn.filereadable(corrupt_col) == 0)
 end
 
-local prune_cache = new_cache("disk-prune")
+local prune_cache = new_isolated_cache("disk-prune")
 local uv = vim.uv or vim.loop
 for i = 1, 3 do
   local key = string.format("S.OLD_%03d", i)
@@ -149,7 +157,7 @@ vim.wait(1000, function()
 end, 20)
 assert_true("old files pruned", prune_cache:get_stats().disk_pruned >= 3)
 
-local large_cache = new_cache("disk-large")
+local large_cache = new_isolated_cache("disk-large")
 large_cache:build_from_metadata_rows({
   { schema_name = "S", table_name = "T", obj_type = "table" },
 })
@@ -164,9 +172,73 @@ assert_eq("large schema loads", large_cache:load_from_disk(), true)
 local large_stats = large_cache:get_stats()
 assert_true("sync discovery bounded", large_stats.sync_column_files_discovered <= 100)
 assert_true("sync load bounded", large_stats.sync_column_files_loaded <= 100)
+assert_true("sync scan bounded", large_stats.sync_column_files_scanned <= large_stats.sync_column_file_scan_limit)
 large_cache:cancel_async("test")
 
-local deferred_prune_cache = new_cache("disk-deferred-prune")
+local small_cache = new_isolated_cache("disk-small")
+small_cache:build_from_metadata_rows({
+  { schema_name = "S", table_name = "T", obj_type = "table" },
+})
+small_cache:save_to_disk()
+for i = 1, 50 do
+  local key = string.format("S.SMALL_%03d", i)
+  write_file(small_cache:_columns_cache_path(key), vim.json.encode({
+    { name = "ID", type = "NUMBER" },
+  }))
+end
+assert_eq("small schema loads", small_cache:load_from_disk(), true)
+vim.wait(1000, function()
+  return small_cache:get_stats().deferred_disk_work_drained
+end, 20)
+local small_stats = small_cache:get_stats()
+assert_eq("small sync load count", small_stats.sync_column_files_loaded, 50)
+assert_eq("small deferred scheduled count", small_stats.deferred_column_files_scheduled, 0)
+
+local bounded_scan_cache = new_isolated_cache("disk-bounded-scan")
+bounded_scan_cache:build_from_metadata_rows({
+  { schema_name = "S", table_name = "T", obj_type = "table" },
+})
+bounded_scan_cache:save_to_disk()
+for i = 1, 50 do
+  local key = string.format("S.CURRENT_%03d", i)
+  write_file(bounded_scan_cache:_columns_cache_path(key), vim.json.encode({
+    { name = "ID", type = "NUMBER" },
+  }))
+end
+for i = 1, 10000 do
+  write_file(bounded_scan_cache.cache_dir .. "/" .. string.format("other_conn_cols_%05d.json", i), vim.json.encode({
+    { name = "OTHER_ID", type = "NUMBER" },
+  }))
+end
+assert_eq("bounded scan schema loads", bounded_scan_cache:load_from_disk(), true)
+local bounded_scan_stats = bounded_scan_cache:get_stats()
+assert_true("unrelated scan bounded", bounded_scan_stats.sync_column_files_scanned <= bounded_scan_stats.sync_column_file_scan_limit)
+assert_true("current files prioritized", bounded_scan_stats.sync_column_files_loaded > 0)
+
+local deferred_count_cache = new_isolated_cache("disk-deferred-count")
+deferred_count_cache:build_from_metadata_rows({
+  { schema_name = "S", table_name = "T", obj_type = "table" },
+})
+deferred_count_cache:save_to_disk()
+for i = 1, 200 do
+  local key = string.format("S.DEFERRED_COUNT_%03d", i)
+  write_file(deferred_count_cache:_columns_cache_path(key), vim.json.encode({
+    { name = "ID", type = "NUMBER" },
+  }))
+end
+assert_eq("deferred count schema loads", deferred_count_cache:load_from_disk(), true)
+vim.wait(1000, function()
+  return deferred_count_cache:get_stats().deferred_column_files_scheduled > 0
+end, 20)
+local deferred_count_stats = deferred_count_cache:get_stats()
+assert_true("deferred count sync bounded", deferred_count_stats.sync_column_files_loaded <= 100)
+assert_true("deferred count scheduled real remainder", deferred_count_stats.deferred_column_files_scheduled > 0)
+vim.wait(3000, function()
+  return deferred_count_cache:get_stats().deferred_disk_work_drained
+end, 20)
+assert_true("deferred count processed", deferred_count_cache:get_stats().deferred_column_files_processed > 0)
+
+local deferred_prune_cache = new_isolated_cache("disk-deferred-prune")
 deferred_prune_cache:build_from_metadata_rows({
   { schema_name = "S", table_name = "T", obj_type = "table" },
 })
@@ -193,7 +265,7 @@ assert_true("deferred prune processed remainder", deferred_stats.deferred_column
 assert_true("deferred prune removed all old files", deferred_stats.disk_pruned >= 150)
 assert_eq("deferred prune files gone", #vim.fn.glob(deferred_prune_cache.cache_dir .. "/" .. "disk-deferred-prune_cols_*.json", false, true), 0)
 
-local fenced_cache = new_cache("disk-fenced")
+local fenced_cache = new_isolated_cache("disk-fenced")
 local fenced_files = {}
 for i = 1, 125 do
   local key = string.format("S.DEFER_%03d", i)
@@ -221,6 +293,7 @@ print("LSP11_ATOMIC_WRITE_OK=true")
 print("LSP11_CORRUPT_CACHE_RECOVERED=true")
 print("LSP11_DISK_CORRUPT_RECOVERY_OK=true")
 print("LSP11_DISK_INDEX_CORRUPT_RECOVERY_OK=true")
+print("LSP11_DISK_INDEX_CROSS_FIELD_OK=true")
 print("LSP11_DISK_PRUNE_COUNT=" .. tostring(prune_cache:get_stats().disk_pruned))
 print("LSP11_DISK_CACHE_ISOLATED=true")
 print("LSP11_DISK_LOAD_BOUNDED=true")

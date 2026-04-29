@@ -23,6 +23,7 @@ local nio = require("nio")
 
 local MAX_COLUMNS_IN_MEMORY = 500
 local SYNC_COLUMN_FILE_LOAD_LIMIT = 100
+local SYNC_COLUMN_FILE_SCAN_LIMIT = 200
 local COLUMN_CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
 local MATERIALIZATIONS = { "table", "view" }
 
@@ -102,6 +103,7 @@ function SchemaCache:new(handler, conn_id)
     column_evictions = 0,
     disk_pruned = 0,
     sync_column_files_discovered = 0,
+    sync_column_files_scanned = 0,
     sync_column_files_loaded = 0,
     deferred_column_files_scheduled = 0,
     deferred_column_files_processed = 0,
@@ -260,6 +262,72 @@ function SchemaCache:_rebuild_structure_indexes()
   end)
   for _, item in ipairs(self.all_table_items) do
     self.all_table_names[#self.all_table_names + 1] = item.label
+  end
+end
+
+---@private
+---@param schema string
+---@param name string
+---@param table_type string
+function SchemaCache:_upsert_table_index(schema, name, table_type)
+  table_type = table_type or "table"
+  local new_schema = not self.schemas[schema]
+  self.schemas[schema] = true
+  self.schema_lookup[fold(schema)] = self.schema_lookup[fold(schema)] or schema
+
+  if not self.tables[schema] then
+    self.tables[schema] = {}
+  end
+  local existing = self.tables[schema][name]
+  self.tables[schema][name] = { type = table_type }
+
+  if new_schema and schema ~= "_default" then
+    self.schema_items[#self.schema_items + 1] = {
+      label = schema,
+      kind = CompletionItemKind.Module,
+      detail = "schema",
+      insertText = schema,
+      sortText = "0_" .. schema,
+    }
+    table.sort(self.schema_items, function(a, b)
+      return a.label < b.label
+    end)
+  end
+
+  if existing then
+    return
+  end
+
+  local schema_lookup = self.table_lookup_by_schema[schema] or {}
+  schema_lookup[fold(name)] = schema_lookup[fold(name)] or name
+  self.table_lookup_by_schema[schema] = schema_lookup
+  self.table_lookup_global[fold(name)] = self.table_lookup_global[fold(name)]
+    or { name = name, schema = schema }
+
+  local detail = (schema ~= "_default") and (schema .. "." .. name) or name
+  local item = {
+    label = name,
+    kind = (table_type == "view") and CompletionItemKind.Class or CompletionItemKind.Struct,
+    detail = detail .. " (" .. table_type .. ")",
+    insertText = name,
+    sortText = "0_" .. name,
+  }
+
+  if not self.table_items_by_schema[schema] then
+    self.table_items_by_schema[schema] = {}
+  end
+  self.table_items_by_schema[schema][#self.table_items_by_schema[schema] + 1] = item
+  table.sort(self.table_items_by_schema[schema], function(a, b)
+    return a.label < b.label
+  end)
+
+  self.all_table_items[#self.all_table_items + 1] = item
+  table.sort(self.all_table_items, function(a, b)
+    return a.label < b.label
+  end)
+  self.all_table_names = {}
+  for _, table_item in ipairs(self.all_table_items) do
+    self.all_table_names[#self.all_table_names + 1] = table_item.label
   end
 end
 
@@ -449,18 +517,6 @@ function SchemaCache:_queue_async_probe(entry)
     return true
   end
 
-  local ok = pcall(self.handler.connection_get_columns_async, self.handler, entry.conn_id, request_id, branch_id, entry.root_epoch, {
-    table = table_name,
-    schema = query_schema,
-    materialization = materialization,
-    kind = "columns",
-  })
-  if not ok then
-    self:_finish_async_entry(entry)
-    self.async_failed[entry.chain_key] = true
-    return false
-  end
-
   entry.active_key = key
   entry.request_id = request_id
   entry.branch_id = branch_id
@@ -479,6 +535,26 @@ function SchemaCache:_queue_async_probe(entry)
     entries = { entry },
   }
   self.async_chains[entry.chain_key] = entry
+
+  local ok = pcall(self.handler.connection_get_columns_async, self.handler, entry.conn_id, request_id, branch_id, entry.root_epoch, {
+    table = table_name,
+    schema = query_schema,
+    materialization = materialization,
+    kind = "columns",
+  })
+  if not ok then
+    local failed_probe = self.async_inflight[key]
+    if failed_probe then
+      self.async_inflight[key] = nil
+      for _, queued in ipairs(failed_probe.entries or {}) do
+        queued.active_key = nil
+        self.async_chains[queued.chain_key] = nil
+        self.async_failed[queued.chain_key] = true
+      end
+      return false
+    end
+  end
+
   return true
 end
 
@@ -609,12 +685,14 @@ function SchemaCache:_normalize_schema_index(data)
     schemas = {},
     tables = {},
   }
+  local schema_set = {}
 
   for _, schema in ipairs(data.schemas) do
     if type(schema) ~= "string" then
       return nil
     end
     normalized.schemas[#normalized.schemas + 1] = schema
+    schema_set[schema] = true
   end
 
   if data.all_table_names then
@@ -627,6 +705,9 @@ function SchemaCache:_normalize_schema_index(data)
 
   for schema, tbls in pairs(data.tables) do
     if type(schema) ~= "string" or type(tbls) ~= "table" or is_array(tbls) then
+      return nil
+    end
+    if not schema_set[schema] then
       return nil
     end
 
@@ -686,7 +767,9 @@ end
 function SchemaCache:_column_cache_files(limit)
   local prefix = self.conn_id .. "_cols_"
   local files = {}
-  local remaining = limit or SYNC_COLUMN_FILE_LOAD_LIMIT
+  local max_files = limit or SYNC_COLUMN_FILE_LOAD_LIMIT
+  local max_scans = math.max(max_files, SYNC_COLUMN_FILE_SCAN_LIMIT)
+  local scanned = 0
 
   local function add_path(path)
     local stat = self:_file_stat(path)
@@ -701,30 +784,37 @@ function SchemaCache:_column_cache_files(limit)
     local ok, iter = pcall(vim.fs.dir, self.cache_dir)
     if ok and iter then
       for name, entry_type in iter do
+        scanned = scanned + 1
         if entry_type == "file"
           and name:sub(1, #prefix) == prefix
           and name:sub(-5) == ".json"
         then
           add_path(self.cache_dir .. "/" .. name)
-          remaining = remaining - 1
-          if remaining <= 0 then
-            break
-          end
+        end
+        if #files >= max_files or scanned >= max_scans then
+          break
         end
       end
     end
   else
     local pattern = self.cache_dir .. "/" .. prefix .. "*.json"
     for _, path in ipairs(vim.fn.glob(pattern, false, true)) do
+      scanned = scanned + 1
       add_path(path)
-      remaining = remaining - 1
-      if remaining <= 0 then
+      if #files >= max_files or scanned >= max_scans then
         break
       end
     end
   end
 
+  table.sort(files, function(a, b)
+    if a.mtime == b.mtime then
+      return a.path < b.path
+    end
+    return a.mtime > b.mtime
+  end)
   self.sync_column_files_discovered = #files
+  self.sync_column_files_scanned = scanned
   return files
 end
 
@@ -810,7 +900,6 @@ function SchemaCache:_schedule_deferred_column_scan(seen_paths)
   local fallback_index = 1
   local tried_iter = false
 
-  self.deferred_column_files_scheduled = math.max(self.deferred_column_files_scheduled or 0, 1)
   self.deferred_disk_work_scheduled = true
   self.deferred_disk_work_drained = false
 
@@ -874,6 +963,7 @@ function SchemaCache:_schedule_deferred_column_scan(seen_paths)
         return
       end
 
+      self.deferred_column_files_scheduled = (self.deferred_column_files_scheduled or 0) + 1
       local stat = self:_file_stat(path)
       if not self:_prune_if_old(path, stat, now) then
         self:_load_column_file(path, prefix)
@@ -1088,6 +1178,7 @@ end
 function SchemaCache:_load_columns_from_disk()
   self.sync_column_files_loaded = 0
   self.sync_column_files_discovered = 0
+  self.sync_column_files_scanned = 0
   self.deferred_column_files_scheduled = 0
   self.deferred_column_files_processed = 0
   self.deferred_disk_work_scheduled = false
@@ -1124,6 +1215,7 @@ function SchemaCache:get_stats()
     column_evictions = self.column_evictions or 0,
     disk_pruned = self.disk_pruned or 0,
     sync_column_files_discovered = self.sync_column_files_discovered or 0,
+    sync_column_files_scanned = self.sync_column_files_scanned or 0,
     sync_column_files_loaded = self.sync_column_files_loaded or 0,
     deferred_column_files_scheduled = self.deferred_column_files_scheduled or 0,
     deferred_column_files_processed = self.deferred_column_files_processed or 0,
@@ -1132,6 +1224,7 @@ function SchemaCache:get_stats()
     deferred_disk_work_canceled = self.deferred_disk_work_canceled or 0,
     max_columns_in_memory = MAX_COLUMNS_IN_MEMORY,
     sync_column_file_load_limit = SYNC_COLUMN_FILE_LOAD_LIMIT,
+    sync_column_file_scan_limit = SYNC_COLUMN_FILE_SCAN_LIMIT,
   }
 end
 
@@ -1358,15 +1451,9 @@ function SchemaCache:on_columns_loaded(data)
     return advanced
   end
 
-  if not self.schemas[probe.schema] then
-    self.schemas[probe.schema] = true
+  if not (self.tables[probe.schema] and self.tables[probe.schema][probe.table_name]) then
+    self:_upsert_table_index(probe.schema, probe.table_name, probe.materialization)
   end
-  if not self.tables[probe.schema] then
-    self.tables[probe.schema] = {}
-  end
-  self.tables[probe.schema][probe.table_name] = { type = probe.materialization }
-  self:_rebuild_structure_indexes()
-
   local key = table_key(probe.schema, probe.table_name)
   self:_store_columns(key, cols)
   self:_save_columns_to_disk(key, cols)
