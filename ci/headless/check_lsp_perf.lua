@@ -286,6 +286,7 @@ local function make_handler(opts)
     connection_type = connection_type,
     counters = {},
     column_fetch_deltas = {},
+    async_column_requests = {},
     metadata_execute_count = 0,
     metadata_call_id = nil,
     last_singleflight_opts = nil,
@@ -383,6 +384,20 @@ local function make_handler(opts)
     return make_columns(request_schema, request_opts.table, columns_per_table)
   end
 
+  function handler:connection_get_columns_async(request_conn_id, request_id, branch_id, root_epoch, request_opts)
+    bump("connection_get_columns_async")
+    if request_conn_id ~= conn_id then
+      error("unexpected async conn_id: " .. tostring(request_conn_id))
+    end
+    handler.async_column_requests[#handler.async_column_requests + 1] = {
+      conn_id = request_conn_id,
+      request_id = request_id,
+      branch_id = branch_id,
+      root_epoch = root_epoch,
+      opts = request_opts,
+    }
+  end
+
   function handler:connection_execute(request_conn_id, _)
     bump("connection_execute")
     if request_conn_id ~= conn_id then
@@ -456,7 +471,7 @@ local function make_cache(table_count, columns_per_table, opts)
     for i = 1, table_count do
       local schema = schema_for_index(i)
       local table_name = table_for_index(i)
-      cache.columns[schema .. "." .. table_name] = make_columns(schema, table_name, columns_per_table)
+      cache:_store_columns(schema .. "." .. table_name, make_columns(schema, table_name, columns_per_table))
     end
   end
   return cache, handler
@@ -736,7 +751,7 @@ local function request_completion(state, line_text, character, context)
   if type(response.result) ~= "table" or type(response.result.items) ~= "table" then
     error("invalid completion response")
   end
-  return response.result.items, response.elapsed_ns
+  return response.result.items, response.elapsed_ns, response.result
 end
 
 local function completion_before(table_count, opts)
@@ -979,7 +994,122 @@ local function register_column_miss_completion()
   })
 end
 
-register_column_miss_completion()
+emit("LSP01_COMPLETION_COLUMN_MISS_SYNC_LEGACY_STATUS", "historical")
+
+local function deliver_async_columns(cache, call, columns, opts)
+  opts = opts or {}
+  return cache:on_columns_loaded({
+    conn_id = call.conn_id,
+    request_id = call.request_id,
+    branch_id = call.branch_id,
+    root_epoch = opts.root_epoch or call.root_epoch,
+    kind = "columns",
+    columns = columns or {},
+    error = opts.error,
+  })
+end
+
+local function async_miss_before()
+  local cache, handler = make_cache(100, DEFAULT_COLUMNS_PER_TABLE, {
+    preload_columns = false,
+  })
+  local bufnr, uri = make_buffer({ "" })
+  local client, client_id = start_lsp(cache, bufnr)
+  return {
+    cache = cache,
+    handler = handler,
+    bufnr = bufnr,
+    uri = uri,
+    client = client,
+    client_id = client_id,
+  }
+end
+
+local function run_async_first_request(state, finish)
+  local query = "SELECT * FROM SCHEMA_001.TABLE_000001 t WHERE t."
+  local before_async = #state.handler.async_column_requests
+  local items, elapsed_ns, result = request_completion(state, query, #query)
+  local first_incomplete = result.isIncomplete == true and #items == 0
+  emit("LSP01_COMPLETION_COLUMN_MISS_ASYNC_FIRST_INCOMPLETE", first_incomplete and "true" or "false")
+  if not first_incomplete then
+    scenario_sentinels.COMPLETION_COLUMN_MISS_ASYNC_FIRST = false
+  end
+
+  local async_calls = #state.handler.async_column_requests - before_async
+  emit("LSP01_COMPLETION_COLUMN_MISS_ASYNC_FIRST_ASYNC_CALLS", async_calls)
+  if async_calls ~= 1 then
+    scenario_sentinels.COMPLETION_COLUMN_MISS_ASYNC_FIRST = false
+  end
+
+  local _, _, duplicate = request_completion(state, query, #query)
+  local deduped = duplicate.isIncomplete == true and (#state.handler.async_column_requests - before_async) == 1
+  if not deduped then
+    scenario_sentinels.COMPLETION_COLUMN_MISS_ASYNC_FIRST = false
+  end
+
+  local call = state.handler.async_column_requests[#state.handler.async_column_requests]
+  local stale_applied = deliver_async_columns(state.cache, call, make_columns(schema_for_index(1), table_for_index(1)), {
+    root_epoch = 0,
+  })
+  local stale_dropped = stale_applied == false and #state.cache:get_column_completion_items(schema_for_index(1), table_for_index(1)) == 0
+  emit("LSP01_COMPLETION_COLUMN_MISS_ASYNC_STALE_DROPPED", stale_dropped and "true" or "false")
+  if not stale_dropped then
+    scenario_sentinels.COMPLETION_COLUMN_MISS_ASYNC_FIRST = false
+  end
+
+  deliver_async_columns(state.cache, call, make_columns(schema_for_index(1), table_for_index(1)))
+  local warm_items, _, warm_result = request_completion(state, query, #query)
+  local retrigger_ok = warm_result.isIncomplete == false and has_label(warm_items, "COL_001") and has_label(warm_items, "COL_010")
+  emit("LSP01_COMPLETION_COLUMN_MISS_ASYNC_AUTO_RETRIGGER_OK", retrigger_ok and "true" or "false")
+  if not retrigger_ok then
+    scenario_sentinels.COMPLETION_COLUMN_MISS_ASYNC_FIRST = false
+  end
+
+  finish(elapsed_ns)
+end
+
+local function run_async_warm_request(state, finish)
+  local query = "SELECT * FROM SCHEMA_001.TABLE_000001 t WHERE t."
+  local _, _, first = request_completion(state, query, #query)
+  if first.isIncomplete ~= true or #state.handler.async_column_requests ~= 1 then
+    scenario_sentinels.COMPLETION_COLUMN_MISS_ASYNC_WARM = false
+  end
+  deliver_async_columns(
+    state.cache,
+    state.handler.async_column_requests[#state.handler.async_column_requests],
+    make_columns(schema_for_index(1), table_for_index(1))
+  )
+
+  local items, elapsed_ns, warm_result = request_completion(state, query, #query)
+  local labels_ok = warm_result.isIncomplete == false and has_label(items, "COL_001") and has_label(items, "COL_010") and not has_label(items, "COL_999")
+  emit("LSP01_COMPLETION_COLUMN_MISS_ASYNC_WARM_LABELS", labels_ok and "true" or "false")
+  if not labels_ok then
+    scenario_sentinels.COMPLETION_COLUMN_MISS_ASYNC_WARM = false
+  end
+  finish(elapsed_ns)
+end
+
+register({
+  slug = "COMPLETION_COLUMN_MISS_ASYNC_FIRST",
+  threshold_key = "completion_column_miss_async_first",
+  corpus = "tables:100,context:column-miss-async-first,alias:t",
+  before = async_miss_before,
+  run = function(state, finish)
+    run_async_first_request(state, finish)
+  end,
+  after = completion_after,
+})
+
+register({
+  slug = "COMPLETION_COLUMN_MISS_ASYNC_WARM",
+  threshold_key = "completion_column_miss_async_warm",
+  corpus = "tables:100,context:column-miss-async-warm,alias:t",
+  before = async_miss_before,
+  run = function(state, finish)
+    run_async_warm_request(state, finish)
+  end,
+  after = completion_after,
+})
 
 local function make_diagnostic_lines(line_count)
   local lines = {}
