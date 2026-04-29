@@ -286,6 +286,13 @@ local function parse_query_pairs(raw_query)
   return pairs, ordered_keys
 end
 
+local function has_postgres_url_scheme(raw_url)
+  if type(raw_url) ~= "string" or raw_url == "" then
+    return false
+  end
+  return vim.startswith(raw_url, "postgres://") or vim.startswith(raw_url, "postgresql://")
+end
+
 local function normalize_descriptor_text(input)
   return tostring(input or ""):gsub("%s+", "")
 end
@@ -311,7 +318,7 @@ local function render_postgres_form_url(fields)
 end
 
 local function parse_postgres_url(raw_url)
-  if type(raw_url) ~= "string" or raw_url == "" then
+  if not has_postgres_url_scheme(raw_url) then
     return nil
   end
 
@@ -323,12 +330,24 @@ local function parse_postgres_url(raw_url)
     return nil
   end
 
-  local authority, path_and_query = rest:match("^([^/]+)/(.+)$")
+  local authority, remainder = rest:match("^([^/?]+)(.*)$")
   if not authority then
     return nil
   end
 
-  local database, raw_query = path_and_query:match("^([^?]*)%??(.*)$")
+  local database = ""
+  local raw_query = ""
+  if remainder == "" then
+    remainder = ""
+  elseif vim.startswith(remainder, "/") then
+    local path_and_query = remainder:sub(2)
+    database, raw_query = path_and_query:match("^([^?]*)%??(.*)$")
+  elseif vim.startswith(remainder, "?") then
+    raw_query = remainder:sub(2)
+  else
+    return nil
+  end
+
   local userinfo, hostport = authority:match("^(.*)@([^@]+)$")
   if not hostport then
     hostport = authority
@@ -383,6 +402,34 @@ local function parse_postgres_url(raw_url)
     raw_query = raw_query or "",
     unsupported_query = unsupported_query,
   }
+end
+
+local function derive_metadata_action(state)
+  if state.preserve_existing_wizard then
+    return "preserve_existing"
+  end
+
+  if state.mode == "other_raw" then
+    return "strip"
+  end
+
+  if state.mode == "postgres_url" then
+    local fields = ensure_mode_fields(state, "postgres_url")
+    local parsed = parse_postgres_url(fields.url or "")
+    if parsed and #parsed.unsupported_query > 0 then
+      return "strip"
+    end
+  end
+
+  if FIELD_DEFS[state.mode] ~= nil then
+    return "persist"
+  end
+
+  return "strip"
+end
+
+local function refresh_derived_state(state)
+  state.raw_fallback = derive_metadata_action(state) == "strip" and state.preserve_existing_wizard ~= true
 end
 
 local function find_wallet_alias_for_descriptor(wallet_path, descriptor)
@@ -575,6 +622,8 @@ local function normalize_seed(seed)
     wallet_alias_warning = nil,
     last_error = nil,
     raw_fallback = false,
+    preserve_existing_wizard = false,
+    preserved_wizard = nil,
   }
 
   for known_mode in pairs(FIELD_DEFS) do
@@ -591,14 +640,14 @@ local function normalize_seed(seed)
 
   seed_other_raw()
 
-  if type(wizard.fields) == "table" and wizard.mode then
+  if type(wizard.fields) == "table" and wizard.mode and FIELD_DEFS[wizard.mode] then
     state.mode = wizard.mode
     state.db_kind = wizard.db_kind or mode_db_kind(wizard.mode)
-    state.raw_fallback = wizard.raw_fallback == true or wizard.mode == "other_raw"
     state.fields[wizard.mode] = vim.tbl_extend("force", state.fields[wizard.mode], deepcopy(wizard.fields))
     if params.name and not state.fields[wizard.mode].name then
       state.fields[wizard.mode].name = params.name
     end
+    refresh_derived_state(state)
     refresh_wallet_alias_state(state)
     return state
   end
@@ -625,7 +674,6 @@ local function normalize_seed(seed)
       else
         state.db_kind = "postgres"
         state.mode = "postgres_url"
-        state.raw_fallback = true
         state.fields.postgres_url = vim.tbl_extend("force", state.fields.postgres_url, {
           name = params.name or "",
           url = params.url or "",
@@ -634,7 +682,6 @@ local function normalize_seed(seed)
     else
       state.db_kind = "postgres"
       state.mode = "postgres_url"
-      state.raw_fallback = params.url and params.url ~= "" or false
       state.fields.postgres_url = vim.tbl_extend("force", state.fields.postgres_url, {
         name = params.name or "",
         url = params.url or "",
@@ -663,7 +710,6 @@ local function normalize_seed(seed)
       else
         state.db_kind = "other"
         state.mode = "other_raw"
-        state.raw_fallback = true
       end
     elseif parsed and #parsed.unsupported_query == 0 and parsed.descriptor and parsed.descriptor ~= "" then
       state.db_kind = "oracle"
@@ -677,17 +723,16 @@ local function normalize_seed(seed)
     else
       state.db_kind = "other"
       state.mode = "other_raw"
-      state.raw_fallback = params.url and params.url ~= "" or false
     end
   elseif params.type and params.type ~= "" then
     state.db_kind = "other"
     state.mode = "other_raw"
-    state.raw_fallback = true
   else
     state.db_kind = "postgres"
     state.mode = "postgres_url"
   end
 
+  refresh_derived_state(state)
   refresh_wallet_alias_state(state)
   return state
 end
@@ -749,8 +794,8 @@ local function serialize_submission(state)
     db_kind = state.db_kind,
     mode = state.mode,
     fields = deepcopy(fields),
-    raw_fallback = state.raw_fallback or nil,
   }
+  local metadata_action = derive_metadata_action(state)
 
   if state.mode == "oracle_cloud_wallet" then
     local descriptor = state.wallet_alias_map[fields.service_alias or ""]
@@ -765,6 +810,7 @@ local function serialize_submission(state)
         url = url,
       },
       wizard = wizard,
+      metadata_action = metadata_action,
     }
   elseif state.mode == "oracle_custom_jdbc" then
     local url, err = render_oracle_connection_url(fields, fields.descriptor)
@@ -778,6 +824,7 @@ local function serialize_submission(state)
         url = url,
       },
       wizard = wizard,
+      metadata_action = metadata_action,
     }
   elseif state.mode == "postgres_url" then
     return {
@@ -787,6 +834,7 @@ local function serialize_submission(state)
         url = fields.url,
       },
       wizard = wizard,
+      metadata_action = metadata_action,
     }
   elseif state.mode == "postgres_form" then
     local rendered_url = render_postgres_form_url(fields)
@@ -798,10 +846,10 @@ local function serialize_submission(state)
         url = rendered_url,
       },
       wizard = wizard,
+      metadata_action = metadata_action,
     }
   end
 
-  wizard.raw_fallback = true
   return {
     params = {
       name = fields.name,
@@ -809,6 +857,7 @@ local function serialize_submission(state)
       url = fields.url,
     },
     wizard = wizard,
+    metadata_action = metadata_action,
   }
 end
 
@@ -886,11 +935,15 @@ end
 
 function Wizard:set_mode(mode)
   local previous_fields = deepcopy(self:current_fields())
+  if mode ~= self.state.mode then
+    self.state.preserve_existing_wizard = false
+    self.state.preserved_wizard = nil
+  end
   self.state.mode = mode
   self.state.db_kind = mode_db_kind(mode)
-  self.state.raw_fallback = mode == "other_raw"
   local target_fields = ensure_mode_fields(self.state, mode)
   copy_shared_fields(previous_fields, target_fields)
+  refresh_derived_state(self.state)
   refresh_wallet_alias_state(self.state)
   self.state.selection = 1
   self:render()
@@ -898,12 +951,16 @@ end
 
 function Wizard:set_db_kind(db_kind)
   local previous_fields = deepcopy(self:current_fields())
-  self.state.db_kind = db_kind
   local next_mode = first_mode_for_db_kind(db_kind)
+  if db_kind ~= self.state.db_kind or next_mode ~= self.state.mode then
+    self.state.preserve_existing_wizard = false
+    self.state.preserved_wizard = nil
+  end
+  self.state.db_kind = db_kind
   self.state.mode = next_mode
-  self.state.raw_fallback = next_mode == "other_raw"
   local target_fields = ensure_mode_fields(self.state, next_mode)
   copy_shared_fields(previous_fields, target_fields)
+  refresh_derived_state(self.state)
   refresh_wallet_alias_state(self.state)
   self.state.selection = 1
   self:render()
@@ -912,6 +969,7 @@ end
 function Wizard:set_field(field_key, value)
   local fields = self:current_fields()
   fields[field_key] = value
+  refresh_derived_state(self.state)
   if self.state.mode == "oracle_cloud_wallet" and field_key == "wallet_path" then
     refresh_wallet_alias_state(self.state)
   end

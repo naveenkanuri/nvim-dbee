@@ -203,14 +203,23 @@ local function source_is_filesource(source)
 end
 
 ---@param submission ConnectionWizardSubmission|table|nil
----@return boolean
-local function wizard_submission_persists_metadata(submission)
-  local wizard = submission and submission.wizard or {}
-  if type(wizard) ~= "table" then
-    return false
+---@return "persist"|"strip"|"preserve_existing"
+local function wizard_submission_metadata_action(submission)
+  local action = submission and submission.metadata_action or nil
+  if action == "persist" or action == "strip" or action == "preserve_existing" then
+    return action
   end
 
-  return SCOPED_WIZARD_MODES[wizard.mode] == true and wizard.raw_fallback ~= true
+  local wizard = submission and submission.wizard or {}
+  if type(wizard) ~= "table" then
+    return "strip"
+  end
+
+  if SCOPED_WIZARD_MODES[wizard.mode] == true then
+    return "persist"
+  end
+
+  return "strip"
 end
 
 ---@param message any
@@ -1309,11 +1318,12 @@ function Handler:submit_connection_wizard(opts)
     return ping_failure
   end
 
-  local persist_metadata = source_is_filesource(source) and wizard_submission_persists_metadata(submission)
+  local metadata_action = wizard_submission_metadata_action(submission)
+  local persist_metadata = source_is_filesource(source) and metadata_action == "persist"
   local persisted = vim.deepcopy(submission.params or {})
   if persist_metadata then
     persisted.wizard = vim.deepcopy(submission.wizard)
-  elseif source_is_filesource(source) and opts.conn_id and submission.wizard and submission.wizard.mode then
+  elseif source_is_filesource(source) and metadata_action == "strip" and opts.conn_id then
     persisted.__remove_keys = { "wizard" }
   end
 

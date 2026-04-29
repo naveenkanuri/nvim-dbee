@@ -100,11 +100,11 @@
 
 ---@class ConnectionWizardSeed
 ---@field params ConnectionParams?
----@field wizard? { db_kind?: connection_wizard_db_kind, mode?: connection_wizard_mode, fields?: table<string, any>, rendered_url?: string, raw_fallback?: boolean }
+---@field wizard? { db_kind?: connection_wizard_db_kind, mode?: connection_wizard_mode, fields?: table<string, any>, rendered_url?: string }
 
 ---@class ConnectionWizardSubmission
 ---@field params ConnectionParams
----@field wizard { db_kind: connection_wizard_db_kind, mode: connection_wizard_mode, fields: table<string, any>, rendered_url?: string, raw_fallback?: boolean }
+---@field wizard { db_kind: connection_wizard_db_kind, mode: connection_wizard_mode, fields: table<string, any>, rendered_url?: string }
 
 ---Query execution options.
 ---@class QueryExecuteOpts

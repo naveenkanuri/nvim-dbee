@@ -1348,17 +1348,34 @@ local function run_filesource_raw_fallback_contract()
   local wizard = expect_wizard(env, function()
     env.drawer:open_edit_connection_with_wizard(env:file_source_meta(), "conn-meta")
   end)
-  fill_other_raw(wizard, {
-    name = "Meta Raw",
-    type = "sqlite",
-    url = "sqlite:///tmp/meta-raw.db",
-  })
+  wizard:set_field("url", "postgres://meta_user:meta_pass@meta-host:5432/meta_db?sslmode=require&application_name=nvim-dbee")
+  wizard:set_mode("postgres_form")
+  wizard:set_mode("postgres_url")
+  assert_true("unsupported postgres derived raw fallback", wizard.state.raw_fallback == true)
   submit_and_assert_success(wizard)
 
   local persisted = find_record(read_json(env.file_path), "conn-meta")
   assert_true("raw fallback record persisted", persisted ~= nil)
   assert_eq("wizard metadata removed", persisted.wizard, nil)
   assert_true("remove keys sent", env.file_source.update_calls[1].details.__remove_keys ~= nil)
+
+  clear_runtime_observations(env.runtime)
+  local reopened = expect_wizard(env, function()
+    env.drawer:open_edit_connection_with_wizard(env:file_source_meta(), "conn-meta")
+  end)
+  assert_eq("reopened unsupported mode", reopened.state.mode, "postgres_url")
+  assert_true("reopened unsupported raw fallback", reopened.state.raw_fallback == true)
+  reopened:set_field("url", "postgres://meta_user:meta_pass@meta-host:5432/meta_db?sslmode=require")
+  reopened:set_mode("postgres_form")
+  reopened:set_mode("postgres_url")
+  assert_true("supported postgres clears raw fallback", reopened.state.raw_fallback == false)
+  submit_and_assert_success(reopened)
+
+  local restored = find_record(read_json(env.file_path), "conn-meta")
+  assert_true("restored wizard metadata", restored.wizard ~= nil)
+  assert_eq("restored wizard mode", restored.wizard.mode, "postgres_url")
+  assert_eq("restored wizard url", restored.wizard.fields.url, "postgres://meta_user:meta_pass@meta-host:5432/meta_db?sslmode=require")
+  assert_eq("restored remove keys omitted", env.file_source.update_calls[2].details.__remove_keys, nil)
   env:cleanup()
   print("DCFG02_FILESOURCE_RAW_FALLBACK_NO_METADATA_OK=true")
 end
