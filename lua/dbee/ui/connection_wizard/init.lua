@@ -7,6 +7,9 @@ local uv = vim.loop
 
 local M = {}
 
+local WIZARD_WINHIGHLIGHT =
+  "Normal:NormalFloat,NormalNC:NormalFloat,EndOfBuffer:NormalFloat,FloatBorder:FloatBorder,FloatTitle:FloatTitle,CursorLine:Visual,Search:IncSearch"
+
 local TYPE_OPTIONS = {
   { label = "Oracle", value = "oracle" },
   { label = "Postgres", value = "postgres" },
@@ -548,6 +551,7 @@ local function open_password_input(parent_winid, title, current_value, on_confir
     win_options = {
       conceallevel = 2,
       concealcursor = "niv",
+      winhighlight = WIZARD_WINHIGHLIGHT,
     },
   }, {
     default_value = current_value,
@@ -909,6 +913,9 @@ local function popup_options(opts)
           bottom_align = "right",
         },
       },
+      win_options = {
+        winhighlight = WIZARD_WINHIGHLIGHT,
+      },
     }
   end
 
@@ -928,6 +935,9 @@ local function popup_options(opts)
         bottom = " j/k move • <CR> edit • q cancel ",
         bottom_align = "right",
       },
+    },
+    win_options = {
+      winhighlight = WIZARD_WINHIGHLIGHT,
     },
   }
 end
@@ -1120,6 +1130,7 @@ function Wizard:edit_type()
     title = "Connection Type",
     items = labels,
     mappings = {},
+    winhighlight = WIZARD_WINHIGHLIGHT,
     on_confirm = function(selection)
       local db_kind = by_label[selection]
       if db_kind then
@@ -1143,6 +1154,7 @@ function Wizard:edit_mode()
     title = "Connection Mode",
     items = labels,
     mappings = {},
+    winhighlight = WIZARD_WINHIGHLIGHT,
     on_confirm = function(selection)
       local mode = by_label[selection]
       if mode then
@@ -1162,6 +1174,7 @@ function Wizard:edit_field(field)
       title = "Service Alias",
       items = items,
       mappings = {},
+      winhighlight = WIZARD_WINHIGHLIGHT,
       on_confirm = function(selection)
         if selection == "Manual entry..." then
           self:edit_field(vim.tbl_extend("force", field, { key = field.key .. "_manual" }))
@@ -1184,6 +1197,7 @@ function Wizard:edit_field(field)
       title = title,
       items = field.options,
       mappings = {},
+      winhighlight = WIZARD_WINHIGHLIGHT,
       on_confirm = function(selection)
         self:set_field(target_key, selection)
       end,
@@ -1223,6 +1237,9 @@ function Wizard:edit_field(field)
           bottom_align = "right",
         },
       },
+      win_options = {
+        winhighlight = WIZARD_WINHIGHLIGHT,
+      },
     })
     popup:mount()
     vim.bo[popup.bufnr].bufhidden = "wipe"
@@ -1253,6 +1270,7 @@ function Wizard:edit_field(field)
     title = title,
     default_value = current_value,
     mappings = {},
+    winhighlight = WIZARD_WINHIGHLIGHT,
     on_confirm = function(value)
       self:set_field(target_key, value)
     end,

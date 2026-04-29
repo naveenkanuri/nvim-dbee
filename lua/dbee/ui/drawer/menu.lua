@@ -7,7 +7,7 @@ local M = {}
 ---@alias menu_input fun(opts?: { title: string, default: string, on_confirm: fun(value: string) })
 
 -- Pick items from a list.
----@param opts { relative_winid: integer, items: string[], on_confirm: fun(item: string), on_yank: fun(item:string), title: string, mappings: key_mapping[] }
+---@param opts { relative_winid: integer, items: string[], on_confirm: fun(item: string), on_yank: fun(item:string), title: string, mappings: key_mapping[], winhighlight?: string }
 function M.select(opts)
   opts = opts or {}
   if not opts.relative_winid or not vim.api.nvim_win_is_valid(opts.relative_winid) then
@@ -39,6 +39,7 @@ function M.select(opts)
     },
     win_options = {
       cursorline = true,
+      winhighlight = opts.winhighlight,
     },
   }
 
@@ -86,7 +87,7 @@ function M.select(opts)
 end
 
 -- Ask for input.
----@param opts { relative_winid: integer, default_value: string, on_confirm: fun(item: string), title: string, mappings: key_mapping[] }
+---@param opts { relative_winid: integer, default_value: string, on_confirm: fun(item: string), title: string, mappings: key_mapping[], winhighlight?: string }
 function M.input(opts)
   if not opts.relative_winid or not vim.api.nvim_win_is_valid(opts.relative_winid) then
     error("no window id provided")
@@ -117,6 +118,7 @@ function M.input(opts)
     },
     win_options = {
       cursorline = false,
+      winhighlight = opts.winhighlight,
     },
   }
 

@@ -170,6 +170,9 @@ local DEFAULT_MAPPINGS = {
   { key = "R", mode = "n", action = "refresh" },
 }
 
+local UX13_WIZARD_WINHIGHLIGHT =
+  "Normal:NormalFloat,NormalNC:NormalFloat,EndOfBuffer:NormalFloat,FloatBorder:FloatBorder,FloatTitle:FloatTitle,CursorLine:Visual,Search:IncSearch"
+
 local saved_notify = vim.notify
 local notifications = {}
 
@@ -821,6 +824,15 @@ local function expect_wizard(env, action)
   Harness.drain()
   assert_true("wizard opened", env.runtime.last_wizard ~= nil)
   return env.runtime.last_wizard
+end
+
+local function assert_winhighlight(label, opts)
+  assert_eq(label, opts and opts.win_options and opts.win_options.winhighlight, UX13_WIZARD_WINHIGHLIGHT)
+end
+
+local function assert_buffer_contains(label, bufnr, expected)
+  local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+  assert_match(label, table.concat(lines, "\n"), expected)
 end
 
 local function submit_and_assert_success(wizard)
@@ -1636,6 +1648,89 @@ local function run_no_auto_activate_contract()
   print("DCFG02_NO_AUTO_ACTIVATE_OK=true")
 end
 
+local function run_wizard_highlight_contract()
+  local function open_highlight_wizard(label, configure_highlights)
+    if configure_highlights then
+      configure_highlights()
+    end
+
+    local env = new_env({
+      current_conn_id = "conn-meta",
+    })
+    local wizard = expect_wizard(env, function()
+      env.drawer:open_add_connection_with_wizard(env:file_source_meta(), {
+        type = "postgres",
+      })
+    end)
+    assert_winhighlight(label .. "_main", wizard.popup.opts)
+    assert_buffer_contains(label .. "_main_text", wizard.popup.bufnr, "Type: Postgres")
+    return env, wizard
+  end
+
+  local env, wizard = open_highlight_wizard("ux13_bright", function()
+    vim.o.background = "light"
+    pcall(vim.cmd.colorscheme, "default")
+  end)
+
+  wizard:edit_type()
+  assert_eq("type select winhighlight", last(env.runtime.select_calls).winhighlight, UX13_WIZARD_WINHIGHLIGHT)
+  wizard:edit_mode()
+  assert_eq("mode select winhighlight", last(env.runtime.select_calls).winhighlight, UX13_WIZARD_WINHIGHLIGHT)
+
+  wizard:edit_field({ key = "sslmode", label = "SSL Mode", kind = "select", options = { "disable", "require" } })
+  assert_eq("field select winhighlight", last(env.runtime.select_calls).winhighlight, UX13_WIZARD_WINHIGHLIGHT)
+
+  wizard:set_field("name", "Visible Wizard Text")
+  wizard:edit_field({ key = "name", label = "Name", kind = "text" })
+  local input_call = last(env.runtime.input_calls)
+  assert_eq("text input winhighlight", input_call.winhighlight, UX13_WIZARD_WINHIGHLIGHT)
+  assert_eq("text input default preserved", input_call.default_value, "Visible Wizard Text")
+
+  wizard:set_field("password", "secret-value")
+  wizard:edit_field({ key = "password", label = "Password", kind = "password" })
+  local password_popup = last(env.runtime.active_popups)
+  assert_winhighlight("password input winhighlight", password_popup.opts)
+  assert_eq("password input default preserved", password_popup.input_opts.default_value, "secret-value")
+
+  wizard:set_mode("oracle_custom_jdbc")
+  wizard:set_field("descriptor", "DESCRIPTION=visible-descriptor")
+  wizard:edit_field({ key = "descriptor", label = "Descriptor", kind = "multiline" })
+  local multiline_popup = last(env.runtime.active_popups)
+  assert_winhighlight("multiline popup winhighlight", multiline_popup.opts)
+  assert_buffer_contains("multiline text render state", multiline_popup.bufnr, "visible-descriptor")
+  env:cleanup()
+  print("UX13_WIZARD_BRIGHT_BASELINE_OK=true")
+
+  env, wizard = open_highlight_wizard("ux13_dark_collision", function()
+    vim.o.background = "dark"
+    vim.api.nvim_set_hl(0, "Normal", { fg = "#101010", bg = "#101010" })
+    vim.api.nvim_set_hl(0, "NormalFloat", { fg = "#f0f0f0", bg = "#202020" })
+    vim.api.nvim_set_hl(0, "FloatBorder", { fg = "#f0f0f0", bg = "#202020" })
+    vim.api.nvim_set_hl(0, "FloatTitle", { fg = "#ffffff", bg = "#202020" })
+  end)
+  assert_buffer_contains("dark collision text render state", wizard.popup.bufnr, "Type: Postgres")
+  env:cleanup()
+  print("UX13_WIZARD_DARK_COLLISION_OK=true")
+
+  local daily = vim.env.DBEE_UX13_COLORSCHEME
+  if daily and daily ~= "" then
+    local ok = pcall(vim.cmd.colorscheme, daily)
+    if ok then
+      env, wizard = open_highlight_wizard("ux13_daily")
+      assert_buffer_contains("daily colorscheme text render state", wizard.popup.bufnr, "Type: Postgres")
+      env:cleanup()
+    end
+  end
+
+  print("UX13_WIZARD_WINHIGHLIGHT_MAIN=true")
+  print("UX13_WIZARD_WINHIGHLIGHT_PASSWORD=true")
+  print("UX13_WIZARD_WINHIGHLIGHT_INPUT=true")
+  print("UX13_WIZARD_WINHIGHLIGHT_SELECT=true")
+  print("UX13_WIZARD_WINHIGHLIGHT_MULTILINE=true")
+  print("UX13_WIZARD_TEXT_RENDER_STATE_OK=true")
+  print("UX13_WIZARD_ALL_PASS=true")
+end
+
 run_navigation_and_seed_contracts()
 run_local_validation_contract()
 run_postgres_form_encoding_contract()
@@ -1647,6 +1742,7 @@ run_missing_filesource_edit_failure_contract()
 run_unknown_wizard_mode_contract()
 run_partial_failure_contract()
 run_no_auto_activate_contract()
+run_wizard_highlight_contract()
 
 print("DCFG02_WIZARD_ALL_PASS=true")
 
