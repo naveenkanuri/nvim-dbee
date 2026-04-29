@@ -66,3 +66,21 @@
   2. Detect missing-version-field as v1 format → silent log (`vim.log.levels.DEBUG`) + delete + refresh, instead of WARN-level "corrupt cache".
   3. Both: detect-and-migrate where field shapes are recoverable, silent-delete-and-refresh where not.
   Severity: **POLISH** — recovery path works correctly (data not lost; cache regenerates). Just bad first-run UX. Pick option 1+3 hybrid for cleanest user experience on v1.3 upgrade path.
+
+### v1.1 Phase 6 lazy-loading deepening (surfaced 2026-04-29 during v1.1 live test) — ARCHITECTURE CHANGE
+
+- **Schema+table eager fetch blocks "loading..." for huge DBs** (Phase 6 D-30..D-63 + Phase 7 D-77 single-flight; touchpoints `lua/dbee/handler/init.lua` `connection_get_structure*`, `lua/dbee/ui/drawer/*` materialization, `dbee/handler/event_bus.go` structure events):
+  Phase 6 made column children lazy (per-table column fetch on expand). But schemas+tables are still fetched eagerly in ONE initial structure RPC at connection bootstrap. For huge Oracle/Postgres DBs (10000+ tables across many schemas), that single RPC blocks "loading..." for minutes. User reports `nkanuri6` (Oracle) appears stuck on `<CR>`-bootstrap.
+  Phase 6 chose schema+table eager because LSP completion at `schema.` prefix needs table names locally available; going schemas-only would force a per-prefix table-list RPC.
+  Naveen's proposal: deepen lazy-loading model — fetch schemas only initially, tables on schema-click, columns on table-click (latter already lazy). Cache + parallel-fetch strategies on top.
+  v1.3 design considerations:
+  1. **LSP impact**: completion at `schema.` prefix needs table list. Either (a) fetch on first `schema.` keystroke and warm asynchronously (Phase 11 isIncomplete contract), or (b) keep table list eager but parallelize across schemas (1 RPC per schema in parallel) so wall-clock = max(schema_RPC) not sum.
+  2. **Cache**: per-schema disk cache (per-table-list) parallel to per-table column cache. Phase 11 LRU + cache migration apply.
+  3. **Drawer UX**: schema row collapsed by default with `[+]` indicator; expand triggers async fetch + spinner just on that schema row, not blocking entire drawer.
+  4. **Existing `_struct_cache` shape** would need updating to support partial-population per schema (currently full-tree). Phase 6 D-46 single-bump epoch contract preserved.
+  5. **Backwards compat**: small-DB users see no behavior change; large-DB users see fast-start with progressive expansion.
+  Severity: **ARCHITECTURE CHANGE** — not a quick fix. v1.3 milestone candidate; needs full discuss + research + plan + review cycle.
+
+- **Diagnostic gap: "loading..." has no timeout / error escape** (related):
+  If structure RPC genuinely hangs (network failure, adapter crash mid-fetch), drawer shows "loading..." forever with no progress indicator, no timeout, no manual cancel. Should at minimum: (a) show elapsed time on the loading row after 10s, (b) offer manual cancel via key (`q` or `<Esc>`), (c) auto-fail with clear error after configurable timeout (default 5min).
+  Severity: **MED** — degrades trust in the connection-only-drawer flow. v1.3 candidate alongside lazy-loading deepening.
