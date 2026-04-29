@@ -284,9 +284,9 @@ local function normalize_descriptor_text(input)
 end
 
 local function render_postgres_form_url(fields)
-  local auth = tostring(fields.username or "")
+  local auth = percent_encode(fields.username or "")
   if fields.password and fields.password ~= "" then
-    auth = auth .. ":" .. tostring(fields.password)
+    auth = auth .. ":" .. percent_encode(fields.password)
   end
 
   local authority = auth ~= "" and (auth .. "@") or ""
@@ -297,10 +297,10 @@ local function render_postgres_form_url(fields)
 
   local query = ""
   if fields.sslmode and fields.sslmode ~= "" then
-    query = "?sslmode=" .. tostring(fields.sslmode)
+    query = "?sslmode=" .. percent_encode(fields.sslmode)
   end
 
-  return string.format("postgres://%s/%s%s", authority, tostring(fields.database or ""), query)
+  return string.format("postgres://%s/%s%s", authority, percent_encode(fields.database or ""), query)
 end
 
 local function parse_postgres_url(raw_url)
@@ -356,24 +356,22 @@ local function parse_postgres_url(raw_url)
 
   local sslmode = nil
   local unsupported_query = {}
-  if raw_query and raw_query ~= "" then
-    for pair in raw_query:gmatch("[^&]+") do
-      local key, value = pair:match("^([^=]+)=?(.*)$")
-      if key == "sslmode" then
-        sslmode = value
-      else
-        unsupported_query[#unsupported_query + 1] = key
-      end
+  local query_pairs, ordered_keys = parse_query_pairs(raw_query or "")
+  for _, key in ipairs(ordered_keys) do
+    if key:lower() == "sslmode" then
+      sslmode = query_pairs[key]
+    else
+      unsupported_query[#unsupported_query + 1] = key
     end
   end
 
   return {
     scheme = scheme,
-    username = username,
-    password = password,
+    username = percent_decode(username, false),
+    password = percent_decode(password, false),
     host = host,
     port = port,
-    database = database,
+    database = percent_decode(database, false),
     sslmode = sslmode,
     raw_query = raw_query or "",
     unsupported_query = unsupported_query,

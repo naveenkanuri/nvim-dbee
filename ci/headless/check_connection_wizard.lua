@@ -49,6 +49,15 @@ local function find_record(records, wanted_id)
   return nil
 end
 
+local function find_record_by_name(records, wanted_name)
+  for _, record in ipairs(records or {}) do
+    if record.name == wanted_name then
+      return record
+    end
+  end
+  return nil
+end
+
 local function last(list)
   return list[#list]
 end
@@ -1148,6 +1157,46 @@ local function run_local_validation_contract()
   print("DCFG02_LOCAL_VALIDATION_OK=true")
 end
 
+local function run_postgres_form_encoding_contract()
+  local env = new_env({
+    current_conn_id = "conn-meta",
+  })
+
+  clear_runtime_observations(env.runtime)
+  local wizard = expect_wizard(env, function()
+    env.drawer:open_add_connection_with_wizard(env:file_source_meta(), {
+      type = "postgres",
+    })
+  end)
+  wizard:set_mode("postgres_form")
+  wizard:set_field("name", "Encoded PG")
+  wizard:set_field("host", "encoded-host")
+  wizard:set_field("port", "5432")
+  wizard:set_field("database", "db/name?#")
+  wizard:set_field("username", "user:name")
+  wizard:set_field("password", "pa/ss:@?#")
+  wizard:set_field("sslmode", "require")
+  submit_and_assert_success(wizard)
+
+  local expected_url = "postgres://user%3Aname:pa%2Fss%3A%40%3F%23@encoded-host:5432/db%2Fname%3F%23?sslmode=require"
+  local persisted = find_record_by_name(read_json(env.file_path), "Encoded PG")
+  assert_true("encoded postgres record exists", persisted ~= nil)
+  assert_eq("encoded postgres url", persisted.url, expected_url)
+  assert_eq("encoded postgres metadata username", persisted.wizard.fields.username, "user:name")
+  assert_eq("encoded postgres metadata password", persisted.wizard.fields.password, "pa/ss:@?#")
+  assert_eq("encoded postgres metadata database", persisted.wizard.fields.database, "db/name?#")
+
+  local reopened = expect_wizard(env, function()
+    env.drawer:open_edit_connection_with_wizard(env:file_source_meta(), persisted.id)
+  end)
+  assert_eq("encoded reopen mode", reopened.state.mode, "postgres_form")
+  assert_eq("encoded reopen username", reopened:current_fields().username, "user:name")
+  assert_eq("encoded reopen password", reopened:current_fields().password, "pa/ss:@?#")
+  assert_eq("encoded reopen database", reopened:current_fields().database, "db/name?#")
+  reopened:close()
+  env:cleanup()
+end
+
 local function fill_postgres_form(wizard, fields)
   wizard:set_mode("postgres_form")
   for key, value in pairs(fields or {}) do
@@ -1443,6 +1492,7 @@ end
 
 run_navigation_and_seed_contracts()
 run_local_validation_contract()
+run_postgres_form_encoding_contract()
 run_transient_ping_and_fail_closed_contracts()
 run_other_mode_contracts()
 run_filesource_raw_fallback_contract()
