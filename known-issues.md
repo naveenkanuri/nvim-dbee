@@ -38,6 +38,15 @@
 - **Drawer cold start lacks visual orientation** (cosmetic, related):
   Connection list starts flat from line 1. Old v1.0 had `connections.json` parent header providing instant context for "what am I looking at". v1.3 candidate: optional section header `Connections` line OR active-connection highlight at top. Lower priority than badge fix.
 
+### v1.1 Phase 7 drawer filter regression (surfaced 2026-04-29 during v1.1 live test) — HIGH
+
+- **`/` filter in drawer fails on connection-only root** (`lua/dbee/ui/drawer/menu.lua` filter path; Phase 4 D-31 + Phase 7 D-67/D-68 inheritance):
+  Pressing `/` in the drawer (with no connection bootstrapped yet, just the flat connection list) emits "No cached connections available for filter" and exits filter mode. User can't reach a specific connection by typing.
+  Likely root cause: Phase 7 connection-only-root rewrite kept Phase 4 D-31 filter contract that operates over `_struct_cache` (per-connection structure). On the connection list itself (no conn bootstrapped, `_struct_cache` empty), filter early-returns instead of falling back to filtering the visible connection rows by name.
+  Expected: `/` filters whatever's currently visible — connection rows pre-bootstrap (by name + source badge), structure rows under expanded conn (by schema/table/column name).
+  v1.3 fix: extend filter to operate on visible row set when `_struct_cache` empty for current root. Keep Phase 4 D-31 filter-exit contract intact. New unit test covering connection-list-only filter case.
+  Severity: **HIGH** — primary navigation pattern broken. Workaround: scroll/jump manually (`gg`/`G`/`/conn_name` via vim-search not drawer filter).
+
 ### v1.1 Phase 8 wizard highlight regression (surfaced 2026-04-29 during v1.1 live test) — UNUSABLE on dark colorschemes
 
 - **Wizard input field text invisible (text fg = bg)** (`lua/dbee/ui/wizard/*` or wherever Phase 8 compound modal lives):
