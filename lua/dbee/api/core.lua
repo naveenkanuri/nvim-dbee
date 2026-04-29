@@ -76,6 +76,16 @@ function core.source_get_connections(id)
   return state.handler():source_get_connections(id)
 end
 
+---Get the raw persisted record for a connection when the source supports it.
+---This is an additive metadata-first edit-seeding helper and does not change
+---the runtime connection contract returned by `source_get_connections()`.
+---@param id source_id
+---@param conn_id connection_id
+---@return SourceConnectionRecord|nil
+function core.source_get_connection_record(id, conn_id)
+  return state.handler():source_get_connection_record(id, conn_id)
+end
+
 ---Register helper queries per database type.
 ---every helper value is a go-template with values set for
 ---"Table", "Schema" and "Materialization".

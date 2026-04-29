@@ -81,6 +81,11 @@
 ---@field type string
 ---@field url string
 
+---Raw persisted source record used only for metadata-first edit seeding.
+---Runtime connection APIs still expose `ConnectionParams` only.
+---@class SourceConnectionRecord: ConnectionParams
+---@field wizard? table additive source-local metadata persisted by FileSource-backed wizard flows
+
 ---Query execution options.
 ---@class QueryExecuteOpts
 ---@field binds? table<string, string> named bind values (Oracle). Supports typed literal prefixes: int:, float:, bool:, null, date:, timestamp:, str:. Use str: to force a literal string (e.g. str:int:42).

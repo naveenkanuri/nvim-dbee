@@ -1169,6 +1169,32 @@ function Handler:source_get_connections(id)
   return ret
 end
 
+---@param id source_id
+---@param conn_id connection_id
+---@return SourceConnectionRecord|nil
+function Handler:source_get_connection_record(id, conn_id)
+  local source = self.sources[id]
+  if not source or type(source.get_record) ~= "function" then
+    return nil
+  end
+
+  if not conn_id or conn_id == "" then
+    return nil
+  end
+
+  local ok, record_or_err = pcall(source.get_record, source, conn_id)
+  if not ok then
+    utils.log("warn", "Failed loading raw connection record: " .. tostring(record_or_err), "core")
+    return nil
+  end
+
+  if not record_or_err or record_or_err == vim.NIL then
+    return nil
+  end
+
+  return vim.deepcopy(record_or_err)
+end
+
 ---Return an authoritative, side-effect-free connection snapshot for bootstrap
 ---consumers before they switch to live `connection_invalidated` events.
 ---@return ConnectionStateSnapshot
