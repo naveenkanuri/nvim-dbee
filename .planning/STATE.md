@@ -1,36 +1,36 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.1
-milestone_name: Drawer Connection Config + Structure Perf + Notes UX
-status: executing
-stopped_at: Initialized milestone v1.1 requirements and roadmap
-last_updated: "2026-04-29T13:20:53.089Z"
-last_activity: 2026-04-29 -- Phase 10 execution started
+milestone: v1.3
+milestone_name: Enterprise DB UX + v1.2 Closure
+status: roadmap_ready
+stopped_at: Initialized milestone v1.3 requirements and roadmap
+last_updated: "2026-04-29T16:08:37-05:00"
+last_activity: 2026-04-29 -- Milestone v1.3 roadmap initialized
 progress:
-  total_phases: 9
-  completed_phases: 8
-  total_plans: 21
-  completed_plans: 20
-  percent: 95
+  total_phases: 4
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # Project State
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-04-27)
+See: .planning/PROJECT.md (updated 2026-04-29)
 
 **Core value:** Every user action should give clear, immediate feedback -- no silent failures, no missing affordances, no dead ends.
-**Current focus:** Phase 10 — lsp-optimization
+**Current focus:** Phase 13 -- UX Regression Batch
 
 ## Current Position
 
-Phase: 10 (lsp-optimization) — EXECUTING
-Plan: 1 of 1
-Status: Executing Phase 10
-Last activity: 2026-04-29 -- Phase 10 execution started
+Phase: 13 (ux-regression-batch) -- READY FOR DISCUSS
+Plan: -
+Status: Ready for `$gsd-discuss-phase 13`
+Last activity: 2026-04-29 -- Milestone v1.3 roadmap initialized
 
-Progress: [█████████░] 88%
+Progress: [░░░░░░░░░░] 0%
 
 ## Performance Metrics
 
@@ -92,17 +92,23 @@ Recent decisions affecting current work:
 - v1.1: Phase numbering continues at Phase 6 because `$gsd-new-milestone` was run without `--reset-phase-numbers`
 - v1.1: FileSource scope is hardening existing CRUD (`create/update/delete`) with atomic writes and richer preservation, not adding CRUD from zero
 - v1.1: Drawer notes move out of drawer and into the existing public `pick_notes` path
+- v1.2: Phase 10 LSP perf harness and Phase 11 LSP optimization/correctness shipped; Phase 12 LSP feature gap closure deferred to v1.3.
+- v1.3: Roadmap is Phase 13 regression batch -> Phase 14 enterprise DB architecture -> Phase 15 polish -> conditional Phase 16 LSP features.
+- v1.3: Phase 13 decision numbering starts at D-198; milestone setup did not consume D-numbers.
 
 ### Pending Todos
 
-- Discuss Phase 6 context: STRUCT-01 + NOTES-01
+- Discuss Phase 13 context: wizard highlight regression, drawer connection-list filter regression, and LSP cache migration UX.
+- Start Phase 13 decision numbering at D-198.
 
 ### Blockers/Concerns
 
-- Product gray areas remain for DCFG-02 password persistence, Oracle wallet service fallback, and whether source-file editing stays reachable outside the drawer.
+- Phase 14 has high architecture risk because schema allowlist and schemas-only loading touch wizard, handler, drawer cache shape, LSP completion/diagnostics, and disk cache.
+- Phase 16 remains conditional; decide only after Phase 15 ships.
 
 ## Session Continuity
 
-Last session: 2026-04-27T00:00:00Z
-Stopped at: Initialized milestone v1.1 requirements and roadmap
-Resume file: .planning/ROADMAP.md
+Last session: 2026-04-29T16:08:37-05:00
+Stopped at: Initialized milestone v1.3 requirements and roadmap
+Resume file: .planning/milestones/v1.3-roadmap.md
+Codex thread: `019ddb0e-e8d0-7ca1-a4b0-8d4728863630`

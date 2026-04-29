@@ -210,10 +210,10 @@ Phase 6 -> Phase 7 -> Phase 8. Phase 9 depends on Phase 6 and can run before or 
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 6. Structure Laziness & Notes Picker | 0/TBD | Pending | - |
-| 7. Connection-Only Drawer | 0/TBD | Pending | - |
-| 8. Type-Aware Connection Wizard | 0/TBD | Pending | - |
-| 9. Real-Nui Drawer Perf Harness | 0/TBD | Pending | - |
+| 6. Structure Laziness & Notes Picker | 2/2 | Complete | v1.1 shipped |
+| 7. Connection-Only Drawer | 4/4 | Complete | v1.1 shipped |
+| 8. Type-Aware Connection Wizard | 4/4 | Complete | v1.1 shipped |
+| 9. Real-Nui Drawer Perf Harness | 1/1 | Complete | v1.1 shipped |
 
 ## Open Product Questions
 
@@ -227,7 +227,7 @@ Phase 6 -> Phase 7 -> Phase 8. Phase 9 depends on Phase 6 and can run before or 
 
 **Roadmap artifact:** `.planning/milestones/v1.2-roadmap.md`
 
-**Requirements:** LSP-PERF-01, LSP-OPT-01, LSP-CORR-01, LSP-FEAT-01 (conditional)
+**Requirements:** LSP-PERF-01, LSP-OPT-01, LSP-CORR-01; Phase 12 feature scope deferred as DBEE-FEAT-02 in v1.3
 
 **Phase ordering:** Phase 10 -> Phase 11 -> conditional Phase 12.
 
@@ -271,7 +271,7 @@ Phase 6 -> Phase 7 -> Phase 8. Phase 9 depends on Phase 6 and can run before or 
 
 **Goal**: Add high-value LSP features that can be supported truthfully from schema/cache state.
 **Depends on**: Phase 11
-**Requirements**: LSP-FEAT-01
+**Requirements**: DBEE-FEAT-02 (deferred to v1.3 Phase 16)
 **Status**: Conditional. Decide at Phase 11 ship.
 **Success Criteria** (what must be TRUE):
   1. If Phase 10+11 finish with budget headroom and no major regressions, v1.2 may add completion resolve/details, hover, schema refresh/reload code actions, and schema object symbols.
@@ -289,6 +289,80 @@ Phase 10 -> Phase 11. Phase 12 is conditional at Phase 11 ship.
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 10. LSP Perf Harness | 0/TBD | Pending | - |
-| 11. LSP Perf Optimization And Correctness | 0/TBD | Pending | - |
-| 12. LSP Feature Gap Closure | 0/TBD | Conditional | - |
+| 10. LSP Perf Harness | 1/1 | Complete | v1.2 shipped |
+| 11. LSP Perf Optimization And Correctness | 1/1 | Complete | v1.2 shipped |
+| 12. LSP Feature Gap Closure | 0/TBD | Deferred to v1.3 Phase 16 | - |
+
+## Milestone v1.3: Enterprise DB UX + v1.2 Closure
+
+**Goal:** Restore primary v1.1/v1.2 workflows, then make large enterprise schemas fast and focused through schema allowlists, deeper lazy loading, and targeted LSP/drawer polish.
+
+**Roadmap artifact:** `.planning/milestones/v1.3-roadmap.md`
+
+**Requirements:** DBEE-UX-01, DBEE-ARCH-01, DBEE-POLISH-01, DBEE-FEAT-02 (conditional)
+
+**Phase ordering:** Phase 13 -> Phase 14 -> Phase 15 -> conditional Phase 16.
+
+### Phase 13: UX Regression Batch
+
+**Goal**: Unblock v1.1 wizard and drawer filter workflows plus first-run v1.2 LSP cache migration UX.
+**Depends on**: v1.2 shipped state
+**Requirements**: DBEE-UX-01
+**Status**: Ready for `$gsd-discuss-phase 13`
+**Success Criteria** (what must be TRUE):
+  1. Wizard Input/Select text is visible on dark colorschemes.
+  2. Drawer `/` filters visible connection rows when `_struct_cache` is empty.
+  3. Pre-v1.2 LSP cache files migrate or recover without alarming user-facing corrupt-cache warnings.
+  4. D-XX numbering starts at D-198 during Phase 13 discuss.
+**Plans**: TBD by `$gsd-plan-phase 13`
+
+### Phase 14: Enterprise DB UX Architecture
+
+**Goal**: Add per-connection schema allowlists and deepen lazy loading to schemas-only initial fetch plus per-schema table fetch.
+**Depends on**: Phase 13
+**Requirements**: DBEE-ARCH-01
+**Status**: Locked sequencing, pending Phase 13
+**Success Criteria** (what must be TRUE):
+  1. Connection JSON persists additive `schema_filter` metadata while preserving all-schema behavior when absent.
+  2. Drawer, LSP completion, diagnostics, schema cache, and disk cache honor the same schema allowlist.
+  3. Initial load fetches schemas only, and schema expansion fetches tables/views asynchronously with row-local loading state.
+  4. LSP `schema.` completion remains non-blocking and uses truthful `isIncomplete` only for active async misses.
+**Plans**: TBD by `$gsd-plan-phase 14`
+
+### Phase 15: LSP + Drawer Polish Batch
+
+**Goal**: Close Phase 11 r6 residuals, drawer source-badge/orientation polish, and loading timeout/elapsed/cancel UX.
+**Depends on**: Phase 14
+**Requirements**: DBEE-POLISH-01
+**Status**: Locked sequencing, pending Phase 14
+**Success Criteria** (what must be TRUE):
+  1. Incremental schema lookup/index updates match full rebuild behavior, including case-colliding schemas.
+  2. Targeted global table-index updates avoid walking unrelated schemas.
+  3. Source badges render only for multi-source disambiguation.
+  4. Cold drawer start has visual orientation without reviving source rows.
+  5. Long loading states expose elapsed time, manual cancel, and timeout/error handling.
+**Plans**: TBD by `$gsd-plan-phase 15`
+
+### Phase 16: LSP Feature Gap Closure
+
+**Goal**: Add deferred Phase 12 LSP features if v1.3 mandatory scope finishes with budget headroom.
+**Depends on**: Phase 15
+**Requirements**: DBEE-FEAT-02
+**Status**: Conditional. Decide at Phase 15 ship.
+**Success Criteria** (what must be TRUE):
+  1. Completion resolve/details, hover, code actions, and schema object symbols are cache-backed and truthful.
+  2. Semantic tokens, inlay hints, `vim.lsp.config()` migration, and multi-client LSP architecture remain deferred.
+  3. Feature work does not reopen Phase 10/11 perf and correctness contracts.
+**Plans**: TBD by `$gsd-plan-phase 16` if activated
+
+## v1.3 Progress
+
+**Execution Order:**
+Phase 13 -> Phase 14 -> Phase 15. Phase 16 is conditional at Phase 15 ship.
+
+| Phase | Plans Complete | Status | Completed |
+|-------|----------------|--------|-----------|
+| 13. UX Regression Batch | 0/TBD | Pending discuss | - |
+| 14. Enterprise DB UX Architecture | 0/TBD | Pending | - |
+| 15. LSP + Drawer Polish Batch | 0/TBD | Pending | - |
+| 16. LSP Feature Gap Closure | 0/TBD | Conditional | - |
