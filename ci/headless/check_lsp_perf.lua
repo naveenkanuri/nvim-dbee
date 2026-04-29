@@ -842,17 +842,32 @@ local function reset_column_fetch_tracking(handler)
 end
 
 local function register_column_miss_completion()
-  local shared_state = nil
+  local shared_cache = nil
+  local shared_handler = nil
   local fetch_deltas = {}
   local expected_deltas = { 1, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
   local query = "SELECT * FROM SCHEMA_001.TABLE_000001 t WHERE t."
 
-  local function make_miss_state()
-    local state = completion_before(100, {
-      preload_columns = false,
-    })
-    reset_column_fetch_tracking(state.cache.handler)
-    return state
+  local function ensure_shared_cache()
+    if not shared_cache then
+      shared_cache, shared_handler = make_cache(100, DEFAULT_COLUMNS_PER_TABLE, {
+        preload_columns = false,
+      })
+      reset_column_fetch_tracking(shared_handler)
+    end
+  end
+
+  local function make_miss_request_state()
+    ensure_shared_cache()
+    local bufnr, uri = make_buffer({ "" })
+    local client, client_id = start_lsp(shared_cache, bufnr)
+    return {
+      cache = shared_cache,
+      bufnr = bufnr,
+      uri = uri,
+      client = client,
+      client_id = client_id,
+    }
   end
 
   register({
@@ -860,18 +875,13 @@ local function register_column_miss_completion()
     threshold_key = "completion_column_miss_sync",
     corpus = "tables:100,context:column-miss-sync,alias:t,fetch_deltas:1-then-0",
     after_warmup_before_measured = function()
-      if not shared_state then
-        shared_state = make_miss_state()
-      end
-      shared_state.cache.columns = {}
-      reset_column_fetch_tracking(shared_state.cache.handler)
+      ensure_shared_cache()
+      shared_cache.columns = {}
+      reset_column_fetch_tracking(shared_handler)
       fetch_deltas = {}
     end,
     before = function()
-      if not shared_state then
-        shared_state = make_miss_state()
-      end
-      return shared_state
+      return make_miss_request_state()
     end,
     run = function(state, finish, iteration)
       local handler = state.cache.handler
@@ -885,9 +895,10 @@ local function register_column_miss_completion()
       finish(elapsed_ns)
     end,
     after = function(state, iteration)
+      completion_after(state)
       if iteration == WARMUP_COUNT + MEASURED_COUNT then
-        completion_after(state)
-        shared_state = nil
+        shared_cache = nil
+        shared_handler = nil
       end
     end,
     on_complete = function()
