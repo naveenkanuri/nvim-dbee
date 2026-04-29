@@ -457,7 +457,35 @@ local function stop_client(client_id)
   end
   local client = vim.lsp.get_client_by_id(client_id)
   if client then
-    client:stop(true)
+    client:stop()
+    vim.wait(1000, function()
+      return vim.lsp.get_client_by_id(client_id) == nil
+    end, 10)
+    client = vim.lsp.get_client_by_id(client_id)
+    if client then
+      client:stop(true)
+    end
+  end
+end
+
+local function lsp_clients_by_name(name)
+  if vim.lsp.get_clients then
+    return vim.lsp.get_clients({ name = name })
+  end
+  return vim.lsp.get_active_clients({ name = name })
+end
+
+local function assert_no_stale_perf_clients(slug, emit_success)
+  local ok = vim.wait(1000, function()
+    return #lsp_clients_by_name("dbee-lsp-perf") == 0
+  end, 10)
+  local no_stale = ok and #lsp_clients_by_name("dbee-lsp-perf") == 0
+  if emit_success or not no_stale then
+    emit("LSP01_" .. slug .. "_NO_STALE_CLIENTS", no_stale and "true" or "false")
+  end
+  if not no_stale then
+    scenario_sentinels[slug] = false
+    fail("stale dbee-lsp-perf clients remain after " .. slug)
   end
 end
 
@@ -627,6 +655,12 @@ local function cleanup_lsp(state)
   end
   if state.client_id then
     stop_client(state.client_id)
+  end
+  if state.scenario_slug then
+    assert_no_stale_perf_clients(
+      state.scenario_slug,
+      state.iteration == WARMUP_COUNT + MEASURED_COUNT
+    )
   end
   if state.bufnr and vim.api.nvim_buf_is_valid(state.bufnr) then
     pcall(vim.api.nvim_buf_delete, state.bufnr, { force = true })
@@ -1345,6 +1379,7 @@ local function run_benchmark(spec)
         spec.after_warmup_before_measured()
       end
       state = spec.before and spec.before(iteration) or {}
+      state.scenario_slug = spec.slug
       state.iteration = iteration
     end,
     after = function()
