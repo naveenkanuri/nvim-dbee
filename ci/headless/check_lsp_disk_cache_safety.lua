@@ -103,6 +103,19 @@ assert_eq("valid schema loads", cache:load_from_disk(), true)
 assert_true("corrupt column warning", has_warning("loading columns"))
 assert_true("corrupt column removed", vim.fn.filereadable(corrupt_col) == 0)
 
+local malformed_column_payloads = {
+  "{ }",
+  "null",
+  "[{}]",
+  vim.json.encode({ { name = "ID" } }),
+  vim.json.encode({ { type = "NUMBER" } }),
+}
+for index, payload in ipairs(malformed_column_payloads) do
+  write_file(corrupt_col, payload)
+  assert_eq("malformed column load " .. index, cache:load_from_disk(), true)
+  assert_true("malformed column removed " .. index, vim.fn.filereadable(corrupt_col) == 0)
+end
+
 local prune_cache = new_cache("disk-prune")
 local uv = vim.uv or vim.loop
 for i = 1, 3 do
@@ -159,6 +172,7 @@ vim.notify = saved_notify
 
 print("LSP11_ATOMIC_WRITE_OK=true")
 print("LSP11_CORRUPT_CACHE_RECOVERED=true")
+print("LSP11_DISK_CORRUPT_RECOVERY_OK=true")
 print("LSP11_DISK_PRUNE_COUNT=" .. tostring(prune_cache:get_stats().disk_pruned))
 print("LSP11_DISK_CACHE_ISOLATED=true")
 print("LSP11_DISK_LOAD_BOUNDED=true")

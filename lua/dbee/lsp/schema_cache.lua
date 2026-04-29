@@ -494,6 +494,49 @@ function SchemaCache:_rebuild_column_indexes()
 end
 
 ---@private
+---@param tbl any
+---@return boolean
+local function is_array(tbl)
+  if type(tbl) ~= "table" then
+    return false
+  end
+  if vim.islist then
+    return vim.islist(tbl)
+  end
+  if vim.tbl_islist then
+    return vim.tbl_islist(tbl)
+  end
+
+  local count = 0
+  local max_index = 0
+  for key, _ in pairs(tbl) do
+    if type(key) ~= "number" or key < 1 or key % 1 ~= 0 then
+      return false
+    end
+    count = count + 1
+    if key > max_index then
+      max_index = key
+    end
+  end
+  return count == max_index
+end
+
+---@private
+---@param cols any
+---@return boolean
+function SchemaCache:_validate_columns(cols)
+  if not is_array(cols) then
+    return false
+  end
+  for _, col in ipairs(cols) do
+    if type(col) ~= "table" or type(col.name) ~= "string" or type(col.type) ~= "string" then
+      return false
+    end
+  end
+  return true
+end
+
+---@private
 ---@param path string
 ---@return table?
 function SchemaCache:_file_stat(path)
@@ -554,6 +597,10 @@ function SchemaCache:_load_column_file(path, prefix)
   f:close()
   local ok, cols = pcall(vim.json.decode, content)
   if not ok or not cols then
+    self:_remove_corrupt_file(path, "loading columns")
+    return false
+  end
+  if not self:_validate_columns(cols) then
     self:_remove_corrupt_file(path, "loading columns")
     return false
   end
