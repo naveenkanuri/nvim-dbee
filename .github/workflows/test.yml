@@ -300,6 +300,9 @@ jobs:
           grep -q '^LSP11_DIAGNOSTIC_NAMESPACE_OK=true$' "${log}"
           grep -q '^LSP11_DIAGNOSTICS_SINGLE_NAMESPACE_OWNED=true$' "${log}"
           grep -Eq '^LSP01_REAL_LSP_PERF_ALL_PASS=(true|unfrozen)$' "${log}"
+          grep -q '^UX13_DRAWER_FILTER_EXPANDED_CACHED_VS_VISIBLE_OK=true$' "${log}"
+          grep -q '^UX13_WIZARD_NUI_WIN_OPTIONS_THREADED=true$' "${log}"
+          grep -q '^UX13_ALL_PASS=true$' "${log}"
       - name: LSP advisory promotion seam
         if: always()
         run: |

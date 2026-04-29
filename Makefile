@@ -20,6 +20,9 @@ LSP01_PERF_ARTIFACT_DIR ?= $(LSP_PERF_ARTIFACT_ROOT)/$(PERF_PLATFORM)
 LSP01_PERF_SUMMARY_PATH ?= $(LSP01_PERF_ARTIFACT_DIR)/lsp01-summary.txt
 LSP01_PERF_TRACE_PATH ?= $(LSP01_PERF_ARTIFACT_DIR)/lsp01-trace.json
 LSP01_PERF_STATE_HOME ?= $(LSP01_PERF_ARTIFACT_DIR)/state-home
+UX13_ROLLUP_SCRIPT ?= $(CURDIR)/ci/headless/check_ux13_rollup.lua
+UX13_ROLLUP_ARTIFACT_DIR ?= $(LSP01_PERF_ARTIFACT_DIR)
+UX13_ROLLUP_LOG ?= $(UX13_ROLLUP_ARTIFACT_DIR)/ux13-rollup-stdout.log
 
 .PHONY: perf perf-lsp perf-all
 
@@ -61,22 +64,66 @@ perf-lsp: perf-bootstrap
 	    exit 1; \
 	    ;; \
 	esac; \
-	mkdir -p "$(LSP01_PERF_ARTIFACT_DIR)" "$(LSP01_PERF_STATE_HOME)"; \
-	printf '%s\n' "Running: LSP01_PERF_GATE_MODE=$(LSP01_PERF_GATE_MODE) LSP01_ALLOW_NONPUBLISHABLE_PLATFORM_OVERRIDE=$(LSP01_ALLOW_NONPUBLISHABLE_PLATFORM_OVERRIDE) PERF_PLATFORM=$(PERF_PLATFORM) LSP01_PERF_ARTIFACT_DIR=$(LSP01_PERF_ARTIFACT_DIR) LSP01_PERF_SUMMARY_PATH=$(LSP01_PERF_SUMMARY_PATH) LSP01_PERF_TRACE_PATH=$(LSP01_PERF_TRACE_PATH) LSP01_PERF_THRESHOLD_FILE=$(LSP01_PERF_THRESHOLD_FILE) XDG_STATE_HOME=$(LSP01_PERF_STATE_HOME) $(PERF_NVIM_HEADLESS) -c \"luafile $(LSP_PERF_SCRIPT)\""; \
-	LSP01_PERF_GATE_MODE="$(LSP01_PERF_GATE_MODE)" \
-	LSP01_ALLOW_NONPUBLISHABLE_PLATFORM_OVERRIDE="$(LSP01_ALLOW_NONPUBLISHABLE_PLATFORM_OVERRIDE)" \
-	PERF_PLATFORM="$(PERF_PLATFORM)" \
-	LSP01_PERF_ARTIFACT_DIR="$(LSP01_PERF_ARTIFACT_DIR)" \
-	LSP01_PERF_SUMMARY_PATH="$(LSP01_PERF_SUMMARY_PATH)" \
-	LSP01_PERF_TRACE_PATH="$(LSP01_PERF_TRACE_PATH)" \
-	LSP01_PERF_THRESHOLD_FILE="$(LSP01_PERF_THRESHOLD_FILE)" \
-	XDG_STATE_HOME="$(LSP01_PERF_STATE_HOME)" \
-	$(PERF_NVIM_HEADLESS) -c "luafile $(LSP_PERF_SCRIPT)" || { \
+	mkdir -p "$(LSP01_PERF_ARTIFACT_DIR)" "$(LSP01_PERF_STATE_HOME)" "$(UX13_ROLLUP_ARTIFACT_DIR)"; \
+	: > "$(UX13_ROLLUP_LOG)"; \
+	run_logged() { \
+	  label="$$1"; \
+	  shift; \
+	  tmp="$$(mktemp)"; \
+	  "$$@" >"$$tmp" 2>&1; \
 	  status="$$?"; \
-	  printf '%s\n' "perf-lsp failed with status $$status" >&2; \
-	  printf '%s\n' "summary path: $(LSP01_PERF_SUMMARY_PATH)" >&2; \
-	  printf '%s\n' "trace path: $(LSP01_PERF_TRACE_PATH)" >&2; \
-	  exit "$$status"; \
-	}
+	  cat "$$tmp"; \
+	  printf '\n'; \
+	  cat "$$tmp" >> "$(UX13_ROLLUP_LOG)"; \
+	  printf '\n' >> "$(UX13_ROLLUP_LOG)"; \
+	  rm -f "$$tmp"; \
+	  if [ "$$status" -ne 0 ]; then \
+	    printf '%s\n' "$$label failed with status $$status" >&2; \
+	    printf '%s\n' "rollup log path: $(UX13_ROLLUP_LOG)" >&2; \
+	    exit "$$status"; \
+	  fi; \
+	}; \
+	printf '%s\n' "Running: LSP01_PERF_GATE_MODE=$(LSP01_PERF_GATE_MODE) LSP01_ALLOW_NONPUBLISHABLE_PLATFORM_OVERRIDE=$(LSP01_ALLOW_NONPUBLISHABLE_PLATFORM_OVERRIDE) PERF_PLATFORM=$(PERF_PLATFORM) LSP01_PERF_ARTIFACT_DIR=$(LSP01_PERF_ARTIFACT_DIR) LSP01_PERF_SUMMARY_PATH=$(LSP01_PERF_SUMMARY_PATH) LSP01_PERF_TRACE_PATH=$(LSP01_PERF_TRACE_PATH) LSP01_PERF_THRESHOLD_FILE=$(LSP01_PERF_THRESHOLD_FILE) XDG_STATE_HOME=$(LSP01_PERF_STATE_HOME) $(PERF_NVIM_HEADLESS) -c \"luafile $(LSP_PERF_SCRIPT)\""; \
+	run_logged "perf-lsp" env \
+	  LSP01_PERF_GATE_MODE="$(LSP01_PERF_GATE_MODE)" \
+	  LSP01_ALLOW_NONPUBLISHABLE_PLATFORM_OVERRIDE="$(LSP01_ALLOW_NONPUBLISHABLE_PLATFORM_OVERRIDE)" \
+	  PERF_PLATFORM="$(PERF_PLATFORM)" \
+	  LSP01_PERF_ARTIFACT_DIR="$(LSP01_PERF_ARTIFACT_DIR)" \
+	  LSP01_PERF_SUMMARY_PATH="$(LSP01_PERF_SUMMARY_PATH)" \
+	  LSP01_PERF_TRACE_PATH="$(LSP01_PERF_TRACE_PATH)" \
+	  LSP01_PERF_THRESHOLD_FILE="$(LSP01_PERF_THRESHOLD_FILE)" \
+	  XDG_STATE_HOME="$(LSP01_PERF_STATE_HOME)" \
+	  $(PERF_NVIM_HEADLESS) -c "luafile $(LSP_PERF_SCRIPT)"; \
+	for script in \
+	  check_lsp_alias_completion.lua \
+	  check_lsp_schema_alias_completion.lua \
+	  check_lsp_alias_rebinding.lua \
+	  check_lsp_schema_cache_optimization.lua \
+	  check_lsp_disk_cache_safety.lua \
+	  check_lsp_async_completion.lua \
+	  check_lsp_diagnostics_correctness.lua \
+	  check_lsp_diagnostics_debounce.lua \
+	  check_drawer_filter.lua \
+	  check_structure_lazy.lua \
+	  check_notes_picker.lua \
+	  check_connection_lifecycle.lua \
+	  check_connection_coordination.lua \
+	  check_connection_wizard.lua \
+	  check_filesource_persistence.lua; \
+	do \
+	  run_logged "$$script" env XDG_STATE_HOME="$(LSP01_PERF_STATE_HOME)" \
+	    $(PERF_NVIM_HEADLESS) -c "luafile $(CURDIR)/ci/headless/$$script"; \
+	done; \
+	run_logged "perf" env XDG_STATE_HOME="$(LSP01_PERF_STATE_HOME)" $(MAKE) --no-print-directory perf \
+	  PERF_PLATFORM="$(PERF_PLATFORM)" \
+	  DRAW01_PERF_GATE_MODE="$(DRAW01_PERF_GATE_MODE)" \
+	  DRAW01_PERF_ARTIFACT_DIR="$(DRAW01_PERF_ARTIFACT_DIR)" \
+	  DRAW01_PERF_SUMMARY_PATH="$(DRAW01_PERF_SUMMARY_PATH)" \
+	  DRAW01_PERF_TRACE_PATH="$(DRAW01_PERF_TRACE_PATH)" \
+	  DRAW01_PERF_THRESHOLD_FILE="$(DRAW01_PERF_THRESHOLD_FILE)" \
+	  NVIM_BIN="$(NVIM_BIN)" \
+	  PERF_PLUGIN_ROOT="$(PERF_PLUGIN_ROOT)"; \
+	run_logged "ux13-rollup" env UX13_ROLLUP_LOG="$(UX13_ROLLUP_LOG)" \
+	  $(PERF_NVIM_HEADLESS) -c "luafile $(UX13_ROLLUP_SCRIPT)"
 
 perf-all: perf perf-lsp
