@@ -1557,6 +1557,101 @@ local function run_database_switch_and_reconnect_contracts()
 
   env_reconnect_ambiguous:cleanup()
 
+  local env_retry_restore = new_env({
+    current_conn_id = "conn-alpha",
+  })
+  local retry_api = require("dbee.api")
+  local original_retry_execute = retry_api.core.connection_execute
+  retry_api.core.connection_execute = function(conn_id, query, exec_opts)
+    env_retry_restore.handler:set_current_connection(conn_id)
+    return original_retry_execute(conn_id, query, exec_opts)
+  end
+  env_retry_restore.source._specs = {
+    {
+      id = "conn-alpha",
+      name = "Alpha",
+      type = "postgres",
+      url = "postgres://alpha",
+    },
+    {
+      id = "conn-beta-v2",
+      name = "Beta",
+      type = "postgres",
+      url = "postgres://beta",
+    },
+  }
+  local retry_meta = {
+    conn_id = "conn-beta",
+    conn_name = "Beta",
+    conn_type = "postgres",
+    resolved_query = "select retry restore",
+  }
+  env_retry_restore.reconnect.register_call("call-retry-restore", retry_meta)
+  local retry_ok, _, retry_conn_id = env_retry_restore.reconnect.retry_call("conn-beta", "call-retry-restore", retry_meta, {
+    restore_current = true,
+  })
+  Harness.drain()
+  assert_true("retry_restore_ok", retry_ok)
+  assert_eq("retry_restore_conn_id", retry_conn_id, "conn-beta-v2")
+  assert_eq(
+    "retry_restore_exec_conn",
+    env_retry_restore.runtime.executed_queries[#env_retry_restore.runtime.executed_queries].conn_id,
+    "conn-beta-v2"
+  )
+  assert_eq("retry_restore_current_conn", env_retry_restore.handler:get_current_connection().id, "conn-alpha")
+  env_retry_restore:cleanup()
+
+  local env_retry_restore_rewrite = new_env({
+    current_conn_id = "conn-alpha",
+  })
+  local retry_rewrite_api = require("dbee.api")
+  local original_retry_rewrite_execute = retry_rewrite_api.core.connection_execute
+  retry_rewrite_api.core.connection_execute = function(conn_id, query, exec_opts)
+    env_retry_restore_rewrite.handler:set_current_connection(conn_id)
+    return original_retry_rewrite_execute(conn_id, query, exec_opts)
+  end
+  env_retry_restore_rewrite.source._specs = {
+    {
+      id = "conn-alpha-v2",
+      name = "Alpha",
+      type = "postgres",
+      url = "postgres://alpha",
+    },
+    {
+      id = "conn-beta-v2",
+      name = "Beta",
+      type = "postgres",
+      url = "postgres://beta",
+    },
+  }
+  local retry_fn_meta = {
+    conn_id = "conn-beta",
+    conn_name = "Beta",
+    conn_type = "postgres",
+    retry_fn = function(reconnected_conn_id)
+      local call = retry_rewrite_api.core.connection_execute(reconnected_conn_id, "select retry fn restore")
+      return call.id, nil
+    end,
+  }
+  env_retry_restore_rewrite.reconnect.register_call("call-retry-restore-fn", retry_fn_meta)
+  local retry_fn_ok, retry_fn_call_id, retry_fn_conn_id =
+    env_retry_restore_rewrite.reconnect.retry_call("conn-beta", "call-retry-restore-fn", retry_fn_meta, {
+      restore_current = true,
+    })
+  Harness.drain()
+  assert_true("retry_restore_fn_ok", retry_fn_ok)
+  assert_eq("retry_restore_fn_call_id", retry_fn_call_id, "call-1")
+  assert_eq("retry_restore_fn_conn_id", retry_fn_conn_id, "conn-beta-v2")
+  assert_eq(
+    "retry_restore_fn_exec_conn",
+    env_retry_restore_rewrite.runtime.executed_queries[#env_retry_restore_rewrite.runtime.executed_queries].conn_id,
+    "conn-beta-v2"
+  )
+  assert_eq("retry_restore_fn_current_conn", env_retry_restore_rewrite.handler:get_current_connection().id, "conn-alpha-v2")
+  print("LIFECYCLE01_RETRY_RESTORES_CURRENT_OK=true")
+
+  env_retry_restore_rewrite:cleanup()
+
 end
 
 local function run_lsp_retarget_rewarm_contracts()

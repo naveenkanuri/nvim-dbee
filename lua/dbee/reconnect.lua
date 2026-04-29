@@ -214,6 +214,79 @@ local function resolve_reloaded_connection(reload_result, previous)
   return params, nil
 end
 
+---@return Handler|nil
+local function try_get_handler()
+  local ok_state, state = pcall(get_state)
+  if not ok_state or not state or type(state.handler) ~= "function" then
+    return nil
+  end
+
+  local ok_handler, handler = pcall(state.handler)
+  if not ok_handler then
+    return nil
+  end
+
+  return handler
+end
+
+---@param api table
+---@return ConnectionParams|nil
+local function safe_get_current_connection(api)
+  if not api or not api.core or type(api.core.get_current_connection) ~= "function" then
+    return nil
+  end
+
+  local ok_current, current_or_err = pcall(api.core.get_current_connection)
+  if not ok_current then
+    return nil
+  end
+
+  return current_or_err
+end
+
+---@param api table
+---@param handler Handler|nil
+---@return boolean
+---@return any
+local function clear_current_connection(api, handler)
+  if handler and type(handler.connection_clear_current) == "function" then
+    return pcall(handler.connection_clear_current, handler)
+  end
+  if api and api.core and type(api.core.connection_clear_current) == "function" then
+    return pcall(api.core.connection_clear_current)
+  end
+  return false, "current-connection clear not available"
+end
+
+---@param api table
+---@param handler Handler|nil
+---@param reload_result { new_conn_ids?: connection_id[], rewrites?: { old_conn_id: connection_id, new_conn_id: connection_id }[] }|nil
+---@param previous_current ConnectionParams|nil
+---@param target_conn_id connection_id
+---@return boolean
+---@return string|nil
+local function restore_previous_current(api, handler, reload_result, previous_current, target_conn_id)
+  if not previous_current or not previous_current.id or previous_current.id == target_conn_id then
+    return true, nil
+  end
+
+  local restored_conn, restore_err = resolve_reloaded_connection(reload_result, previous_current)
+  if restored_conn and restored_conn.id then
+    local ok_restore, restore_set_err = pcall(api.core.set_current_connection, restored_conn.id)
+    if ok_restore then
+      return true, nil
+    end
+    return false, tostring(restore_set_err)
+  end
+
+  local ok_clear, clear_err = clear_current_connection(api, handler)
+  if ok_clear then
+    return true, nil
+  end
+
+  return false, tostring(restore_err or clear_err)
+end
+
 ---@param conn_id connection_id
 ---@return { prompt_open: boolean, declined: boolean, latest_call_id: call_id|nil, latest_failed_ts: integer, owned_call_ids: table<call_id, true> }
 local function ensure_episode(conn_id)
@@ -442,6 +515,7 @@ end
 ---@return string|connection_id|nil
 ---@return string|nil
 ---@return string|nil
+---@return table|nil
 function M.reconnect_connection(conn_id, opts)
   M.ensure_reconnect_listener()
   opts = opts or {}
@@ -451,16 +525,12 @@ function M.reconnect_connection(conn_id, opts)
     return false, "dbee core not loaded", nil, nil
   end
 
-  local handler = get_state().handler()
+  local handler = try_get_handler()
   if not handler or type(handler.source_reload_reconnect) ~= "function" then
-    return false, "silent reconnect reload is not supported by current handler", nil, nil
+    return false, "silent reconnect reload is not supported by current handler", nil, nil, nil
   end
 
-  local previous_current = nil
-  local ok_current, current_or_err = pcall(api.core.get_current_connection)
-  if ok_current then
-    previous_current = current_or_err
-  end
+  local previous_current = safe_get_current_connection(api)
 
   local target_conn = nil
   if previous_current and previous_current.id == conn_id then
@@ -472,25 +542,25 @@ function M.reconnect_connection(conn_id, opts)
     end
   end
   if not target_conn then
-    return false, "could not load connection params for reconnect target", nil, nil
+    return false, "could not load connection params for reconnect target", nil, nil, nil
   end
 
   local source_id = find_source_id_for_connection(conn_id)
   if not source_id then
-    return false, "could not locate source for current connection", nil, nil
+    return false, "could not locate source for current connection", nil, nil, nil
   end
 
   M.reset_connection_episode(conn_id)
 
   local ok_reload, reload_result_or_err = pcall(handler.source_reload_reconnect, handler, source_id)
   if not ok_reload then
-    return false, "failed reloading connection source: " .. tostring(reload_result_or_err), nil, nil
+    return false, "failed reloading connection source: " .. tostring(reload_result_or_err), nil, nil, nil
   end
   local reload_result = reload_result_or_err
 
   local reloaded_conn, resolve_err = resolve_reloaded_connection(reload_result, target_conn)
   if not reloaded_conn then
-    return false, resolve_err, nil, nil
+    return false, resolve_err, nil, nil, reload_result
   end
 
   if reloaded_conn.id ~= conn_id and type(handler.migrate_structure_flights) == "function" then
@@ -499,10 +569,22 @@ function M.reconnect_connection(conn_id, opts)
 
   M.reset_connection_episode(reloaded_conn.id)
 
+  local ok_select, select_err = pcall(api.core.set_current_connection, reloaded_conn.id)
+  if not ok_select then
+    return false, tostring(select_err), nil, nil, reload_result
+  end
+
+  if opts.restore_current ~= false then
+    local ok_restore, restore_err = restore_previous_current(api, handler, reload_result, previous_current, conn_id)
+    if not ok_restore then
+      return false, restore_err, nil, nil, reload_result
+    end
+  end
+
   local current_after = nil
-  local ok_after, current_or_err = pcall(api.core.get_current_connection)
-  if ok_after and current_or_err and current_or_err.id then
-    current_after = current_or_err.id
+  local current_conn = safe_get_current_connection(api)
+  if current_conn and current_conn.id then
+    current_after = current_conn.id
   end
   reload_result.current_conn_id_after = current_after
 
@@ -510,7 +592,7 @@ function M.reconnect_connection(conn_id, opts)
     handler:emit_connection_invalidated_silent("reconnect_rewrite", reload_result)
   end
 
-  return true, reloaded_conn.id, reloaded_conn.name, reloaded_conn.type
+  return true, reloaded_conn.id, reloaded_conn.name, reloaded_conn.type, reload_result
 end
 
 ---@param target_conn_id connection_id
@@ -524,8 +606,13 @@ end
 function M.retry_call(target_conn_id, call_id, meta, opts)
   opts = opts or {}
   local api = get_api()
-  local ok_conn, new_conn_id_or_err, new_conn_name, new_conn_type =
-    M.reconnect_connection(target_conn_id, { restore_current = opts.restore_current ~= false })
+  local previous_current = nil
+  if opts.restore_current ~= false then
+    previous_current = safe_get_current_connection(api)
+  end
+
+  local ok_conn, new_conn_id_or_err, new_conn_name, new_conn_type, reload_result =
+    M.reconnect_connection(target_conn_id, { restore_current = false })
   if not ok_conn then
     return false, new_conn_id_or_err, nil, nil
   end
@@ -546,6 +633,13 @@ function M.retry_call(target_conn_id, call_id, meta, opts)
 
   if updated_meta.retry_fn then
     local new_call_id, retry_err = updated_meta.retry_fn(new_conn_id, updated_meta)
+    if opts.restore_current ~= false then
+      local ok_restore, restore_err =
+        restore_previous_current(api, try_get_handler(), reload_result, previous_current, target_conn_id)
+      if not ok_restore then
+        return false, restore_err, new_conn_id, updated_meta
+      end
+    end
     if retry_err then
       return false, retry_err, new_conn_id, updated_meta
     end
@@ -554,6 +648,13 @@ function M.retry_call(target_conn_id, call_id, meta, opts)
 
   local ok_exec, new_call_or_err =
     pcall(api.core.connection_execute, new_conn_id, updated_meta.resolved_query, updated_meta.exec_opts)
+  if opts.restore_current ~= false then
+    local ok_restore, restore_err =
+      restore_previous_current(api, try_get_handler(), reload_result, previous_current, target_conn_id)
+    if not ok_restore then
+      return false, restore_err, new_conn_id, updated_meta
+    end
+  end
   if not ok_exec or not new_call_or_err then
     return false, new_call_or_err, new_conn_id, updated_meta
   end
