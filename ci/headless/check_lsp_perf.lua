@@ -916,6 +916,273 @@ end
 
 register_column_miss_completion()
 
+local function make_diagnostic_lines(line_count)
+  local lines = {}
+  for i = 1, line_count do
+    lines[i] = "SELECT 1"
+  end
+  lines[1] = "FROM TABLE_000001"
+  local invalid_index = math.max(2, math.floor(line_count / 2))
+  lines[invalid_index] = "FROM MISSING_TABLE_001"
+  return lines, invalid_index - 1
+end
+
+local function request_diagnostics(state, method, lines, expected_line)
+  vim.api.nvim_buf_set_lines(state.bufnr, 0, -1, false, lines)
+  local prior_handler = vim.lsp.handlers["textDocument/publishDiagnostics"]
+  local done = false
+  local response = nil
+  local start_ns = uv.hrtime()
+  vim.lsp.handlers["textDocument/publishDiagnostics"] = function(err, result, ctx, config)
+    if result and result.uri == state.uri then
+      response = {
+        err = err,
+        result = result,
+        elapsed_ns = uv.hrtime() - start_ns,
+      }
+      done = true
+    elseif prior_handler then
+      prior_handler(err, result, ctx, config)
+    end
+  end
+
+  local params = {
+    textDocument = {
+      uri = state.uri,
+      version = state.iteration or 1,
+    },
+  }
+  if method == "textDocument/didChange" then
+    params.contentChanges = {
+      { text = table.concat(lines, "\n") },
+    }
+  end
+
+  state.client:notify(method, params)
+
+  local ok = vim.wait(1000, function()
+    return done
+  end, 5)
+  vim.lsp.handlers["textDocument/publishDiagnostics"] = prior_handler
+  if not ok or not response then
+    error("diagnostics timeout")
+  end
+  if response.err then
+    error("diagnostics error: " .. tostring(response.err))
+  end
+  local diagnostics = response.result and response.result.diagnostics
+  if type(diagnostics) ~= "table" then
+    error("invalid diagnostics response")
+  end
+
+  local found_missing = false
+  local found_valid = false
+  local found_range = false
+  for _, diagnostic in ipairs(diagnostics) do
+    if diagnostic.message == "Unknown table: MISSING_TABLE_001" then
+      found_missing = true
+      local range = diagnostic.range or {}
+      local start = range.start or {}
+      local finish = range["end"] or {}
+      if start.line == expected_line and start.character == 5
+        and finish.line == expected_line and finish.character == 22 then
+        found_range = true
+      end
+    end
+    if diagnostic.message == "Unknown table: TABLE_000001" then
+      found_valid = true
+    end
+  end
+
+  if #diagnostics ~= 1 or not found_missing or not found_range or found_valid then
+    error(("unexpected diagnostics: count=%d found_missing=%s found_range=%s found_valid=%s"):format(
+      #diagnostics,
+      tostring(found_missing),
+      tostring(found_range),
+      tostring(found_valid)
+    ))
+  end
+
+  return diagnostics, response.elapsed_ns
+end
+
+local function register_diagnostics(slug, threshold_key, line_count, method)
+  register({
+    slug = slug,
+    threshold_key = threshold_key,
+    corpus = ("lines:%d,method:%s,invalid:MISSING_TABLE_001"):format(line_count, method:match("did(%w+)$") or method),
+    before = function()
+      return completion_before(100, {
+        preload_columns = false,
+      })
+    end,
+    run = function(state, finish)
+      local lines, expected_line = make_diagnostic_lines(line_count)
+      local _, elapsed_ns = request_diagnostics(state, method, lines, expected_line)
+      finish(elapsed_ns)
+    end,
+    after = completion_after,
+  })
+end
+
+register_diagnostics("DIAGNOSTICS_DIDCHANGE_100", "diagnostics_didchange_100", 100, "textDocument/didChange")
+register_diagnostics("DIAGNOSTICS_DIDCHANGE_1000", "diagnostics_didchange_1000", 1000, "textDocument/didChange")
+register_diagnostics("DIAGNOSTICS_DIDCHANGE_10000", "diagnostics_didchange_10000", 10000, "textDocument/didChange")
+register_diagnostics("DIAGNOSTICS_DIDSAVE_100", "diagnostics_didsave_100", 100, "textDocument/didSave")
+register_diagnostics("DIAGNOSTICS_DIDSAVE_1000", "diagnostics_didsave_1000", 1000, "textDocument/didSave")
+register_diagnostics("DIAGNOSTICS_DIDSAVE_10000", "diagnostics_didsave_10000", 10000, "textDocument/didSave")
+
+local function request_completion_lines(state, lines, line_index, character, context)
+  vim.api.nvim_buf_set_lines(state.bufnr, 0, -1, false, lines)
+  local params = {
+    textDocument = { uri = state.uri },
+    position = {
+      line = line_index,
+      character = character or #lines[line_index + 1],
+    },
+  }
+  if context then
+    params.context = context
+  end
+
+  local done = false
+  local response = nil
+  local start_ns = uv.hrtime()
+  state.client:request("textDocument/completion", params, function(err, result)
+    response = {
+      err = err,
+      result = result,
+      elapsed_ns = uv.hrtime() - start_ns,
+    }
+    done = true
+  end, state.bufnr)
+
+  local ok = vim.wait(1000, function()
+    return done
+  end, 5)
+  if not ok or not response then
+    error("completion timeout")
+  end
+  if response.err then
+    error("completion error: " .. tostring(response.err))
+  end
+  if type(response.result) ~= "table" or type(response.result.items) ~= "table" then
+    error("invalid completion response")
+  end
+  return response.result.items, response.elapsed_ns
+end
+
+local function alias_nested_cte_lines()
+  local lines = {
+    "WITH c1 AS (",
+    "  SELECT * FROM SCHEMA_001.TABLE_000001 t1",
+    "),",
+    "c2 AS (",
+    "  SELECT * FROM SCHEMA_001.TABLE_000002 t2",
+    "),",
+    "c3 AS (",
+    "  SELECT * FROM SCHEMA_001.TABLE_000003 t3",
+    ")",
+  }
+  while #lines < 39 do
+    lines[#lines + 1] = "  -- deterministic filler"
+  end
+  lines[#lines + 1] = "SELECT * FROM SCHEMA_001.TABLE_000003 t3 WHERE t3."
+  return lines
+end
+
+local function alias_multiline_lines()
+  local lines = {
+    "SELECT",
+    "  t1.COL_001,",
+    "  t2.COL_001,",
+    "  t3.COL_001,",
+    "  t4.COL_001",
+    "FROM",
+    "  SCHEMA_001.TABLE_000001 t1",
+    "JOIN",
+    "  SCHEMA_001.TABLE_000002 t2",
+    "ON t2.COL_001 = t1.COL_001",
+    "JOIN",
+    "  SCHEMA_001.TABLE_000003 t3",
+    "ON t3.COL_001 = t2.COL_001",
+    "JOIN",
+    "  SCHEMA_001.TABLE_000004 t4",
+    "ON t4.COL_001 = t3.COL_001",
+  }
+  while #lines < 24 do
+    lines[#lines + 1] = "  -- deterministic filler"
+  end
+  lines[#lines + 1] = "WHERE t4."
+  return lines
+end
+
+local function register_alias_completion(slug, threshold_key, lines_factory, expected_line, corpus)
+  register({
+    slug = slug,
+    threshold_key = threshold_key,
+    corpus = corpus,
+    before = function()
+      return completion_before(100, {
+        preload_columns = true,
+      })
+    end,
+    run = function(state, finish)
+      local lines = lines_factory()
+      local line_index = expected_line or (#lines - 1)
+      local items, elapsed_ns = request_completion_lines(state, lines, line_index, #lines[line_index + 1])
+      require_completion_labels(slug, items, { "COL_001", "COL_010" }, { "COL_999" })
+      finish(elapsed_ns)
+    end,
+    after = completion_after,
+  })
+end
+
+register_alias_completion(
+  "ALIAS_SIMPLE_SELECT",
+  "alias_simple_select",
+  function()
+    return { "SELECT * FROM SCHEMA_001.TABLE_000001 t WHERE t." }
+  end,
+  0,
+  "lines:1,aliases:1,cursor:t_dot"
+)
+
+register_alias_completion(
+  "ALIAS_NESTED_CTE",
+  "alias_nested_cte",
+  alias_nested_cte_lines,
+  nil,
+  "lines:40,cte_depth:3,aliases:3,cursor:t3_dot"
+)
+
+register_alias_completion(
+  "ALIAS_MULTILINE",
+  "alias_multiline",
+  alias_multiline_lines,
+  nil,
+  "lines:25,joins:3,aliases:4,cursor:t4_dot"
+)
+
+register_alias_completion(
+  "ALIAS_MULTI_JOIN",
+  "alias_multi_join",
+  function()
+    return {
+      table.concat({
+        "SELECT * FROM SCHEMA_001.TABLE_000001 t1",
+        "JOIN SCHEMA_001.TABLE_000002 t2 ON t2.COL_001 = t1.COL_001",
+        "JOIN SCHEMA_001.TABLE_000003 t3 ON t3.COL_001 = t2.COL_001",
+        "JOIN SCHEMA_001.TABLE_000004 t4 ON t4.COL_001 = t3.COL_001",
+        "JOIN SCHEMA_001.TABLE_000005 t5 ON t5.COL_001 = t4.COL_001",
+        "WHERE t5.",
+      }, " "),
+    }
+  end,
+  0,
+  "lines:1,joins:5,aliases:5,cursor:t5_dot"
+)
+
 local function run_benchmark(spec)
   local iteration = 0
   local state = nil
