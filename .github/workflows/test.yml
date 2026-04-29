@@ -239,6 +239,7 @@ jobs:
             nvim --headless -u NONE -i NONE -n \
               --cmd "set rtp^=${NIO_NVIM_DIR} | set rtp+=${GITHUB_WORKSPACE}" \
               -c "luafile ${GITHUB_WORKSPACE}/ci/headless/${script}" 2>&1 | tee -a "${LSP01_PERF_ARTIFACT_DIR}/lsp01-stdout.log"
+            printf '\n' | tee -a "${LSP01_PERF_ARTIFACT_DIR}/lsp01-stdout.log"
           done
       - name: Assert advisory LSP perf artifacts exist
         if: always()
