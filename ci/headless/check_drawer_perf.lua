@@ -944,6 +944,152 @@ local function build_filter_stable_metrics()
   })
 end
 
+local BIG_COLUMN_COUNT = 2000
+local BIG_COLUMNS = {}
+for index = 1, BIG_COLUMN_COUNT do
+  BIG_COLUMNS[#BIG_COLUMNS + 1] = {
+    name = string.format("col_%04d", index),
+    type = "NUMBER",
+  }
+end
+
+local function build_structure_perf_spec()
+  local conn_id = "conn-structure"
+  local schema_name = "warehouse"
+  local source_connections = {
+    source1 = {
+      { id = conn_id, name = "Structure Connection", type = "postgres" },
+    },
+  }
+
+  local schema_id = convert.structure_node_id(conn_id, {
+    type = "schema",
+    name = schema_name,
+    schema = schema_name,
+  })
+  local big_table_id = convert.structure_node_id(schema_id, {
+    type = "table",
+    name = "big_table",
+    schema = schema_name,
+  })
+  local sentinel_id = convert.load_more_node_id(big_table_id)
+
+  local children = {
+    { type = "table", name = "big_table", schema = schema_name },
+  }
+  for index = 1, 99 do
+    children[#children + 1] = {
+      type = "table",
+      name = string.format("wide_table_%04d", index),
+      schema = schema_name,
+    }
+  end
+
+  local root_cache = {
+    [conn_id] = {
+      structures = {
+        {
+          type = "schema",
+          name = schema_name,
+          schema = schema_name,
+          children = children,
+        },
+      },
+    },
+  }
+
+  local branches = {
+    [conn_id] = {
+      [branch_cache_key(big_table_id, COLUMNS_KIND)] = {
+        raw = deepcopy(BIG_COLUMNS),
+        error = nil,
+        built_count = 1000,
+        render_limit = 1000,
+        request_gen = 0,
+        applied_gen = 0,
+        loading = false,
+      },
+    },
+  }
+
+  return {
+    source_connections = source_connections,
+    root_cache = root_cache,
+    branches = branches,
+    ids = {
+      conn_id = conn_id,
+      schema_id = schema_id,
+      big_table_id = big_table_id,
+      sentinel_id = sentinel_id,
+    },
+  }
+end
+
+local STRUCTURE_PERF_SPEC = build_structure_perf_spec()
+
+local function new_structure_perf_fixture()
+  return new_drawer_fixture({
+    source_connections = STRUCTURE_PERF_SPEC.source_connections,
+    root_cache = STRUCTURE_PERF_SPEC.root_cache,
+    branches = STRUCTURE_PERF_SPEC.branches,
+  })
+end
+
+local function build_cached_expand_metrics()
+  return run_benchmark({
+    title = "DRAW01 cached expand",
+    before = function()
+      return new_structure_perf_fixture()
+    end,
+    run = function(state, finish)
+      set_current_node(state.winid, state.drawer.tree, STRUCTURE_PERF_SPEC.ids.conn_id)
+      local sample_ns = measure_sync_drawer_write(state.drawer.bufnr, function()
+        state.drawer:get_actions().expand()
+      end)
+      finish(sample_ns)
+    end,
+  })
+end
+
+local function build_lazy_expand_metrics()
+  return run_benchmark({
+    title = "DRAW01 lazy expand",
+    before = function()
+      local state = new_structure_perf_fixture()
+      expand_node_and_wait(state, STRUCTURE_PERF_SPEC.ids.conn_id, STRUCTURES_KIND)
+      return state
+    end,
+    run = function(state, finish)
+      set_current_node(state.winid, state.drawer.tree, STRUCTURE_PERF_SPEC.ids.schema_id)
+      local sample_ns = measure_sync_drawer_write(state.drawer.bufnr, function()
+        state.drawer:get_actions().expand()
+      end)
+      finish(sample_ns)
+    end,
+  })
+end
+
+local function build_load_more_metrics()
+  return run_benchmark({
+    title = "DRAW01 load more",
+    before = function()
+      local state = new_structure_perf_fixture()
+      expand_node_and_wait(state, STRUCTURE_PERF_SPEC.ids.conn_id, STRUCTURES_KIND)
+      expand_node_and_wait(state, STRUCTURE_PERF_SPEC.ids.schema_id, STRUCTURES_KIND)
+      set_current_node(state.winid, state.drawer.tree, STRUCTURE_PERF_SPEC.ids.big_table_id)
+      state.drawer:get_actions().expand()
+      return state
+    end,
+    run = function(state, finish)
+      set_current_node(state.winid, state.drawer.tree, STRUCTURE_PERF_SPEC.ids.sentinel_id)
+      local sample_ns = measure_sync_drawer_write(state.drawer.bufnr, function()
+        state.drawer:get_actions().action_1()
+      end)
+      finish(sample_ns)
+    end,
+  })
+end
+
 local function build_restore_metrics(submit_mode)
   return run_benchmark({
     title = submit_mode and "DRAW01 submit restore" or "DRAW01 cancel restore",
@@ -1035,6 +1181,9 @@ local refresh_samples = build_refresh_metrics()
 local restart_samples = build_restart_metrics()
 local filter_first_redraw_samples = build_filter_first_redraw_metrics()
 local filter_stable_samples = build_filter_stable_metrics()
+local lazy_expand_samples = build_lazy_expand_metrics()
+local cached_expand_samples = build_cached_expand_metrics()
+local load_more_samples = build_load_more_metrics()
 
 local apply_max_hit_samples = build_apply_metrics(LOCKED_QUERY_COHORT.max_hit_query)
 local apply_broad_samples = build_apply_metrics(LOCKED_QUERY_COHORT.broad_query)
@@ -1063,6 +1212,12 @@ local filter_first_redraw_median_ns = median(filter_first_redraw_samples)
 local filter_first_redraw_p95_ns = percentile(filter_first_redraw_samples, 0.95)
 local filter_stable_median_ns = median(filter_stable_samples)
 local filter_stable_p95_ns = percentile(filter_stable_samples, 0.95)
+local lazy_expand_median_ns = median(lazy_expand_samples)
+local lazy_expand_p95_ns = percentile(lazy_expand_samples, 0.95)
+local cached_expand_median_ns = median(cached_expand_samples)
+local cached_expand_p95_ns = percentile(cached_expand_samples, 0.95)
+local load_more_median_ns = median(load_more_samples)
+local load_more_p95_ns = percentile(load_more_samples, 0.95)
 
 local apply_max_hit_median_ns = median(apply_max_hit_samples)
 local apply_broad_median_ns = median(apply_broad_samples)
@@ -1090,6 +1245,12 @@ emit("DRAW01_FILTER_FIRST_REDRAW_MEDIAN_MS", format_float(ns_to_ms(filter_first_
 emit("DRAW01_FILTER_FIRST_REDRAW_P95_MS", format_float(ns_to_ms(filter_first_redraw_p95_ns)))
 emit("DRAW01_FILTER_STABLE_MEDIAN_MS", format_float(ns_to_ms(filter_stable_median_ns)))
 emit("DRAW01_FILTER_STABLE_P95_MS", format_float(ns_to_ms(filter_stable_p95_ns)))
+emit("DRAW01_LAZY_EXPAND_MEDIAN_MS", format_float(ns_to_ms(lazy_expand_median_ns)))
+emit("DRAW01_LAZY_EXPAND_P95_MS", format_float(ns_to_ms(lazy_expand_p95_ns)))
+emit("DRAW01_CACHED_EXPAND_MEDIAN_MS", format_float(ns_to_ms(cached_expand_median_ns)))
+emit("DRAW01_CACHED_EXPAND_P95_MS", format_float(ns_to_ms(cached_expand_p95_ns)))
+emit("DRAW01_LOAD_MORE_MEDIAN_MS", format_float(ns_to_ms(load_more_median_ns)))
+emit("DRAW01_LOAD_MORE_P95_MS", format_float(ns_to_ms(load_more_p95_ns)))
 
 emit_median_max("DRAW01_APPLY_MAX_HIT_MS", apply_max_hit_samples)
 emit_median_max("DRAW01_APPLY_BROAD_MS", apply_broad_samples)
@@ -1130,5 +1291,120 @@ local phase4_budgets_pass = ns_to_ms(startup_median_ns) < 150
 emit("DRAW01_PHASE4_BUDGETS_PASS", phase4_budgets_pass and "true" or "false")
 emit("DRAW01_INITIAL_RENDER_MEDIAN_MS", format_float(ns_to_ms(initial_render_median_ns)))
 emit("DRAW01_INITIAL_RENDER_P95_MS", format_float(ns_to_ms(initial_render_p95_ns)))
+
+local additive_measurements = {
+  initial_render = {
+    median_ms = ns_to_ms(initial_render_median_ns),
+    p95_ms = ns_to_ms(initial_render_p95_ns),
+  },
+  filter_first_redraw = {
+    median_ms = ns_to_ms(filter_first_redraw_median_ns),
+    p95_ms = ns_to_ms(filter_first_redraw_p95_ns),
+  },
+  filter_stable = {
+    median_ms = ns_to_ms(filter_stable_median_ns),
+    p95_ms = ns_to_ms(filter_stable_p95_ns),
+  },
+  lazy_expand = {
+    median_ms = ns_to_ms(lazy_expand_median_ns),
+    p95_ms = ns_to_ms(lazy_expand_p95_ns),
+  },
+  cached_expand = {
+    median_ms = ns_to_ms(cached_expand_median_ns),
+    p95_ms = ns_to_ms(cached_expand_p95_ns),
+  },
+  load_more = {
+    median_ms = ns_to_ms(load_more_median_ns),
+    p95_ms = ns_to_ms(load_more_p95_ns),
+  },
+}
+
+local additive_scenarios = {
+  "initial_render",
+  "filter_first_redraw",
+  "filter_stable",
+  "lazy_expand",
+  "cached_expand",
+  "load_more",
+}
+
+local function marker_threshold_prefix(platform_name)
+  if platform_name == "linux" then
+    return "DRAW01_LINUX_PERF_THRESHOLD_"
+  end
+  return "DRAW01_MACOS_PERF_THRESHOLD_"
+end
+
+local function marker_value(value)
+  if value == nil then
+    return "NA"
+  end
+  return format_float(value)
+end
+
+local function resolve_threshold(platform_name, scenario_name, measurement)
+  local platform_thresholds = thresholds[platform_name] or {}
+  local slot = deepcopy(platform_thresholds[scenario_name] or {})
+  local resolved = {
+    median_ms = slot.median_ms,
+    p95_ms = slot.p95_ms,
+    frozen = platform_thresholds.frozen == true,
+    source = slot.source or "missing",
+  }
+
+  if gate_mode == "blocking" then
+    if resolved.median_ms == nil or resolved.p95_ms == nil or not resolved.frozen then
+      fail(("blocking threshold missing for %s:%s"):format(platform_name, scenario_name))
+    end
+    return resolved
+  end
+
+  if platform_name == platform then
+    if resolved.median_ms == nil then
+      resolved.median_ms = measurement.median_ms
+    end
+    if resolved.p95_ms == nil then
+      resolved.p95_ms = measurement.p95_ms
+    end
+  end
+
+  return resolved
+end
+
+local function scenario_threshold_pass(threshold, measurement)
+  if threshold.median_ms == nil or threshold.p95_ms == nil then
+    return nil
+  end
+  return measurement.median_ms <= threshold.median_ms and measurement.p95_ms <= threshold.p95_ms
+end
+
+local platform_threshold_markers = {}
+for _, platform_name in ipairs({ "linux", "macos" }) do
+  platform_threshold_markers[platform_name] = {}
+  for _, scenario_name in ipairs(additive_scenarios) do
+    local measurement = additive_measurements[scenario_name]
+    local threshold = resolve_threshold(platform_name, scenario_name, measurement)
+    platform_threshold_markers[platform_name][scenario_name] = threshold
+
+    local prefix = marker_threshold_prefix(platform_name) .. string.upper(scenario_name)
+    emit(prefix .. "_MEDIAN_MS", marker_value(threshold.median_ms))
+    emit(prefix .. "_P95_MS", marker_value(threshold.p95_ms))
+  end
+end
+
+local function platform_threshold_status(platform_name)
+  local verdict = true
+  for _, scenario_name in ipairs(additive_scenarios) do
+    local pass = scenario_threshold_pass(platform_threshold_markers[platform_name][scenario_name], additive_measurements[scenario_name])
+    if pass == nil then
+      return "unfrozen"
+    end
+    verdict = verdict and pass
+  end
+  return verdict and "true" or "false"
+end
+
+emit("DRAW01_LINUX_PERF_THRESHOLD_PASS", platform_threshold_status("linux"))
+emit("DRAW01_MACOS_PERF_THRESHOLD_PASS", platform_threshold_status("macos"))
 
 vim.cmd("qa!")
