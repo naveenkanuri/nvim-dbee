@@ -81,19 +81,22 @@ jobs:
           - check_filesource_persistence.lua
     steps:
       - uses: actions/checkout@v4
-      - name: Install Neovim
+      - name: Install Neovim ${{ env.NVIM_PERF_VERSION }}
         run: |
-          curl -fsSLO https://github.com/neovim/neovim/releases/download/v0.11.6/nvim-linux-x86_64.tar.gz
+          curl -fsSLO https://github.com/neovim/neovim/releases/download/${NVIM_PERF_VERSION}/nvim-linux-x86_64.tar.gz
           tar xzf nvim-linux-x86_64.tar.gz
           echo "${PWD}/nvim-linux-x86_64/bin" >> "${GITHUB_PATH}"
-      - name: Install nui.nvim (future DRAW-01 real-nui perf harness scaffolding)
+      - name: Bootstrap pinned Lua headless plugins
         run: |
-          git clone https://github.com/MunifTanjim/nui.nvim "${RUNNER_TEMP}/nui.nvim"
-          git -C "${RUNNER_TEMP}/nui.nvim" checkout de740991c12411b663994b2860f1a4fd0937c130
+          # nvim-neotest/nvim-nio pin ownership lives in ci/headless/perf_bootstrap.mk.
+          make perf-bootstrap
+          make perf-bootstrap-print
       - name: Run Headless Lua Check
         run: |
+          NUI_NVIM_DIR="$(make perf-bootstrap-print | awk -F= '/^NUI_NVIM_DIR=/{print $2}')"
+          NIO_NVIM_DIR="$(make perf-bootstrap-print | awk -F= '/^NIO_NVIM_DIR=/{print $2}')"
           nvim --headless -u NONE -i NONE -n \
-            --cmd "set rtp^=${RUNNER_TEMP}/nui.nvim | set rtp+=${GITHUB_WORKSPACE}" \
+            --cmd "set rtp^=${NIO_NVIM_DIR} | set rtp^=${NUI_NVIM_DIR} | set rtp+=${GITHUB_WORKSPACE}" \
             -c "luafile ${GITHUB_WORKSPACE}/ci/headless/${{ matrix.script }}"
 
   lua-real-nui-perf-advisory:
