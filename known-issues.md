@@ -28,3 +28,12 @@
 - **Targeted global index update still walks schemas** (`lua/dbee/lsp/schema_cache.lua:332`):
   `_update_global_table_index_for_label()` avoids full global refresh but still sorts/scans all schemas per async-discovered table.
   v1.3 fix: maintain an incremental representative map per folded label so each upsert only compares the affected schema/table.
+
+### v1.1 Phase 7 drawer UX polish (surfaced 2026-04-29 during v1.1 live test)
+
+- **Connection source badge always shown even when single-source (visual noise)** (`lua/dbee/ui/drawer/convert.lua` per Phase 7 D-65):
+  D-65 wording: "may display a lightweight source badge or suffix **for disambiguation**". Implementation emits `[<source_id>]` suffix on every connection row unconditionally. With a single-source setup (only `connections.json`), every row shows the same `[connections.json]` (truncated to `[connecti...]` in narrow drawer width) — pure noise, no disambiguation value.
+  v1.3 fix: make badge conditional on `count(distinct source_id) > 1`. Single-source = clean flat list. Multi-source keeps the badge where it actually disambiguates. Threshold rule itself is a small discuss-phase decision (only-if-multi vs always-on toggle vs config option).
+
+- **Drawer cold start lacks visual orientation** (cosmetic, related):
+  Connection list starts flat from line 1. Old v1.0 had `connections.json` parent header providing instant context for "what am I looking at". v1.3 candidate: optional section header `Connections` line OR active-connection highlight at top. Lower priority than badge fix.
