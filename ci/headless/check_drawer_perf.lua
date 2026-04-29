@@ -4,6 +4,20 @@
 --   make perf
 --   DRAW01_PERF_GATE_MODE=advisory make perf PERF_PLATFORM=macos
 --   DRAW01_PERF_GATE_MODE=advisory make perf PERF_PLATFORM=linux
+--
+-- Threshold state machine:
+-- - Frozen file-backed thresholds are the only inputs to *_PASS verdicts.
+-- - Advisory runs emit active-platform *_CANDIDATE_MS measurements for the
+--   manual freeze ceremony, but those fresh samples never self-certify.
+-- - *_STATUS=frozen when the slot is complete and the platform is frozen.
+-- - *_STATUS=candidate when the slot is still advisory or a fresh candidate
+--   measurement was emitted for the active platform.
+-- - *_STATUS=missing when neither a frozen slot nor a candidate exists.
+-- - *_PASS=true|false is emitted only for the active platform with frozen
+--   thresholds; all other cases emit *_PASS=unfrozen.
+-- - DRAW01_REAL_NUI_PERF_ALL_PASS=true only when Phase 4 budgets pass and
+--   every active-platform scenario is frozen and passing. If any active slot
+--   is still advisory, the rollup is unfrozen instead of true.
 
 local unpack = table.unpack or unpack
 local uv = vim.uv or vim.loop
@@ -1480,40 +1494,36 @@ end
 local function resolve_threshold(platform_name, scenario_name, measurement)
   local platform_thresholds = thresholds[platform_name] or {}
   local slot = deepcopy(platform_thresholds[scenario_name] or {})
+  local is_frozen_slot = platform_thresholds.frozen == true and slot.median_ms ~= nil and slot.p95_ms ~= nil
+  local candidate_median_ms = platform_name == platform and measurement.median_ms or nil
+  local candidate_p95_ms = platform_name == platform and measurement.p95_ms or nil
   local resolved = {
     median_ms = slot.median_ms,
     p95_ms = slot.p95_ms,
     frozen = platform_thresholds.frozen == true,
-    median_source = slot.median_ms ~= nil and (platform_thresholds.frozen and "frozen-file" or (slot.source or "file")) or "missing",
-    p95_source = slot.p95_ms ~= nil and (platform_thresholds.frozen and "frozen-file" or (slot.source or "file")) or "missing",
+    status = is_frozen_slot and "frozen"
+      or ((candidate_median_ms ~= nil or candidate_p95_ms ~= nil or slot.median_ms ~= nil or slot.p95_ms ~= nil) and "candidate" or "missing"),
+    candidate_median_ms = candidate_median_ms,
+    candidate_p95_ms = candidate_p95_ms,
+    median_source = slot.median_ms ~= nil and (is_frozen_slot and "frozen-file" or (slot.source or "file")) or "missing",
+    p95_source = slot.p95_ms ~= nil and (is_frozen_slot and "frozen-file" or (slot.source or "file")) or "missing",
   }
 
-  if gate_mode == "blocking" then
-    if resolved.median_ms == nil or resolved.p95_ms == nil or not resolved.frozen then
+  if gate_mode == "blocking" and platform_name == platform then
+    if not is_frozen_slot then
       fail(("blocking threshold missing for %s:%s"):format(platform_name, scenario_name))
     end
     return resolved
-  end
-
-  if platform_name == platform then
-    if resolved.median_ms == nil then
-      resolved.median_ms = measurement.median_ms
-      resolved.median_source = "advisory-measured"
-    end
-    if resolved.p95_ms == nil then
-      resolved.p95_ms = measurement.p95_ms
-      resolved.p95_source = "advisory-measured"
-    end
   end
 
   return resolved
 end
 
 local function scenario_threshold_pass(threshold, measurement)
-  if threshold.median_ms == nil or threshold.p95_ms == nil then
-    return nil
+  if threshold.status ~= "frozen" then
+    return "unfrozen"
   end
-  return measurement.median_ms <= threshold.median_ms and measurement.p95_ms <= threshold.p95_ms
+  return (measurement.median_ms <= threshold.median_ms and measurement.p95_ms <= threshold.p95_ms) and "true" or "false"
 end
 
 local platform_threshold_markers = {}
@@ -1522,24 +1532,35 @@ for _, platform_name in ipairs({ "linux", "macos" }) do
   for _, scenario_name in ipairs(additive_scenarios) do
     local measurement = additive_measurements[scenario_name]
     local threshold = resolve_threshold(platform_name, scenario_name, measurement)
+    threshold.pass = platform_name == platform and scenario_threshold_pass(threshold, measurement) or "unfrozen"
     platform_threshold_markers[platform_name][scenario_name] = threshold
 
     local prefix = marker_threshold_prefix(platform_name) .. string.upper(scenario_name)
     emit(prefix .. "_MEDIAN_MS", marker_value(threshold.median_ms))
     emit(prefix .. "_P95_MS", marker_value(threshold.p95_ms))
+    emit(prefix .. "_MEDIAN_CANDIDATE_MS", marker_value(threshold.candidate_median_ms))
+    emit(prefix .. "_P95_CANDIDATE_MS", marker_value(threshold.candidate_p95_ms))
+    emit(prefix .. "_STATUS", threshold.status)
+    emit(prefix .. "_PASS", threshold.pass)
   end
 end
 
 local function platform_threshold_status(platform_name)
-  local verdict = true
+  if platform_name ~= platform then
+    return "unfrozen"
+  end
+
+  local verdict = "true"
   for _, scenario_name in ipairs(additive_scenarios) do
-    local pass = scenario_threshold_pass(platform_threshold_markers[platform_name][scenario_name], additive_measurements[scenario_name])
-    if pass == nil then
+    local pass = platform_threshold_markers[platform_name][scenario_name].pass
+    if pass == "unfrozen" then
       return "unfrozen"
     end
-    verdict = verdict and pass
+    if pass == "false" then
+      verdict = "false"
+    end
   end
-  return verdict and "true" or "false"
+  return verdict
 end
 
 local linux_threshold_status = platform_threshold_status("linux")
@@ -1548,8 +1569,9 @@ local macos_threshold_status = platform_threshold_status("macos")
 emit("DRAW01_LINUX_PERF_THRESHOLD_PASS", linux_threshold_status)
 emit("DRAW01_MACOS_PERF_THRESHOLD_PASS", macos_threshold_status)
 
-local real_nui_perf_all_pass = phase4_budgets_pass and platform_threshold_status(platform) == "true"
-emit("DRAW01_REAL_NUI_PERF_ALL_PASS", real_nui_perf_all_pass and "true" or "false")
+local active_platform_threshold_status = platform_threshold_status(platform)
+local real_nui_perf_all_pass = phase4_budgets_pass and active_platform_threshold_status or "false"
+emit("DRAW01_REAL_NUI_PERF_ALL_PASS", real_nui_perf_all_pass)
 
 run_flame_trace_subprocess()
 
@@ -1576,10 +1598,14 @@ for _, platform_name in ipairs({ "linux", "macos" }) do
   for _, scenario_name in ipairs(additive_scenarios) do
     local threshold = platform_threshold_markers[platform_name][scenario_name]
     summary_lines[#summary_lines + 1] = string.format(
-      "  %s median_ms=%s p95_ms=%s median_source=%s p95_source=%s",
+      "  %s status=%s pass=%s median_ms=%s p95_ms=%s median_candidate_ms=%s p95_candidate_ms=%s median_source=%s p95_source=%s",
       scenario_name,
+      threshold.status,
+      threshold.pass,
       marker_value(threshold.median_ms),
       marker_value(threshold.p95_ms),
+      marker_value(threshold.candidate_median_ms),
+      marker_value(threshold.candidate_p95_ms),
       threshold.median_source,
       threshold.p95_source
     )
@@ -1591,7 +1617,7 @@ summary_lines[#summary_lines + 1] = "markers:"
 vim.list_extend(summary_lines, emitted_markers)
 write_lines(summary_path, summary_lines)
 
-if not real_nui_perf_all_pass then
+if real_nui_perf_all_pass == "false" then
   fail("DRAW01_REAL_NUI_PERF_ALL_PASS=false")
 end
 
