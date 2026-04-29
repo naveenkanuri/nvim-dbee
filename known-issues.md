@@ -84,3 +84,21 @@
 - **Diagnostic gap: "loading..." has no timeout / error escape** (related):
   If structure RPC genuinely hangs (network failure, adapter crash mid-fetch), drawer shows "loading..." forever with no progress indicator, no timeout, no manual cancel. Should at minimum: (a) show elapsed time on the loading row after 10s, (b) offer manual cancel via key (`q` or `<Esc>`), (c) auto-fail with clear error after configurable timeout (default 5min).
   Severity: **MED** — degrades trust in the connection-only-drawer flow. v1.3 candidate alongside lazy-loading deepening.
+
+### v1.3 schema allowlist (per-connection schema filter, dbeaver-style) — FEATURE
+
+- **Per-connection schema allowlist on add/edit** (`lua/dbee/ui/wizard/*` for input, `lua/dbee/handler/*` for filter application, `lua/dbee/lsp/*` schema cache for downstream filtering):
+  Enterprise DBs commonly have 100+ schemas where 95% are system/legacy/other-team noise (APEX_*, SYS, OPSS_*, ACTIVE_SET, SCHEMA_VERSION_REGISTRY, etc.). User cares about 1-5 application schemas. Currently dbee shows ALL schemas in completion + drawer + LSP, drowning the actual workspace in irrelevant rows.
+  Naveen's proposal (matches dbeaver's "Active schemas" feature): wizard adds schema multi-select step; persists `schema_filter: ["MY_SCHEMA", "ANOTHER_SCHEMA"]` in connection JSON. All downstream consumers honor the filter:
+  1. **Drawer**: render only filtered schemas (Phase 7 D-65 connection-only root → schema list under conn limited to allowlist)
+  2. **LSP completion**: only return tables/columns from allowed schemas
+  3. **LSP diagnostics**: only flag unknown tables in allowed schemas (or skip diagnostic entirely for tables in unfiltered schemas — design fork)
+  4. **Schema cache**: only load filtered schemas to disk; faster cold start; less memory
+  5. **Wizard**: discover-schemas step requires connection probe (one-time cost) before multi-select renders. Backed-off: if probe fails, allow manual entry of schema name patterns
+  Patterns: support `["EXACT_NAME"]` exact match AND `["PREFIX_*"]` glob. dbeaver supports both.
+  Implementation considerations:
+  - Pairs naturally with lazy-loading deepening (above): if schemas-only initial fetch + filter applied, even cold start is fast for huge DBs
+  - Backwards compat: connections without `schema_filter` field show all schemas (preserve current behavior)
+  - Edit-existing-connection: wizard pre-populates current filter; user can add/remove
+  - Reload + invalidation: schema_filter changes trigger structure refresh + LSP cache invalidation
+  Severity: **FEATURE** — high user-value v1.3 candidate. Discuss + plan cycle. Likely highest-impact v1.3 deliverable for users on enterprise DBs.
