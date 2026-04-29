@@ -39,7 +39,11 @@ local function thresholds()
     completion_schema = seeded_p95(30),
     completion_keyword = seeded_p95(30),
     completion_column_hit = seeded_p95(30),
+    -- Phase 10 historical baseline; Phase 11 active cold-miss gates are the
+    -- split async first/warm scenarios below.
     completion_column_miss_sync = seeded_p95(200),
+    completion_column_miss_async_first = seeded_p95(5, "phase11-advisory-seed"),
+    completion_column_miss_async_warm = seeded_p95(15, "phase11-advisory-seed"),
 
     diagnostics_didchange_100 = seeded_p95(50),
     diagnostics_didchange_1000 = seeded_p95(50),
@@ -62,6 +66,10 @@ local function thresholds()
     cache_save_100 = candidate(),
     cache_save_1000 = candidate(),
     cache_save_10000 = candidate(),
+
+    startup_large_disk_cache_100 = candidate(),
+    startup_large_disk_cache_1000 = candidate(),
+    startup_large_disk_cache_10000 = candidate(),
   }
 end
 
