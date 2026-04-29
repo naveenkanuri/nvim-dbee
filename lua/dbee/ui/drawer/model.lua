@@ -3,6 +3,7 @@ local convert = require("dbee.ui.drawer.convert")
 local M = {}
 
 local SEARCHABLE_TYPES = {
+  schema = true,
   table = true,
   view = true,
   procedure = true,

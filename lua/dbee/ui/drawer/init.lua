@@ -6,6 +6,7 @@ local convert = require("dbee.ui.drawer.convert")
 local drawer_model = require("dbee.ui.drawer.model")
 local expansion = require("dbee.ui.drawer.expansion")
 local reconnect = require("dbee.reconnect")
+local schema_filter = require("dbee.schema_filter")
 local utils = require("dbee.utils")
 
 local connection_wizard = nil
@@ -51,6 +52,9 @@ end
 ---@field root_gen table<string, integer>
 ---@field root_applied table<string, integer>
 ---@field root_epoch table<string, integer>
+---@field root_mode table<string, "full"|"schemas_only">
+---@field root_loaded_schemas table<string, table<string, boolean>>
+---@field root_filter_signature table<string, string>
 ---@field loaded_lazy_ids table<string, boolean>
 ---@field branches table<string, table<string, { raw?: any[], error?: any, built_count: integer, render_limit: integer, request_gen: integer, applied_gen: integer, loading: boolean }>>
 
@@ -99,6 +103,7 @@ end
 local DrawerUI = {}
 
 local SEARCHABLE_TYPES = drawer_model.SEARCHABLE_TYPES or {
+  schema = true,
   table = true,
   view = true,
   procedure = true,
@@ -252,6 +257,61 @@ local function handler_bump_root_epoch(ui, conn_ids)
   end
 
   return next_epoch + 1
+end
+
+---@param conn ConnectionParams
+---@return table normalized
+local function normalized_schema_scope(conn)
+  local normalized = schema_filter.normalize(conn and conn.schema_filter or nil, conn and conn.type or nil)
+  return normalized or {
+    schema_filter = { include = {}, exclude = {}, lazy_per_schema = false },
+    schema_filter_signature = "",
+    fold = schema_filter.fold_id(conn and conn.type or nil),
+    implicit_all = true,
+    include = {},
+    exclude = {},
+    lazy_per_schema = false,
+  }
+end
+
+---@param conn ConnectionParams
+---@return boolean
+local function connection_uses_lazy_schema_root(conn)
+  local normalized = normalized_schema_scope(conn)
+  if normalized.lazy_per_schema ~= true then
+    return false
+  end
+  local caps = schema_filter.capabilities(conn and conn.type or nil)
+  return caps.structure_for_schema == true and caps.list_schemas == true
+end
+
+---@param conn ConnectionParams
+---@param schema_name string
+---@return boolean
+local function schema_visible_for_connection(conn, schema_name)
+  return schema_filter.matches(schema_name, normalized_schema_scope(conn))
+end
+
+---@param conn ConnectionParams
+---@param schemas table[]?
+---@return DBStructure[]
+local function schema_rows_for_connection(conn, schemas)
+  local structs = {}
+  for _, schema in ipairs(schemas or {}) do
+    local name = schema.name or schema.schema or schema
+    if type(name) == "string" and name ~= "" and schema_visible_for_connection(conn, name) then
+      structs[#structs + 1] = {
+        name = name,
+        schema = name,
+        type = "schema",
+        children = {},
+      }
+    end
+  end
+  table.sort(structs, function(left, right)
+    return tostring(left.name or "") < tostring(right.name or "")
+  end)
+  return structs
 end
 
 ---@param ui DrawerUI
@@ -901,6 +961,46 @@ local function build_branch_nodes(ui, conn_id, branch_id, kind)
 end
 
 ---@param ui DrawerUI
+---@param conn_id string
+---@param opts? { force_new?: boolean }
+---@return integer request_id
+local function request_schema_root_reload(ui, conn_id, opts)
+  opts = opts or {}
+  if not opts.force_new and root_request_pending(ui, conn_id) then
+    return ui._struct_cache.root_gen[conn_id]
+  end
+
+  local applied_request_id = ui._struct_cache.root_applied[conn_id] or 0
+  local requested_request_id = ui._struct_cache.root_gen[conn_id] or 0
+  ui._struct_cache.root_gen[conn_id] = math.max(requested_request_id, applied_request_id) + 1
+  local request_id = ui._struct_cache.root_gen[conn_id]
+  ui._struct_cache.root_epoch[conn_id] = handler_root_epoch(ui, conn_id)
+  ui._struct_cache.root_mode[conn_id] = "schemas_only"
+
+  if type(ui.handler.connection_list_schemas_singleflight) == "function" then
+    ui.handler:connection_list_schemas_singleflight({
+      conn_id = conn_id,
+      purpose = "drawer",
+      consumer = ui._connection_invalidated_consumer_id,
+      request_id = request_id,
+      caller_token = "drawer",
+      callback = function(data)
+        if data.error_kind == "superseded" then
+          return
+        end
+        ui:on_schemas_loaded(data)
+      end,
+    })
+  elseif type(ui.handler.connection_list_schemas_async) == "function" then
+    ui.handler:connection_list_schemas_async(conn_id, request_id, ui._struct_cache.root_epoch[conn_id], "drawer")
+  else
+    ui:request_structure_reload(conn_id, opts)
+  end
+
+  return request_id
+end
+
+---@param ui DrawerUI
 ---@param conn ConnectionParams
 ---@param opts? { suppress_root_request?: boolean }
 ---@return DrawerUINode[]
@@ -909,7 +1009,11 @@ local function build_connection_children(ui, conn, opts)
   local cached_root = ui._struct_cache.root[conn.id]
   if not cached_root then
     if not opts.suppress_root_request and not root_request_pending(ui, conn.id) then
-      ui:request_structure_reload(conn.id)
+      if connection_uses_lazy_schema_root(conn) then
+        request_schema_root_reload(ui, conn.id)
+      else
+        ui:request_structure_reload(conn.id)
+      end
     end
     return { convert.loading_node(conn.id) }
   end
@@ -986,12 +1090,49 @@ function DrawerUI:_materialize_table_like_branch(conn_id, node_id, struct)
   return { convert.loading_node(node_id) }
 end
 
+function DrawerUI:_materialize_schema_branch(conn_id, node_id, struct)
+  local cached = branch_state(self, conn_id, node_id, STRUCTURES_KIND, true)
+  if cached.loading or cached.error ~= nil or cached.raw ~= nil then
+    return build_branch_nodes(self, conn_id, node_id, STRUCTURES_KIND)
+  end
+
+  local request_id = math.max(cached.request_gen or 0, cached.applied_gen or 0) + 1
+  cached.request_gen = request_id
+  cached.loading = true
+  cached.error = nil
+  cached.raw = nil
+  cached.built_count = 0
+  cached.render_limit = math.max(cached.render_limit or CHILD_CHUNK_SIZE, CHILD_CHUNK_SIZE)
+
+  self.handler:connection_get_schema_objects_singleflight({
+    conn_id = conn_id,
+    schema = struct.schema or struct.name,
+    consumer = self._connection_invalidated_consumer_id .. ":" .. node_id,
+    priority = "drawer",
+    request_id = request_id,
+    caller_token = "drawer",
+    callback = function(data)
+      self:on_schema_objects_loaded(data, node_id)
+    end,
+  })
+
+  return { convert.loading_node(node_id) }
+end
+
 function DrawerUI:_build_structure_node(conn_id, parent_id, struct)
   local node_id = convert.structure_node_id(parent_id, struct)
   local built_children = nil
   local lazy_children_factory = nil
 
-  if TABLE_LIKE_TYPES[struct.type] then
+  if struct.type == "schema" and self._struct_cache.root_mode[conn_id] == "schemas_only" then
+    local cached_branch = branch_state(self, conn_id, node_id, STRUCTURES_KIND, false)
+    if cached_branch and (cached_branch.loading or cached_branch.error ~= nil or cached_branch.raw ~= nil) then
+      built_children = build_branch_nodes(self, conn_id, node_id, STRUCTURES_KIND)
+    end
+    lazy_children_factory = function()
+      return self:_materialize_schema_branch(conn_id, node_id, struct)
+    end
+  elseif TABLE_LIKE_TYPES[struct.type] then
     local cached_branch = branch_state(self, conn_id, node_id, COLUMNS_KIND, false)
     if cached_branch and (cached_branch.loading or cached_branch.error ~= nil or cached_branch.raw ~= nil) then
       built_children = build_branch_nodes(self, conn_id, node_id, COLUMNS_KIND)
@@ -1352,6 +1493,9 @@ function DrawerUI:new(handler, editor, result, opts)
       root_gen = {},
       root_applied = {},
       root_epoch = {},
+      root_mode = {},
+      root_loaded_schemas = {},
+      root_filter_signature = {},
       loaded_lazy_ids = {},
       branches = {},
     },
@@ -1405,6 +1549,10 @@ function DrawerUI:new(handler, editor, result, opts)
 
   handler:register_event_listener("structure_loaded", function(data)
     o:on_structure_loaded(data)
+  end)
+
+  handler:register_event_listener("schemas_loaded", function(data)
+    o:on_schemas_loaded(data)
   end)
 
   handler:register_event_listener("structure_children_loaded", function(data)
@@ -1646,6 +1794,9 @@ function DrawerUI:_flush_connection_invalidations()
       self:_prune_loaded_lazy_ids(conn_id)
       self._struct_cache.root[conn_id] = nil
       self._struct_cache.branches[conn_id] = nil
+      self._struct_cache.root_mode[conn_id] = nil
+      self._struct_cache.root_loaded_schemas[conn_id] = nil
+      self._struct_cache.root_filter_signature[conn_id] = nil
       self._struct_cache.root_gen[conn_id] = self._struct_cache.root_applied[conn_id] or 0
       self._struct_cache.root_applied[conn_id] = self._struct_cache.root_applied[conn_id] or 0
       self._struct_cache.root_epoch[conn_id] = event.authoritative_root_epoch or handler_root_epoch(self, conn_id)
@@ -1721,11 +1872,23 @@ function DrawerUI:on_connection_rewritten(old_conn_id, new_conn_id)
   elseif self._struct_cache.root_epoch[new_conn_id] == nil then
     self._struct_cache.root_epoch[new_conn_id] = handler_root_epoch(self, new_conn_id)
   end
+  if self._struct_cache.root_mode[old_conn_id] ~= nil then
+    self._struct_cache.root_mode[new_conn_id] = self._struct_cache.root_mode[old_conn_id]
+  end
+  if self._struct_cache.root_loaded_schemas[old_conn_id] ~= nil then
+    self._struct_cache.root_loaded_schemas[new_conn_id] = self._struct_cache.root_loaded_schemas[old_conn_id]
+  end
+  if self._struct_cache.root_filter_signature[old_conn_id] ~= nil then
+    self._struct_cache.root_filter_signature[new_conn_id] = self._struct_cache.root_filter_signature[old_conn_id]
+  end
 
   self._struct_cache.root[old_conn_id] = nil
   self._struct_cache.root_gen[old_conn_id] = nil
   self._struct_cache.root_applied[old_conn_id] = nil
   self._struct_cache.root_epoch[old_conn_id] = nil
+  self._struct_cache.root_mode[old_conn_id] = nil
+  self._struct_cache.root_loaded_schemas[old_conn_id] = nil
+  self._struct_cache.root_filter_signature[old_conn_id] = nil
   self._struct_cache.branches[old_conn_id] = nil
   self:_prune_loaded_lazy_ids(old_conn_id)
   self:_migrate_database_switch_state(old_conn_id, new_conn_id)
@@ -1825,6 +1988,7 @@ function DrawerUI:on_structure_loaded(data)
     structures = data.structures or {},
     error = data.error,
   }
+  self._struct_cache.root_mode[data.conn_id] = "full"
 
   if data.error then
     self._replay_container_expansions[data.conn_id] = nil
@@ -1833,6 +1997,101 @@ function DrawerUI:on_structure_loaded(data)
   self:_patch_connection_subtree(data.conn_id, {
     restore_container_expansions = not data.error,
   })
+end
+
+---@private
+---@param data { conn_id: string, request_id?: integer, root_epoch?: integer, caller_token?: string, schemas?: table[], error?: any }
+function DrawerUI:on_schemas_loaded(data)
+  if not data or not data.conn_id then
+    return
+  end
+  if data.caller_token ~= "drawer" then
+    return
+  end
+
+  local request_id = data.request_id or 0
+  local pending_request_id = self._struct_cache.root_gen[data.conn_id]
+  local applied_request_id = self._struct_cache.root_applied[data.conn_id] or 0
+  local payload_epoch = normalize_root_epoch(data.root_epoch)
+  if pending_request_id == nil or request_id ~= pending_request_id then
+    return
+  end
+  if payload_epoch ~= current_root_epoch(self, data.conn_id) then
+    return
+  end
+  if applied_request_id >= request_id then
+    return
+  end
+
+  local ok_params, conn = pcall(self.handler.connection_get_params, self.handler, data.conn_id)
+  if not ok_params or not conn then
+    return
+  end
+
+  if self.filter_restore_snapshot or self.filter_input then
+    self:interrupt_filter("Drawer schema list changed; closing filter before refresh")
+  end
+
+  self._struct_cache.root_applied[data.conn_id] = math.max(applied_request_id, request_id)
+  self._struct_cache.root_mode[data.conn_id] = "schemas_only"
+  local normalized = normalized_schema_scope(conn)
+  self._struct_cache.root_filter_signature[data.conn_id] = normalized.schema_filter_signature
+  invalidate_authoritative_caches(self)
+
+  self._struct_cache.root[data.conn_id] = {
+    structures = data.error and {} or schema_rows_for_connection(conn, data.schemas or {}),
+    error = data.error,
+    schemas_only = true,
+  }
+  self._struct_cache.root_loaded_schemas[data.conn_id] = {}
+  if data.error then
+    self._replay_container_expansions[data.conn_id] = nil
+  end
+
+  self:_patch_connection_subtree(data.conn_id, {
+    restore_container_expansions = not data.error,
+  })
+end
+
+---@private
+---@param data { conn_id: string, request_id?: integer, root_epoch?: integer, schema?: string, objects?: DBStructure[], error?: any, error_kind?: string }
+---@param branch_id string
+function DrawerUI:on_schema_objects_loaded(data, branch_id)
+  if not data or not data.conn_id or not branch_id then
+    return
+  end
+  local state = branch_state(self, data.conn_id, branch_id, STRUCTURES_KIND, false)
+  if not state then
+    return
+  end
+
+  local request_id = tonumber(data.request_id) or 0
+  local payload_epoch = normalize_root_epoch(data.root_epoch)
+  if request_id ~= (state.request_gen or 0) or payload_epoch ~= current_root_epoch(self, data.conn_id) then
+    return
+  end
+
+  state.applied_gen = math.max(state.applied_gen or 0, request_id)
+  state.loading = false
+  state.error = data.error or data.error_kind
+  state.raw = data.error and nil or sorted_struct_children(data.objects or {})
+  if not data.error and not data.error_kind then
+    self._struct_cache.root_loaded_schemas[data.conn_id] = self._struct_cache.root_loaded_schemas[data.conn_id] or {}
+    self._struct_cache.root_loaded_schemas[data.conn_id][schema_filter.fold(data.schema, "case_insensitive")] = true
+
+    local root = self._struct_cache.root[data.conn_id]
+    for _, schema_node in ipairs(root and root.structures or {}) do
+      if schema_filter.fold(schema_node.schema or schema_node.name, "case_insensitive")
+        == schema_filter.fold(data.schema, "case_insensitive")
+      then
+        schema_node.children = vim.deepcopy(state.raw or {})
+        break
+      end
+    end
+  end
+
+  invalidate_authoritative_caches(self)
+  self:_patch_branch_subtree(data.conn_id, branch_id, STRUCTURES_KIND)
 end
 
 ---@private
@@ -1851,6 +2110,9 @@ function DrawerUI:on_database_selected(data)
   self:_prune_loaded_lazy_ids(data.conn_id)
   self._struct_cache.root[data.conn_id] = nil
   self._struct_cache.branches[data.conn_id] = nil
+  self._struct_cache.root_mode[data.conn_id] = nil
+  self._struct_cache.root_loaded_schemas[data.conn_id] = nil
+  self._struct_cache.root_filter_signature[data.conn_id] = nil
   self._struct_cache.root_epoch[data.conn_id] = handler_bump_root_epoch(self, { data.conn_id })
     or (current_root_epoch(self, data.conn_id) + 1)
   invalidate_authoritative_caches(self)
@@ -2639,6 +2901,9 @@ function DrawerUI:get_actions()
       self:_prune_loaded_lazy_ids(conn_id)
       self._struct_cache.root[conn_id] = nil
       self._struct_cache.branches[conn_id] = nil
+      self._struct_cache.root_mode[conn_id] = nil
+      self._struct_cache.root_loaded_schemas[conn_id] = nil
+      self._struct_cache.root_filter_signature[conn_id] = nil
       self._struct_cache.root_epoch[conn_id] = handler_bump_root_epoch(self, { conn_id })
         or (current_root_epoch(self, conn_id) + 1)
       invalidate_authoritative_caches(self)

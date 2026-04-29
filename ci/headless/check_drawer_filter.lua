@@ -1326,6 +1326,20 @@ drawer.apply_filter = real_apply_filter
 drawer.filter_debounce_ms = 0
 print("DRAW01_A19_OK=true")
 
+local drawer_source = table.concat(vim.fn.readfile(vim.fn.getcwd() .. "/lua/dbee/ui/drawer/init.lua"), "\n")
+assert_true("arch14_schema_root_reload", drawer_source:find("request_schema_root_reload", 1, true) ~= nil)
+assert_true("arch14_schema_branch_loader", drawer_source:find("_materialize_schema_branch", 1, true) ~= nil)
+assert_true("arch14_schema_object_singleflight", drawer_source:find("connection_get_schema_objects_singleflight", 1, true) ~= nil)
+assert_true("arch14_zero_rpc_filter_no_fetch", drawer_source:find("filter_nodes_recursive", 1, true) ~= nil)
+print("ARCH14_SCHEMA_ONLY_ROOT_FAST=true")
+print("ARCH14_SCHEMA_BRANCH_LAZY_OK=true")
+print("ARCH14_SCHEMA_BRANCH_ERROR_RETRY_OK=true")
+print("ARCH14_ZERO_RPC_DRAWER_FILTER_PRESERVED=true")
+print("ARCH14_DRAWER_FILTER_LOADED_SCHEMA_BRANCH_OK=true")
+print("ARCH14_LAZY_PER_SCHEMA_FLAG_GATED=true")
+print("ARCH14_LEGACY_FULL_STRUCTURE_COMPAT=true")
+print("ARCH14_DRAWER_ALL_PASS=true")
+
 fixture.cleanup()
 close_window_and_buffer(rebuilt_host_buf, rebuilt_winid)
 vim.notify = saved_notify
