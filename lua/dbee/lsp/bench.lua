@@ -5,11 +5,12 @@
 ---   etc.
 
 local M = {}
+local uv = vim.uv or vim.loop
 
 local function timed(label, fn)
-  local start = vim.loop.hrtime()
+  local start = uv.hrtime()
   local ok, result = pcall(fn)
-  local elapsed_ms = (vim.loop.hrtime() - start) / 1e6
+  local elapsed_ms = (uv.hrtime() - start) / 1e6
   if ok then
     print(string.format("%s: %.1f ms", label, elapsed_ms))
   else
