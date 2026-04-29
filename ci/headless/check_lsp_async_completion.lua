@@ -209,6 +209,42 @@ local sync_delivery_warm = sync_delivery_cache:get_columns_async("S", "T")
 assert_eq("sync delivery warm complete", sync_delivery_warm.is_incomplete, false)
 assert_eq("sync delivery warmed column count", #sync_delivery_warm.columns, 1)
 
+local lsp_sync_cache
+local lsp_sync_calls = 0
+local lsp_sync_handler = {
+  get_authoritative_root_epoch = function()
+    return 1
+  end,
+  connection_get_columns_async = function(_, id, request_id, branch_id, root_epoch)
+    lsp_sync_calls = lsp_sync_calls + 1
+    lsp_sync_cache:on_columns_loaded({
+      conn_id = id,
+      request_id = request_id,
+      branch_id = branch_id,
+      root_epoch = root_epoch,
+      kind = "columns",
+      columns = {
+        { name = "LSP_SYNC_COL", type = "NUMBER" },
+      },
+    })
+  end,
+}
+lsp_sync_cache = SchemaCache:new(lsp_sync_handler, "lsp-sync-delivery")
+lsp_sync_cache:build_from_metadata_rows({
+  { schema_name = "FUSION_OPSS", table_name = "KNOWN_TABLE", obj_type = "table" },
+})
+local lsp_sync_client = server.create(lsp_sync_cache)({}, {})
+local lsp_sync_bufnr = vim.api.nvim_create_buf(false, true)
+vim.api.nvim_buf_set_name(lsp_sync_bufnr, "/tmp/dbee-lsp-sync-delivery.sql")
+local lsp_sync_result = request(
+  lsp_sync_client,
+  lsp_sync_bufnr,
+  "select * from fusion_opss.sync_new sn where sn."
+)
+assert_eq("lsp sync delivery call count", lsp_sync_calls, 1)
+assert_eq("lsp sync delivery complete", lsp_sync_result.isIncomplete, false)
+assert_true("lsp sync delivery emits columns", has_label(lsp_sync_result, "LSP_SYNC_COL"))
+
 local view_env = new_async_env("async-view")
 local view_line = "select * from S.VIEW_ONLY v where v."
 local view_first = request(view_env.client, view_env.bufnr, view_line)
@@ -317,6 +353,63 @@ end
 assert_eq("async full rebuild count", full_rebuilds, 0)
 assert_true("async incremental column updates", column_updates >= 100)
 
+local function global_index_snapshot(target)
+  return {
+    schemas = vim.deepcopy(target.schemas),
+    tables = vim.deepcopy(target.tables),
+    schema_items = target:get_schema_completion_items(),
+    all_table_names = target:get_all_table_names(),
+    all_table_items = target:get_all_table_completion_items(),
+  }
+end
+
+local global_calls = {}
+local global_handler = {
+  get_authoritative_root_epoch = function()
+    return 1
+  end,
+  connection_get_columns_async = function(_, id, request_id, branch_id, root_epoch, opts)
+    global_calls[#global_calls + 1] = {
+      conn_id = id,
+      request_id = request_id,
+      branch_id = branch_id,
+      root_epoch = root_epoch,
+      opts = opts,
+    }
+  end,
+}
+local global_cache = SchemaCache:new(global_handler, "async-global-index")
+local global_full_refreshes = 0
+local original_global_refresh = global_cache._refresh_global_table_index
+global_cache._refresh_global_table_index = function(self)
+  global_full_refreshes = global_full_refreshes + 1
+  return original_global_refresh(self)
+end
+local global_rows = {}
+for i = 1, 100 do
+  local table_name = string.format("MISS_%03d", i)
+  global_rows[#global_rows + 1] = {
+    schema_name = "S",
+    table_name = table_name,
+    obj_type = "table",
+  }
+  local result = global_cache:get_columns_async("S", table_name, {
+    probe_if_missing = true,
+    materializations = { "table" },
+  })
+  assert_eq("global index async incomplete " .. table_name, result.is_incomplete, true)
+  deliver(global_cache, global_calls[#global_calls], {
+    { name = "COL_" .. table_name, type = "NUMBER" },
+  })
+end
+local full_global_cache = SchemaCache:new({}, "async-global-index-full")
+full_global_cache:build_from_metadata_rows(global_rows)
+assert_eq("async global full refresh count", global_full_refreshes, 0)
+assert_true(
+  "async global incremental equals full rebuild",
+  vim.deep_equal(global_index_snapshot(global_cache), global_index_snapshot(full_global_cache))
+)
+
 local listeners = {}
 local fake_state = {}
 local event_calls = {}
@@ -393,9 +486,11 @@ print("LSP11_ASYNC_NO_SYNC_FETCH=true")
 print("LSP11_ASYNC_FAILURE_HANDLED=true")
 print("LSP11_ASYNC_PAYLOAD_ERROR_HANDLED=true")
 print("LSP11_ASYNC_SYNC_DELIVERY_OK=true")
+print("LSP11_LSP_SYNC_DELIVERY_OK=true")
 print("LSP11_ASYNC_MATERIALIZATION_PROBE_CHAIN_OK=true")
 print("LSP11_ASYNC_DEDUPE_MATERIALIZATION_AWARE=true")
 print("LSP11_ASYNC_INDEX_INCREMENTAL=true")
+print("LSP11_INCREMENTAL_GLOBAL_INDEX_OK=true")
 print("LSP11_ASYNC_EVENT_WIRING_OK=true")
 print("LSP11_ASYNC_AUTO_RETRIGGER_OK=true")
 

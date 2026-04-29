@@ -90,6 +90,44 @@ local function table_completion_item(schema, name, table_type)
   }
 end
 
+---@param items lsp.CompletionItem[]
+---@param item lsp.CompletionItem
+local function upsert_sorted_item(items, item)
+  local low, high = 1, #items
+  while low <= high do
+    local mid = math.floor((low + high) / 2)
+    local label = items[mid].label
+    if label == item.label then
+      items[mid] = item
+      return
+    end
+    if label < item.label then
+      low = mid + 1
+    else
+      high = mid - 1
+    end
+  end
+  table.insert(items, low, item)
+end
+
+---@param values string[]
+---@param value string
+local function upsert_sorted_value(values, value)
+  local low, high = 1, #values
+  while low <= high do
+    local mid = math.floor((low + high) / 2)
+    if values[mid] == value then
+      return
+    end
+    if values[mid] < value then
+      low = mid + 1
+    else
+      high = mid - 1
+    end
+  end
+  table.insert(values, low, value)
+end
+
 ---@param message string
 local function warn(message)
   vim.notify(message, vim.log.levels.WARN)
@@ -122,6 +160,8 @@ function SchemaCache:new(handler, conn_id)
     sync_column_files_scanned = 0,
     sync_column_discovery_degraded = false,
     sync_column_files_loaded = 0,
+    deferred_dir_advances_per_tick = 0,
+    total_deferred_dir_advances = 0,
     deferred_column_files_scheduled = 0,
     deferred_column_files_processed = 0,
     deferred_disk_work_scheduled = false,
@@ -288,6 +328,41 @@ function SchemaCache:_refresh_global_table_index()
 end
 
 ---@private
+---@param label string
+function SchemaCache:_update_global_table_index_for_label(label)
+  local folded = fold(label)
+  self.table_lookup_global[folded] = nil
+
+  local schema_names = vim.tbl_keys(self.schemas)
+  table.sort(schema_names)
+
+  local representative = nil
+  for _, schema in ipairs(schema_names) do
+    local lookup = self.table_lookup_by_schema[schema]
+    if lookup and lookup[folded] then
+      self.table_lookup_global[folded] = {
+        name = lookup[folded],
+        schema = schema,
+      }
+      break
+    end
+  end
+
+  for _, schema in ipairs(schema_names) do
+    local info = self.tables[schema] and self.tables[schema][label]
+    if info then
+      representative = table_completion_item(schema, label, info.type)
+      break
+    end
+  end
+
+  if representative then
+    upsert_sorted_item(self.all_table_items, vim.deepcopy(representative))
+    upsert_sorted_value(self.all_table_names, representative.label)
+  end
+end
+
+---@private
 ---@param schema string
 ---@param name string
 ---@param table_type string
@@ -303,43 +378,28 @@ function SchemaCache:_upsert_table_index(schema, name, table_type)
   self.tables[schema][name] = { type = table_type }
 
   if new_schema and schema ~= "_default" then
-    self.schema_items[#self.schema_items + 1] = {
+    upsert_sorted_item(self.schema_items, {
       label = schema,
       kind = CompletionItemKind.Module,
       detail = "schema",
       insertText = schema,
       sortText = "0_" .. schema,
-    }
-    table.sort(self.schema_items, function(a, b)
-      return a.label < b.label
-    end)
+    })
   end
 
   local schema_lookup = self.table_lookup_by_schema[schema] or {}
-  schema_lookup[fold(name)] = schema_lookup[fold(name)] or name
+  local folded_name = fold(name)
+  if not schema_lookup[folded_name] or name < schema_lookup[folded_name] then
+    schema_lookup[folded_name] = name
+  end
   self.table_lookup_by_schema[schema] = schema_lookup
 
   if not self.table_items_by_schema[schema] then
     self.table_items_by_schema[schema] = {}
   end
   local item = table_completion_item(schema, name, table_type)
-  local schema_items = self.table_items_by_schema[schema]
-  local replaced = false
-  for index, existing_item in ipairs(schema_items) do
-    if existing_item.label == name then
-      schema_items[index] = item
-      replaced = true
-      break
-    end
-  end
-  if not replaced then
-    schema_items[#schema_items + 1] = item
-  end
-  table.sort(schema_items, function(a, b)
-    return a.label < b.label
-  end)
-
-  self:_refresh_global_table_index()
+  upsert_sorted_item(self.table_items_by_schema[schema], item)
+  self:_update_global_table_index_for_label(name)
 end
 
 ---@private
@@ -910,6 +970,7 @@ function SchemaCache:_schedule_deferred_column_scan(seen_paths)
   local prefix = self.conn_id .. "_cols_"
   local now = os.time()
   local chunk_size = SYNC_COLUMN_FILE_LOAD_LIMIT
+  local scan_budget = SYNC_COLUMN_FILE_SCAN_LIMIT
   local iter = nil
   local fallback_paths = nil
   local fallback_index = 1
@@ -918,8 +979,12 @@ function SchemaCache:_schedule_deferred_column_scan(seen_paths)
   self.deferred_disk_work_scheduled = true
   self.deferred_disk_work_drained = false
 
-  local function next_path()
-    while true do
+  local function record_tick(advances)
+    self.deferred_dir_advances_per_tick = math.max(self.deferred_dir_advances_per_tick or 0, advances)
+  end
+
+  local function next_path(state)
+    while state.advances < scan_budget do
       local path = nil
 
       if vim.fs and type(vim.fs.dir) == "function" then
@@ -933,8 +998,10 @@ function SchemaCache:_schedule_deferred_column_scan(seen_paths)
         if iter then
           local name, entry_type = iter()
           if not name then
-            return nil
+            return nil, "done"
           end
+          state.advances = state.advances + 1
+          self.total_deferred_dir_advances = (self.total_deferred_dir_advances or 0) + 1
           if entry_type == "file"
             and name:sub(1, #prefix) == prefix
             and name:sub(-5) == ".json"
@@ -951,15 +1018,18 @@ function SchemaCache:_schedule_deferred_column_scan(seen_paths)
         path = fallback_paths[fallback_index]
         fallback_index = fallback_index + 1
         if not path then
-          return nil
+          return nil, "done"
         end
+        state.advances = state.advances + 1
+        self.total_deferred_dir_advances = (self.total_deferred_dir_advances or 0) + 1
       end
 
       if path and not seen_paths[path] then
         seen_paths[path] = true
-        return path
+        return path, nil
       end
     end
+    return nil, "budget"
   end
 
   local function step()
@@ -970,11 +1040,17 @@ function SchemaCache:_schedule_deferred_column_scan(seen_paths)
     end
 
     local processed = 0
+    local state = { advances = 0 }
     while processed < chunk_size do
-      local path = next_path()
+      local path, status = next_path(state)
       if not path then
-        self.deferred_disk_work_scheduled = false
-        self.deferred_disk_work_drained = true
+        record_tick(state.advances)
+        if status == "done" then
+          self.deferred_disk_work_scheduled = false
+          self.deferred_disk_work_drained = true
+        else
+          vim.schedule(step)
+        end
         return
       end
 
@@ -987,6 +1063,7 @@ function SchemaCache:_schedule_deferred_column_scan(seen_paths)
       processed = processed + 1
     end
 
+    record_tick(state.advances)
     vim.schedule(step)
   end
 
@@ -1197,6 +1274,8 @@ function SchemaCache:_load_columns_from_disk()
   self.sync_column_discovery_degraded = false
   self.deferred_column_files_scheduled = 0
   self.deferred_column_files_processed = 0
+  self.deferred_dir_advances_per_tick = 0
+  self.total_deferred_dir_advances = 0
   self.deferred_disk_work_scheduled = false
   self.deferred_disk_work_drained = false
 
@@ -1236,6 +1315,8 @@ function SchemaCache:get_stats()
     sync_column_files_loaded = self.sync_column_files_loaded or 0,
     deferred_column_files_scheduled = self.deferred_column_files_scheduled or 0,
     deferred_column_files_processed = self.deferred_column_files_processed or 0,
+    deferred_dir_advances_per_tick = self.deferred_dir_advances_per_tick or 0,
+    total_deferred_dir_advances = self.total_deferred_dir_advances or 0,
     deferred_disk_work_drained = self.deferred_disk_work_drained == true,
     disk_work_generation = self.disk_work_generation or 0,
     deferred_disk_work_canceled = self.deferred_disk_work_canceled or 0,
@@ -1312,7 +1393,7 @@ end
 ---@param schema string
 ---@param table_name string
 ---@param opts? { probe_if_missing?: boolean, materializations?: string[], root_epoch?: integer }
----@return { columns: Column[], is_incomplete: boolean, in_flight: boolean, reason?: string }
+---@return { columns: Column[], is_incomplete: boolean, in_flight: boolean, reason?: string, resolved_schema?: string, resolved_name?: string }
 function SchemaCache:get_columns_async(schema, table_name, opts)
   opts = opts or {}
   schema = self:find_schema(schema) or schema or "_default"
@@ -1330,6 +1411,8 @@ function SchemaCache:get_columns_async(schema, table_name, opts)
       columns = self.columns[key],
       is_incomplete = false,
       in_flight = false,
+      resolved_schema = schema,
+      resolved_name = table_name,
     }
   end
 
@@ -1417,6 +1500,8 @@ function SchemaCache:get_columns_async(schema, table_name, opts)
       columns = cols,
       is_incomplete = false,
       in_flight = false,
+      resolved_schema = entry.schema or schema,
+      resolved_name = entry.table_name or table_name,
     }
   end
 

@@ -83,6 +83,8 @@ local function column_completions(cache, table_ref, alias_info)
     return completion_result({}, true)
   end
 
+  actual_schema = actual_schema or cols.resolved_schema
+  actual_name = actual_name or cols.resolved_name
   if actual_schema and actual_name then
     return completion_result(cache:get_column_completion_items(actual_schema, actual_name), false)
   end

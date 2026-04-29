@@ -220,16 +220,18 @@ adversarial_cache:build_from_metadata_rows({
   { schema_name = "S", table_name = "T", obj_type = "table" },
 })
 adversarial_cache:save_to_disk()
+local adversarial_unrelated_count = 10000
+local adversarial_current_count = 50
 local adversarial_other_names = {}
 local adversarial_current_names = {}
-for i = 1, 250 do
+for i = 1, adversarial_unrelated_count do
   local name = string.format("other_conn_cols_%05d.json", i)
   adversarial_other_names[#adversarial_other_names + 1] = name
   write_file(adversarial_cache.cache_dir .. "/" .. name, vim.json.encode({
     { name = "OTHER_ID", type = "NUMBER" },
   }))
 end
-for i = 1, 50 do
+for i = 1, adversarial_current_count do
   local key = string.format("S.CURRENT_%03d", i)
   local path = adversarial_cache:_columns_cache_path(key)
   adversarial_current_names[#adversarial_current_names + 1] = vim.fn.fnamemodify(path, ":t")
@@ -260,15 +262,29 @@ end
 local adversarial_ok, adversarial_loaded = pcall(function()
   return adversarial_cache:load_from_disk()
 end)
-if saved_fs_dir then
-  vim.fs.dir = saved_fs_dir
-end
 assert_true("adversarial scan does not throw", adversarial_ok)
 assert_eq("adversarial schema loads", adversarial_loaded, true)
 local adversarial_stats = adversarial_cache:get_stats()
 assert_true("adversarial scan bounded", adversarial_stats.sync_column_files_scanned <= adversarial_stats.sync_column_file_scan_limit)
 assert_eq("adversarial sync loaded zero current files", adversarial_stats.sync_column_files_loaded, 0)
 assert_eq("adversarial scan degraded", adversarial_stats.sync_column_discovery_degraded, true)
+local adversarial_drained = vim.wait(5000, function()
+  return adversarial_cache:get_stats().deferred_disk_work_drained
+end, 20)
+if saved_fs_dir then
+  vim.fs.dir = saved_fs_dir
+end
+assert_true("adversarial deferred drained", adversarial_drained)
+adversarial_stats = adversarial_cache:get_stats()
+assert_true(
+  "adversarial deferred scan tick bounded",
+  adversarial_stats.deferred_dir_advances_per_tick <= adversarial_stats.sync_column_file_scan_limit
+)
+assert_true(
+  "adversarial deferred scan total bounded",
+  adversarial_stats.total_deferred_dir_advances <= adversarial_unrelated_count + adversarial_current_count
+)
+assert_eq("adversarial deferred processed current files", adversarial_stats.deferred_column_files_processed, adversarial_current_count)
 
 local deferred_count_cache = new_isolated_cache("disk-deferred-count")
 deferred_count_cache:build_from_metadata_rows({
