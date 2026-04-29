@@ -54,3 +54,15 @@
   Likely root cause: nui.nvim Input/Select components in the wizard lack explicit `winhighlight` config. Inherits `Normal` over `NormalFloat` where fg/bg collide on user's dark colorscheme. Phase 8 D-XX may have defined highlight contract but implementation skipped applying it to child windows.
   v1.3 fix: explicit `winhighlight = "Normal:NormalFloat,FloatBorder:FloatBorder,..."` on each wizard Input/Select component. Test against multiple dark colorschemes (Naveen's current scheme + e.g. tokyonight, catppuccin-mocha, gruvbox-dark) before close.
   Severity: **HIGH** — wizard is a headline v1.1 deliverable but unusable on Naveen's daily colorscheme. Workaround: edit `connections.json` directly to add connections.
+
+### v1.2 Phase 11 LSP cache migration UX (surfaced 2026-04-29 during v1.1 live test) — POLISH
+
+- **"corrupt cache" warning fires on first v1.2 run for pre-v1.2 cache files** (`lua/dbee/lsp/schema_cache.lua` `load_from_disk`):
+  Phase 11 r2 CRIT 2 fix added schema-index shape validation. Pre-v1.2 cache files at `~/.local/state/nvim/dbee/lsp_cache/<conn_id>.json` were written with a slightly different shape and fail new validation → recovery path fires (warn + delete + structure refresh). The warning text "corrupt cache while loading schema index: <path>" is alarming — sounds like data loss when really it's a one-time format upgrade.
+  Expected user impact: warning fires ONCE per connection on first v1.2 run; cache regenerates fresh from structure refresh; subsequent runs silent.
+  Repro: any user upgrading from v1.1 → v1.2 with existing `lsp_cache/*.json` files. Naveen hit it on `nkanuri6` and likely others.
+  v1.3 fix options:
+  1. Add a schema-version field to cache JSON (`{ "version": 2, ... }`). Migrate old → new on first read instead of delete.
+  2. Detect missing-version-field as v1 format → silent log (`vim.log.levels.DEBUG`) + delete + refresh, instead of WARN-level "corrupt cache".
+  3. Both: detect-and-migrate where field shapes are recoverable, silent-delete-and-refresh where not.
+  Severity: **POLISH** — recovery path works correctly (data not lost; cache regenerates). Just bad first-run UX. Pick option 1+3 hybrid for cleanest user experience on v1.3 upgrade path.
