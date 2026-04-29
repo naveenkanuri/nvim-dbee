@@ -179,6 +179,459 @@ local function register(spec)
   return spec
 end
 
+local CONNECTION_TYPE_NO_METADATA = "dbee-perf-no-metadata"
+local CONNECTION_TYPE_METADATA = "postgres"
+local DEFAULT_CONN_ID = "lsp01-conn"
+local DEFAULT_COLUMNS_PER_TABLE = 10
+
+local function schema_for_index(index)
+  return string.format("SCHEMA_%03d", ((index - 1) % 10) + 1)
+end
+
+local function table_for_index(index)
+  return string.format("TABLE_%06d", index)
+end
+
+local function make_columns(_, _, columns_per_table)
+  local columns = {}
+  for i = 1, columns_per_table or DEFAULT_COLUMNS_PER_TABLE do
+    columns[#columns + 1] = {
+      name = string.format("COL_%03d", i),
+      type = i % 2 == 0 and "NUMBER" or "VARCHAR2",
+    }
+  end
+  return columns
+end
+
+local function make_structure(table_count, columns_per_table)
+  local by_schema = {}
+  for i = 1, table_count do
+    local schema = schema_for_index(i)
+    by_schema[schema] = by_schema[schema] or {
+      name = schema,
+      type = "schema",
+      schema = schema,
+      children = {},
+    }
+    local table_name = table_for_index(i)
+    by_schema[schema].children[#by_schema[schema].children + 1] = {
+      name = table_name,
+      type = (i % 17 == 0) and "view" or "table",
+      schema = schema,
+      children = {},
+      column_count = columns_per_table or DEFAULT_COLUMNS_PER_TABLE,
+    }
+  end
+
+  local schemas = {}
+  for _, schema_node in pairs(by_schema) do
+    table.sort(schema_node.children, function(a, b)
+      return a.name < b.name
+    end)
+    schemas[#schemas + 1] = schema_node
+  end
+  table.sort(schemas, function(a, b)
+    return a.name < b.name
+  end)
+  return schemas
+end
+
+local function make_metadata_rows(table_count)
+  local rows = {}
+  for i = 1, table_count do
+    rows[#rows + 1] = {
+      schema_name = schema_for_index(i),
+      table_name = table_for_index(i),
+      obj_type = (i % 17 == 0) and "view" or "table",
+    }
+  end
+  return rows
+end
+
+local function table_index_from_name(table_name)
+  return tonumber((table_name or ""):match("TABLE_(%d+)$")) or 1
+end
+
+local function make_handler(opts)
+  opts = opts or {}
+  local conn_id = opts.conn_id or DEFAULT_CONN_ID
+  local connection_type = opts.connection_type or CONNECTION_TYPE_NO_METADATA
+  local table_count = opts.table_count or 100
+  local columns_per_table = opts.columns_per_table or DEFAULT_COLUMNS_PER_TABLE
+  local structure = opts.structure or make_structure(table_count, columns_per_table)
+  local metadata_rows = opts.metadata_rows or make_metadata_rows(math.min(table_count, 100))
+  local handler = {
+    conn_id = conn_id,
+    connection_type = connection_type,
+    counters = {},
+    column_fetch_deltas = {},
+    metadata_execute_count = 0,
+    metadata_call_id = nil,
+    last_singleflight_opts = nil,
+    structure = structure,
+  }
+
+  local function bump(name)
+    handler.counters[name] = (handler.counters[name] or 0) + 1
+  end
+
+  function handler:get_current_connection()
+    bump("get_current_connection")
+    return {
+      id = conn_id,
+      name = "LSP01 perf connection",
+      type = connection_type,
+    }
+  end
+
+  function handler:get_authoritative_root_epoch()
+    bump("get_authoritative_root_epoch")
+    return 1
+  end
+
+  function handler:get_connection_state_snapshot()
+    bump("get_connection_state_snapshot")
+    return {
+      current_connection = {
+        id = conn_id,
+        type = connection_type,
+      },
+      snapshot_authoritative_epoch = {
+        [conn_id] = 1,
+      },
+    }
+  end
+
+  function handler:begin_connection_invalidated_bootstrap(_, _)
+    bump("begin_connection_invalidated_bootstrap")
+    return 1
+  end
+
+  function handler:drain_connection_invalidated_bootstrap(_, _)
+    bump("drain_connection_invalidated_bootstrap")
+    return {
+      kind = "ok",
+      events = {},
+    }
+  end
+
+  function handler:promote_to_live(_, _)
+    bump("promote_to_live")
+    return {
+      kind = "ok",
+      events = {},
+    }
+  end
+
+  function handler:teardown_connection_invalidated_consumer()
+    bump("teardown_connection_invalidated_consumer")
+  end
+
+  function handler:teardown_structure_consumer()
+    bump("teardown_structure_consumer")
+  end
+
+  function handler:connection_get_structure_singleflight(request)
+    bump("connection_get_structure_singleflight")
+    handler.last_singleflight_opts = request
+    if opts.auto_structure ~= false and request and type(request.callback) == "function" then
+      request.callback({
+        conn_id = conn_id,
+        caller_token = request.caller_token or "lsp",
+        root_epoch = 1,
+        structures = structure,
+      })
+    end
+  end
+
+  handler.connection_get_columns = function(_, request_conn_id, request_opts)
+    bump("connection_get_columns")
+    if request_conn_id ~= conn_id then
+      error("unexpected conn_id: " .. tostring(request_conn_id))
+    end
+    if type(request_opts) ~= "table" or not request_opts.table then
+      error("missing column request table")
+    end
+    local table_index = table_index_from_name(request_opts.table)
+    local expected_schema = schema_for_index(table_index)
+    local request_schema = request_opts.schema == "" and expected_schema or request_opts.schema
+    if request_schema ~= expected_schema and request_opts.schema ~= "" then
+      error(("unexpected schema for %s: %s"):format(request_opts.table, tostring(request_opts.schema)))
+    end
+    handler.column_fetch_deltas[#handler.column_fetch_deltas + 1] = 1
+    return make_columns(request_schema, request_opts.table, columns_per_table)
+  end
+
+  function handler:connection_execute(request_conn_id, _)
+    bump("connection_execute")
+    if request_conn_id ~= conn_id then
+      error("unexpected metadata conn_id: " .. tostring(request_conn_id))
+    end
+    handler.metadata_execute_count = handler.metadata_execute_count + 1
+    handler.metadata_call_id = "lsp01-metadata-call-" .. tostring(handler.metadata_execute_count)
+    return {
+      id = handler.metadata_call_id,
+      state = "archived",
+    }
+  end
+
+  function handler:call_store_result(call_id, format, target, store_opts)
+    bump("call_store_result")
+    if call_id ~= handler.metadata_call_id then
+      error("unexpected metadata call_id: " .. tostring(call_id))
+    end
+    if format ~= "json" or target ~= "file" or type(store_opts) ~= "table" or not store_opts.extra_arg then
+      error("unexpected metadata result store request")
+    end
+    write_lines(store_opts.extra_arg, { vim.json.encode(metadata_rows) })
+  end
+
+  function handler:register_event_listener()
+    bump("register_event_listener")
+  end
+
+  function handler:assert_lifecycle_methods_complete(cohort)
+    local required = {
+      "get_current_connection",
+      "get_authoritative_root_epoch",
+      "get_connection_state_snapshot",
+      "begin_connection_invalidated_bootstrap",
+      "drain_connection_invalidated_bootstrap",
+      "promote_to_live",
+      "connection_get_structure_singleflight",
+    }
+    local ok = true
+    for _, name in ipairs(required) do
+      if (handler.counters[name] or 0) == 0 then
+        ok = false
+      end
+    end
+    if cohort == "STARTUP_METADATA_FALLBACK" and handler.metadata_execute_count ~= 1 then
+      ok = false
+    end
+    emit("LSP01_FAKE_HANDLER_LIFECYCLE_COMPLETE", ok and "true" or "false")
+    return ok
+  end
+
+  return handler
+end
+
+local function make_cache(table_count, columns_per_table, opts)
+  opts = opts or {}
+  local SchemaCache = require("dbee.lsp.schema_cache")
+  local handler = opts.handler or make_handler({
+    table_count = table_count,
+    columns_per_table = columns_per_table,
+    conn_id = opts.conn_id,
+  })
+  local cache = SchemaCache:new(handler, opts.conn_id or DEFAULT_CONN_ID)
+  cache:build_from_structure(opts.structure or make_structure(table_count, columns_per_table))
+  if opts.preload_columns then
+    for i = 1, table_count do
+      local schema = schema_for_index(i)
+      local table_name = table_for_index(i)
+      cache.columns[schema .. "." .. table_name] = make_columns(schema, table_name, columns_per_table)
+    end
+  end
+  return cache, handler
+end
+
+local buffer_counter = 0
+local function make_buffer(lines)
+  buffer_counter = buffer_counter + 1
+  local bufnr = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_name(bufnr, "/tmp/dbee-lsp01-" .. buffer_counter .. ".sql")
+  vim.api.nvim_buf_set_option(bufnr, "filetype", "sql")
+  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines or { "" })
+  return bufnr, vim.uri_from_bufnr(bufnr)
+end
+
+local function stop_client(client_id)
+  if not client_id then
+    return
+  end
+  local client = vim.lsp.get_client_by_id(client_id)
+  if client then
+    client:stop(true)
+  end
+end
+
+local function start_lsp(cache, bufnr)
+  local server = require("dbee.lsp.server")
+  local client_id = vim.lsp.start({
+    name = "dbee-lsp-perf",
+    cmd = server.create(cache),
+    root_dir = vim.fn.getcwd(),
+  }, {
+    bufnr = bufnr,
+  })
+  if not client_id then
+    fail("vim.lsp.start returned nil")
+  end
+  local client = vim.lsp.get_client_by_id(client_id)
+  local ok = vim.wait(1000, function()
+    client = vim.lsp.get_client_by_id(client_id)
+    return client ~= nil
+  end, 5)
+  if not ok or not client then
+    fail("LSP client did not initialize")
+  end
+  return client, client_id
+end
+
+local active_defer_capture = nil
+local function capture_defer_fn()
+  local original = vim.defer_fn
+  local capture = {
+    queue = {},
+    original = original,
+  }
+  vim.defer_fn = function(callback, timeout)
+    capture.queue[#capture.queue + 1] = {
+      callback = callback,
+      timeout = timeout,
+    }
+  end
+  active_defer_capture = capture
+  return capture
+end
+
+local function drain_deferred(expected_count, label)
+  local capture = active_defer_capture
+  if not capture then
+    fail("drain_deferred without active capture: " .. tostring(label))
+  end
+  local count = #capture.queue
+  if count ~= expected_count then
+    fail(("deferred callback count mismatch for %s: expected %d got %d"):format(label, expected_count, count))
+  end
+  while #capture.queue > 0 do
+    local item = table.remove(capture.queue, 1)
+    item.callback()
+  end
+  return count
+end
+
+local function restore_defer_fn()
+  if active_defer_capture then
+    vim.defer_fn = active_defer_capture.original
+    active_defer_capture = nil
+  end
+end
+
+local function with_fake_lsp_state(handler, fn)
+  local prior_state = package.loaded["dbee.api.state"]
+  local prior_lsp = package.loaded["dbee.lsp"]
+  local fake_state_calls = {
+    is_core_loaded = 0,
+    handler = 0,
+  }
+  local fake_state = {
+    is_core_loaded = function()
+      fake_state_calls.is_core_loaded = fake_state_calls.is_core_loaded + 1
+      return true
+    end,
+    handler = function()
+      fake_state_calls.handler = fake_state_calls.handler + 1
+      return handler
+    end,
+  }
+  package.loaded["dbee.api.state"] = fake_state
+  package.loaded["dbee.lsp"] = nil
+  local lsp = require("dbee.lsp")
+  local ok, result = xpcall(function()
+    return fn(lsp)
+  end, debug.traceback)
+  pcall(lsp.stop)
+  package.loaded["dbee.api.state"] = prior_state
+  package.loaded["dbee.lsp"] = prior_lsp
+  local fake_used = fake_state_calls.is_core_loaded > 0 and fake_state_calls.handler > 0
+  emit("LSP01_FAKE_STATE_USED", fake_used and "true" or "false")
+  if not ok then
+    fail(result)
+  end
+  if not fake_used then
+    fail("fake state was not used")
+  end
+  return result
+end
+
+local function queue_try_start(bufnr)
+  local lsp = require("dbee.lsp")
+  lsp.queue_buffer(bufnr)
+  return lsp
+end
+
+local function wait_running(lsp, label)
+  local ok = vim.wait(1000, function()
+    return lsp.status().running == true
+  end, 5)
+  if not ok then
+    fail("LSP did not start: " .. tostring(label))
+  end
+end
+
+local function wait_metadata_fallback(lsp, handler, opts)
+  opts = opts or {}
+  drain_deferred(1, opts.label or "metadata-fallback")
+  if not handler.metadata_call_id then
+    fail("metadata fallback did not create fake call")
+  end
+  lsp._process_metadata_result(handler, handler.metadata_call_id, opts.conn_id or DEFAULT_CONN_ID)
+  wait_running(lsp, opts.label or "metadata-fallback")
+end
+
+local function start_lsp_via_lifecycle(bufnr, handler, opts)
+  opts = opts or {}
+  local lsp = queue_try_start(bufnr, handler, opts)
+  wait_running(lsp, opts.label)
+  return lsp
+end
+
+local function assert_isolated_state()
+  local state_dir = vim.fn.stdpath("state")
+  local expected = vim.env.XDG_STATE_HOME
+  if not expected or expected == "" or state_dir:sub(1, #expected) ~= expected then
+    fail("stdpath(state) is outside XDG_STATE_HOME: " .. tostring(state_dir))
+  end
+  emit("LSP01_STDPATH_STATE", state_dir)
+end
+
+local function cleanup_lsp(state)
+  state = state or {}
+  if state.lsp then
+    pcall(state.lsp.stop)
+  else
+    pcall(function()
+      require("dbee.lsp").stop()
+    end)
+  end
+  if state.expected_remaining_deferred ~= nil and active_defer_capture then
+    drain_deferred(state.expected_remaining_deferred, state.label or "cleanup")
+  end
+  restore_defer_fn()
+  if state.expected_metadata_execute_count ~= nil and state.handler
+    and state.handler.metadata_execute_count ~= state.expected_metadata_execute_count then
+    fail(("metadata fake call count mismatch for %s: expected %d got %d"):format(
+      state.label or "cleanup",
+      state.expected_metadata_execute_count,
+      state.handler.metadata_execute_count
+    ))
+  end
+  if state.client_id then
+    stop_client(state.client_id)
+  end
+  if state.bufnr and vim.api.nvim_buf_is_valid(state.bufnr) then
+    pcall(vim.api.nvim_buf_delete, state.bufnr, { force = true })
+  end
+  pcall(function()
+    local lsp = require("dbee.lsp")
+    if lsp.status().running then
+      fail("LSP still running after cleanup")
+    end
+  end)
+end
+
 local function run_benchmark(spec)
   local iteration = 0
   local state = nil
