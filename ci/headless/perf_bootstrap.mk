@@ -1,5 +1,5 @@
-# Shared plugin/bootstrap contract for Phase 9 DRAW-01 real-nui perf runs
-# and Phase 10 LSP perf runs.
+# Shared plugin/bootstrap contract for Phase 9 DRAW-01 real-nui perf runs,
+# Phase 10 LSP perf runs, and Phase 11 LSP async/correctness checks.
 
 PERF_PLUGIN_ROOT ?= $(if $(RUNNER_TEMP),$(RUNNER_TEMP)/nvim-dbee-perf-plugins,$(if $(TMPDIR),$(TMPDIR)nvim-dbee-perf-plugins,/tmp/nvim-dbee-perf-plugins))
 
@@ -17,7 +17,13 @@ PROFILE_NVIM_REPO := https://github.com/stevearc/profile.nvim
 PROFILE_NVIM_COMMIT := 30433d7513f0d14665c1cfcea501c90f8a63e003
 PROFILE_NVIM_DIR := $(PERF_PLUGIN_ROOT)/profile.nvim
 
-PERF_RUNTIMEPATH_CMD = set rtp^=$(PROFILE_NVIM_DIR) | set rtp^=$(BENCHMARK_NVIM_DIR) | set rtp^=$(NUI_NVIM_DIR) | set rtp+=$(CURDIR)
+NIO_NVIM_REPO := https://github.com/nvim-neotest/nvim-nio
+NIO_NVIM_COMMIT := 21f5324bfac14e22ba26553caf69ec76ae8a7662
+NIO_NVIM_DIR := $(PERF_PLUGIN_ROOT)/nvim-nio
+
+# NIO_NVIM_DIR is intentionally included in PERF_RUNTIMEPATH_CMD here, so
+# Phase 11 async tests do not own a second runtimepath/pin surface.
+PERF_RUNTIMEPATH_CMD = set rtp^=$(NIO_NVIM_DIR) | set rtp^=$(PROFILE_NVIM_DIR) | set rtp^=$(BENCHMARK_NVIM_DIR) | set rtp^=$(NUI_NVIM_DIR) | set rtp+=$(CURDIR)
 PERF_NVIM_HEADLESS = $(NVIM_BIN) --headless -u NONE -i NONE -n --cmd "$(PERF_RUNTIMEPATH_CMD)"
 
 .PHONY: perf-bootstrap perf-bootstrap-print
@@ -30,6 +36,7 @@ perf-bootstrap:
 	grep -q "NUI_NVIM_COMMIT" ci/headless/perf_bootstrap.mk || { echo "perf-bootstrap: missing nui.nvim pin" >&2; exit 1; }; \
 	grep -q "BENCHMARK_NVIM_COMMIT" ci/headless/perf_bootstrap.mk || { echo "perf-bootstrap: missing benchmark.nvim pin" >&2; exit 1; }; \
 	grep -q "PROFILE_NVIM_COMMIT" ci/headless/perf_bootstrap.mk || { echo "perf-bootstrap: missing profile.nvim pin" >&2; exit 1; }; \
+	grep -q "NIO_NVIM_COMMIT" ci/headless/perf_bootstrap.mk || { echo "perf-bootstrap: missing nvim-nio pin" >&2; exit 1; }; \
 	grep -q "DRAW01_REAL_NUI_PERF_ALL_PASS" ci/headless/check_drawer_perf.lua || { echo "perf-bootstrap: DRAW01 harness missing rollup marker" >&2; exit 1; }; \
 	grep -q "include ci/headless/perf_bootstrap.mk" Makefile || { echo "perf-bootstrap: Makefile does not include shared bootstrap" >&2; exit 1; }; \
 	mkdir -p "$(PERF_PLUGIN_ROOT)"; \
@@ -64,7 +71,8 @@ perf-bootstrap:
 	}; \
 	checkout_repo "$(NUI_NVIM_REPO)" "$(NUI_NVIM_DIR)" "$(NUI_NVIM_COMMIT)"; \
 	checkout_repo "$(BENCHMARK_NVIM_REPO)" "$(BENCHMARK_NVIM_DIR)" "$(BENCHMARK_NVIM_COMMIT)"; \
-	checkout_repo "$(PROFILE_NVIM_REPO)" "$(PROFILE_NVIM_DIR)" "$(PROFILE_NVIM_COMMIT)"
+	checkout_repo "$(PROFILE_NVIM_REPO)" "$(PROFILE_NVIM_DIR)" "$(PROFILE_NVIM_COMMIT)"; \
+	checkout_repo "$(NIO_NVIM_REPO)" "$(NIO_NVIM_DIR)" "$(NIO_NVIM_COMMIT)"
 
 perf-bootstrap-print:
 	@printf '%s\n' \
@@ -72,5 +80,6 @@ perf-bootstrap-print:
 	  "NUI_NVIM_DIR=$(NUI_NVIM_DIR)" \
 	  "BENCHMARK_NVIM_DIR=$(BENCHMARK_NVIM_DIR)" \
 	  "PROFILE_NVIM_DIR=$(PROFILE_NVIM_DIR)" \
+	  "NIO_NVIM_DIR=$(NIO_NVIM_DIR)" \
 	  "PERF_RUNTIMEPATH_CMD=$(PERF_RUNTIMEPATH_CMD)" \
-	  "PERF_BOOTSTRAP_CONSUMERS=draw01,lsp01"
+	  "PERF_BOOTSTRAP_CONSUMERS=draw01,lsp01,lsp11"
