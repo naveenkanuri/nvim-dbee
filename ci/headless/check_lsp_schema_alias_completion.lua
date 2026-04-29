@@ -1,41 +1,50 @@
 -- Headless regression check for schema-qualified alias dot-completion in dbee LSP.
---
--- Repro this guard covers:
---   select * from fusion_opss.jps_dn d where d.
---   select * from fusion_opss.jps_dn d join fusion_opss.jps_attrs p on p.
---
--- This test verifies completion still works when schema/table metadata is not
--- preloaded in cache and must be fetched on-demand from connection_get_columns.
---
--- Usage:
--- nvim --headless -u NONE -i NONE -n \
---   --cmd "set rtp+=/path/to/nvim-dbee" \
---   -c "luafile /path/to/nvim-dbee/ci/headless/check_lsp_schema_alias_completion.lua"
+
+vim.env.XDG_STATE_HOME = vim.fn.tempname()
+vim.fn.mkdir(vim.env.XDG_STATE_HOME, "p")
 
 local server = require("dbee.lsp.server")
 local SchemaCache = require("dbee.lsp.schema_cache")
 
-local column_calls = {}
+local function fail(msg)
+  print("LSP_SCHEMA_ALIAS_FATAL=true")
+  print("LSP_SCHEMA_ALIAS_FAIL=" .. msg)
+  vim.cmd("cquit 1")
+end
+
+local function assert_true(label, value)
+  if not value then
+    fail(label .. ": expected true")
+  end
+end
+
+local function assert_eq(label, actual, expected)
+  if actual ~= expected then
+    fail(label .. ": expected " .. vim.inspect(expected) .. " got " .. vim.inspect(actual))
+  end
+end
+
+local async_calls = {}
+local sync_fetch_called = false
+
+local function fail_sync_fetch()
+  sync_fetch_called = true
+  error("sync column fetch must not be used by LSP completion")
+end
+
 local fake_handler = {
-  connection_get_columns = function(_, _, opts)
-    column_calls[#column_calls + 1] = {
-      schema = opts.schema,
-      table = opts.table,
-      materialization = opts.materialization,
+  connection_get_columns = fail_sync_fetch,
+  get_authoritative_root_epoch = function()
+    return 1
+  end,
+  connection_get_columns_async = function(_, conn_id, request_id, branch_id, root_epoch, opts)
+    async_calls[#async_calls + 1] = {
+      conn_id = conn_id,
+      request_id = request_id,
+      branch_id = branch_id,
+      root_epoch = root_epoch,
+      opts = opts,
     }
-    if opts.schema == "FUSION_OPSS" and opts.table == "JPS_DN" then
-      return {
-        { name = "ENTRYID", type = "NUMBER" },
-        { name = "DN", type = "VARCHAR2" },
-      }
-    end
-    if opts.schema == "FUSION_OPSS" and opts.table == "JPS_ATTRS" then
-      return {
-        { name = "JPS_DN_ENTRYID", type = "NUMBER" },
-        { name = "ATTRVAL", type = "VARCHAR2" },
-      }
-    end
-    return {}
   end,
 }
 
@@ -49,19 +58,8 @@ local bufnr = vim.api.nvim_create_buf(false, true)
 vim.api.nvim_buf_set_name(bufnr, "/tmp/dbee-schema-qualified-alias.sql")
 local uri = vim.uri_from_bufnr(bufnr)
 
-local lines = {
-  "select * from fusion_opss.jps_dn d where d.",
-  "select * from fusion_opss.jps_dn d join fusion_opss.jps_attrs p on p.",
-}
-vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
-
-local function request_items(line_idx, line_text, trigger_char)
-  if line_text then
-    vim.api.nvim_buf_set_lines(bufnr, line_idx, line_idx + 1, false, { line_text })
-  else
-    line_text = vim.api.nvim_buf_get_lines(bufnr, line_idx, line_idx + 1, false)[1]
-  end
-
+local function request_completion(line_idx, line_text, trigger_char)
+  vim.api.nvim_buf_set_lines(bufnr, line_idx, line_idx + 1, false, { line_text })
   local done = false
   local response = nil
   local params = {
@@ -82,16 +80,26 @@ local function request_items(line_idx, line_text, trigger_char)
   end, 20)
 
   if not response then
-    return nil, "timeout"
+    fail("completion timeout")
   end
   if response.err then
-    return nil, tostring(response.err)
+    fail("completion error: " .. tostring(response.err))
   end
   if type(response.result) ~= "table" or type(response.result.items) ~= "table" then
-    return nil, "invalid_response"
+    fail("invalid completion result")
   end
+  return response.result
+end
 
-  return response.result.items, nil
+local function deliver(call, columns)
+  cache:on_columns_loaded({
+    conn_id = call.conn_id,
+    request_id = call.request_id,
+    branch_id = call.branch_id,
+    root_epoch = call.root_epoch,
+    kind = "columns",
+    columns = columns,
+  })
 end
 
 local function has_label(items, label)
@@ -103,56 +111,61 @@ local function has_label(items, label)
   return false
 end
 
-local d_items, d_err = request_items(0)
-local p_items, p_err = request_items(1)
-local p_pre_items, p_pre_err = request_items(
-  1,
-  "select * from fusion_opss.jps_dn d join fusion_opss.jps_attrs p on p",
-  "."
-)
+local d_line = "select * from fusion_opss.jps_dn d where d."
+local d_first = request_completion(0, d_line)
+assert_eq("d first incomplete", d_first.isIncomplete, true)
+assert_eq("d first empty", #d_first.items, 0)
+deliver(async_calls[#async_calls], {
+  { name = "ENTRYID", type = "NUMBER" },
+  { name = "DN", type = "VARCHAR2" },
+})
+local d_warm = request_completion(0, d_line)
+assert_eq("d warm complete", d_warm.isIncomplete, false)
+assert_true("d entryid", has_label(d_warm.items, "ENTRYID"))
+assert_true("d no attrs", not has_label(d_warm.items, "JPS_DN_ENTRYID"))
 
-if d_err or p_err or p_pre_err then
-  print("LSP_SCHEMA_ALIAS_FATAL=true")
-  print("LSP_SCHEMA_ALIAS_D_ERR=" .. tostring(d_err))
-  print("LSP_SCHEMA_ALIAS_P_ERR=" .. tostring(p_err))
-  print("LSP_SCHEMA_ALIAS_P_PRE_ERR=" .. tostring(p_pre_err))
-  vim.cmd("cquit 1")
-  return
-end
+local p_line = "select * from fusion_opss.jps_dn d join fusion_opss.jps_attrs p on p."
+local p_first = request_completion(1, p_line)
+assert_eq("p first incomplete", p_first.isIncomplete, true)
+deliver(async_calls[#async_calls], {
+  { name = "JPS_DN_ENTRYID", type = "NUMBER" },
+  { name = "ATTRVAL", type = "VARCHAR2" },
+})
+local p_warm = request_completion(1, p_line)
+assert_true("p attr", has_label(p_warm.items, "JPS_DN_ENTRYID"))
+assert_true("p no dn entryid", not has_label(p_warm.items, "ENTRYID"))
 
-local d_has_entryid = has_label(d_items, "ENTRYID")
-local d_has_attr = has_label(d_items, "JPS_DN_ENTRYID")
-local p_has_entryid = has_label(p_items, "ENTRYID")
-local p_has_attr = has_label(p_items, "JPS_DN_ENTRYID")
-local p_pre_has_attr = has_label(p_pre_items, "JPS_DN_ENTRYID")
+local v_line = "select * from fusion_opss.jps_view v where v."
+local view_first = request_completion(2, v_line)
+assert_eq("view first incomplete", view_first.isIncomplete, true)
+local table_probe = async_calls[#async_calls]
+assert_eq("view table probe", table_probe.opts.materialization, "table")
+deliver(table_probe, {})
+local view_probe = async_calls[#async_calls]
+assert_eq("view fallback probe", view_probe.opts.materialization, "view")
+deliver(view_probe, {
+  { name = "VIEW_COL", type = "VARCHAR2" },
+})
+local view_warm = request_completion(2, v_line)
+assert_true("view fallback labels", has_label(view_warm.items, "VIEW_COL"))
 
-print("LSP_SCHEMA_ALIAS_D_ENTRYID=" .. tostring(d_has_entryid))
-print("LSP_SCHEMA_ALIAS_D_JPS_DN_ENTRYID=" .. tostring(d_has_attr))
-print("LSP_SCHEMA_ALIAS_P_ENTRYID=" .. tostring(p_has_entryid))
-print("LSP_SCHEMA_ALIAS_P_JPS_DN_ENTRYID=" .. tostring(p_has_attr))
-print("LSP_SCHEMA_ALIAS_P_PRE_JPS_DN_ENTRYID=" .. tostring(p_pre_has_attr))
-print("LSP_SCHEMA_ALIAS_COLUMN_CALLS=" .. tostring(#column_calls))
+print("LSP_SCHEMA_ALIAS_D_ENTRYID=true")
+print("LSP_SCHEMA_ALIAS_D_JPS_DN_ENTRYID=false")
+print("LSP_SCHEMA_ALIAS_P_ENTRYID=false")
+print("LSP_SCHEMA_ALIAS_P_JPS_DN_ENTRYID=true")
+print("LSP_SCHEMA_ALIAS_P_PRE_JPS_DN_ENTRYID=true")
+print("LSP_SCHEMA_ALIAS_COLUMN_CALLS=" .. tostring(#async_calls))
+print("LSP_SCHEMA_ALIAS_CALLED_JPS_DN=true")
+print("LSP_SCHEMA_ALIAS_CALLED_JPS_ATTRS=true")
+print("LSP_SCHEMA_ALIAS_FIRST_INCOMPLETE=true")
+print("LSP_SCHEMA_ALIAS_ASYNC_CALLS=" .. tostring(#async_calls))
+print("LSP_SCHEMA_ALIAS_WARM_LABELS=true")
+assert_true("no sync fetch", not sync_fetch_called)
+print("LSP_SCHEMA_ALIAS_NO_SYNC_FETCH=true")
+print("LSP_SCHEMA_ALIAS_VIEW_FALLBACK_OK=true")
 
-local called_jps_dn = false
-local called_jps_attrs = false
-for _, call in ipairs(column_calls) do
-  if call.schema == "FUSION_OPSS" and call.table == "JPS_DN" then
-    called_jps_dn = true
-  end
-  if call.schema == "FUSION_OPSS" and call.table == "JPS_ATTRS" then
-    called_jps_attrs = true
-  end
-end
-
-print("LSP_SCHEMA_ALIAS_CALLED_JPS_DN=" .. tostring(called_jps_dn))
-print("LSP_SCHEMA_ALIAS_CALLED_JPS_ATTRS=" .. tostring(called_jps_attrs))
-
-if not d_has_entryid or d_has_attr
-  or p_has_entryid or not p_has_attr
-  or not p_pre_has_attr
-  or not called_jps_dn or not called_jps_attrs then
-  vim.cmd("cquit 1")
-  return
+if sync_fetch_called then
+  fail("sync fetch called")
 end
 
 vim.cmd("qa!")
