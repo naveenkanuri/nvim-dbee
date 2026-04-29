@@ -759,7 +759,7 @@ local function completion_before(table_count, opts)
   local cache = make_cache(table_count, DEFAULT_COLUMNS_PER_TABLE, {
     preload_columns = opts.preload_columns,
   })
-  local bufnr, uri = make_buffer({ "" })
+  local bufnr, uri = make_buffer(opts.lines or { "" })
   local client, client_id = start_lsp(cache, bufnr)
   return {
     cache = cache,
@@ -768,6 +768,7 @@ local function completion_before(table_count, opts)
     client = client,
     client_id = client_id,
     table_count = table_count,
+    lines_preloaded = opts.lines ~= nil,
   }
 end
 
@@ -1123,17 +1124,43 @@ local function make_diagnostic_lines(line_count)
 end
 
 local function request_diagnostics(state, method, lines, expected_line)
-  vim.api.nvim_buf_set_lines(state.bufnr, 0, -1, false, lines)
+  if not state.lines_preloaded then
+    vim.api.nvim_buf_set_lines(state.bufnr, 0, -1, false, lines)
+  end
   local prior_handler = vim.lsp.handlers["textDocument/publishDiagnostics"]
   local prior_schedule = vim.schedule
+  local prior_new_timer = uv.new_timer
   local done = false
   local response = nil
-  local start_ns = method == "textDocument/didChange" and nil or uv.hrtime()
+  local start_ns = nil
+  if method ~= "textDocument/didChange" then
+    start_ns = uv.hrtime()
+  end
   local compute_only = method ~= "textDocument/didChange"
+  local in_debounce_callback = false
   if method == "textDocument/didChange" then
     -- didChange diagnostics are debounced in production; perf timing starts
-    -- at the debounce compute callback, excluding the configured debounce wait.
+    -- in the scheduled compute callback after the debounce fires, excluding
+    -- the configured debounce wait from the measured sample.
+    uv.new_timer = function()
+      local timer = {}
+      function timer:start(_, _, callback)
+        if not start_ns then
+          start_ns = uv.hrtime()
+          compute_only = true
+        end
+        in_debounce_callback = true
+        callback()
+        in_debounce_callback = false
+      end
+      function timer:stop() end
+      function timer:close() end
+      return timer
+    end
     vim.schedule = function(callback)
+      if not in_debounce_callback then
+        return prior_schedule(callback)
+      end
       return prior_schedule(function()
         if not start_ns then
           start_ns = uv.hrtime()
@@ -1175,6 +1202,10 @@ local function request_diagnostics(state, method, lines, expected_line)
   end, 5)
   vim.lsp.handlers["textDocument/publishDiagnostics"] = prior_handler
   vim.schedule = prior_schedule
+  uv.new_timer = prior_new_timer
+  if method == "textDocument/didChange" and not start_ns then
+    compute_only = false
+  end
   if not ok or not response then
     error("diagnostics timeout")
   end
@@ -1218,19 +1249,28 @@ local function request_diagnostics(state, method, lines, expected_line)
 end
 
 local function register_diagnostics(slug, threshold_key, line_count, method)
-  local didchange_compute_only = method ~= "textDocument/didChange"
+  local didchange_compute_only = true
   register({
     slug = slug,
     threshold_key = threshold_key,
     corpus = ("lines:%d,method:%s,invalid:MISSING_TABLE_001"):format(line_count, method:match("did(%w+)$") or method),
     before = function()
-      return completion_before(100, {
+      local lines, expected_line = make_diagnostic_lines(line_count)
+      local state = completion_before(100, {
         preload_columns = false,
+        lines = lines,
       })
+      state.diagnostic_lines = lines
+      state.diagnostic_expected_line = expected_line
+      return state
     end,
     run = function(state, finish)
-      local lines, expected_line = make_diagnostic_lines(line_count)
-      local _, elapsed_ns, compute_only = request_diagnostics(state, method, lines, expected_line)
+      local _, elapsed_ns, compute_only = request_diagnostics(
+        state,
+        method,
+        state.diagnostic_lines,
+        state.diagnostic_expected_line
+      )
       if method == "textDocument/didChange" and not compute_only then
         scenario_sentinels[slug] = false
       end
