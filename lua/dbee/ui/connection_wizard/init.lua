@@ -290,7 +290,12 @@ local function has_postgres_url_scheme(raw_url)
   if type(raw_url) ~= "string" or raw_url == "" then
     return false
   end
-  return vim.startswith(raw_url, "postgres://") or vim.startswith(raw_url, "postgresql://")
+  local scheme = raw_url:match("^([%w+%-%.]+)://")
+  if not scheme then
+    return false
+  end
+  scheme = scheme:lower()
+  return scheme == "postgres" or scheme == "postgresql"
 end
 
 local function normalize_descriptor_text(input)
@@ -322,13 +327,11 @@ local function parse_postgres_url(raw_url)
     return nil
   end
 
-  local scheme, rest = raw_url:match("^(postgres://)(.+)$")
-  if not scheme then
-    scheme, rest = raw_url:match("^(postgresql://)(.+)$")
-  end
-  if not scheme then
+  local scheme_name, rest = raw_url:match("^([%w+%-%.]+)://(.+)$")
+  if not scheme_name or not rest then
     return nil
   end
+  local scheme = scheme_name .. "://"
 
   local authority, remainder = rest:match("^([^/?]+)(.*)$")
   if not authority then

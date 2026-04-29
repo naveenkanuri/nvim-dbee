@@ -1211,36 +1211,50 @@ local function run_postgres_url_runtime_contract()
     current_conn_id = "conn-meta",
   })
 
-  clear_runtime_observations(env.runtime)
-  local wizard = expect_wizard(env, function()
-    env.drawer:open_add_connection_with_wizard(env:file_source_meta(), {
-      type = "postgres",
-    })
-  end)
-  wizard:set_mode("postgres_url")
-  wizard:set_field("name", "PG URL No DB")
-  wizard:set_field("url", "postgres://user:pass@db-host?sslmode=require")
-  submit_and_assert_success(wizard)
+  local cases = {
+    {
+      name = "PG URL No DB",
+      url = "postgres://user:pass@db-host?sslmode=require",
+    },
+    {
+      name = "PG URL Upper",
+      url = "POSTGRES://user:pass@db-host/db?sslmode=require",
+    },
+    {
+      name = "PG URL Mixed",
+      url = "Postgresql://user:pass@db-host/db",
+    },
+  }
 
-  assert_true("pg runtime ping called", #env.runtime.connection_test_spec_calls == 1)
-  assert_eq(
-    "pg runtime ping url",
-    env.runtime.connection_test_spec_calls[1].url,
-    "postgres://user:pass@db-host?sslmode=require"
-  )
+  for _, case in ipairs(cases) do
+    clear_runtime_observations(env.runtime)
+    local wizard = expect_wizard(env, function()
+      env.drawer:open_add_connection_with_wizard(env:file_source_meta(), {
+        type = "postgres",
+      })
+    end)
+    wizard:set_mode("postgres_url")
+    wizard:set_field("name", case.name)
+    wizard:set_field("url", case.url)
+    submit_and_assert_success(wizard)
 
-  local persisted = find_record_by_name(read_json(env.file_path), "PG URL No DB")
-  assert_true("pg runtime record exists", persisted ~= nil)
-  assert_eq("pg runtime url persisted", persisted.url, "postgres://user:pass@db-host?sslmode=require")
-  assert_eq("pg runtime mode persisted", persisted.wizard.mode, "postgres_url")
-  assert_eq("pg runtime url metadata", persisted.wizard.fields.url, "postgres://user:pass@db-host?sslmode=require")
+    assert_true("pg runtime ping called", #env.runtime.connection_test_spec_calls == 1)
+    assert_eq("pg runtime ping url", env.runtime.connection_test_spec_calls[1].url, case.url)
 
-  local reopened = expect_wizard(env, function()
-    env.drawer:open_edit_connection_with_wizard(env:file_source_meta(), persisted.id)
-  end)
-  assert_eq("pg runtime reopen mode", reopened.state.mode, "postgres_url")
-  assert_eq("pg runtime reopen url", reopened:current_fields().url, "postgres://user:pass@db-host?sslmode=require")
-  reopened:close()
+    local persisted = find_record_by_name(read_json(env.file_path), case.name)
+    assert_true("pg runtime record exists", persisted ~= nil)
+    assert_eq("pg runtime url persisted", persisted.url, case.url)
+    assert_eq("pg runtime mode persisted", persisted.wizard.mode, "postgres_url")
+    assert_eq("pg runtime url metadata", persisted.wizard.fields.url, case.url)
+
+    local reopened = expect_wizard(env, function()
+      env.drawer:open_edit_connection_with_wizard(env:file_source_meta(), persisted.id)
+    end)
+    assert_eq("pg runtime reopen mode", reopened.state.mode, "postgres_url")
+    assert_eq("pg runtime reopen url", reopened:current_fields().url, case.url)
+    reopened:close()
+  end
+
   env:cleanup()
   print("DCFG02_PG_URL_RUNTIME_COMPAT_OK=true")
 end
