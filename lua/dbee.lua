@@ -1446,6 +1446,10 @@ function dbee.reconnect_current_connection(opts)
   reloaded_conn.name = new_conn_name or reloaded_conn.name
   reloaded_conn.type = new_conn_type or reloaded_conn.type
 
+  if reloaded_conn.id ~= conn.id then
+    reconnect.rewrite_connection_identity(conn.id, reloaded_conn.id, reloaded_conn.name, reloaded_conn.type)
+  end
+
   if opts.notify ~= false then
     utils.log("info", "Reconnected " .. (reloaded_conn.name or reloaded_conn.id))
   end

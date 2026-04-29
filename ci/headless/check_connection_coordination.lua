@@ -267,6 +267,7 @@ local function new_env(opts)
   opts = opts or {}
 
   Harness.reset_modules({
+    "dbee",
     "dbee.utils",
     "dbee.handler.__events",
     "dbee.handler",
@@ -276,6 +277,10 @@ local function new_env(opts)
     "dbee.ui.drawer.model",
     "dbee.api",
     "dbee.api.state",
+    "dbee.install",
+    "dbee.config",
+    "dbee.query_splitter",
+    "dbee.variables",
     "dbee.lsp",
     "dbee.lsp.schema_cache",
     "dbee.lsp.server",
@@ -306,6 +311,10 @@ local function new_env(opts)
       cache_builds = {},
       stops = 0,
     },
+    calls = {},
+    note_rebinds = {},
+    result_calls = {},
+    window_open = true,
   }
 
   Harness.install_ui_stubs(runtime, {
@@ -345,19 +354,101 @@ local function new_env(opts)
       register_event_listener = function(event, listener)
         return runtime.handler:register_event_listener(event, listener)
       end,
+      connection_get_calls = function(conn_id)
+        return vim.deepcopy(runtime.calls[conn_id] or {})
+      end,
+      connection_execute = function(conn_id, query, exec_opts)
+        local calls = runtime.calls[conn_id] or {}
+        runtime.calls[conn_id] = calls
+        local call = {
+          id = "call-" .. tostring(#runtime.result_calls + 1),
+          conn_id = conn_id,
+          query = query,
+          state = "archived",
+          error_kind = "none",
+          timestamp_us = 100 + #runtime.result_calls,
+          time_taken_us = 1000,
+          exec_opts = vim.deepcopy(exec_opts),
+        }
+        calls[#calls + 1] = vim.deepcopy(call)
+        runtime.executed_queries[#runtime.executed_queries + 1] = {
+          conn_id = conn_id,
+          query = query,
+          exec_opts = vim.deepcopy(exec_opts),
+        }
+        return call
+      end,
     },
     ui = {
-      rebind_note_connection = function() end,
+      rebind_note_connection = function(note_id, conn_id, conn_name, conn_type)
+        runtime.note_rebinds[#runtime.note_rebinds + 1] = {
+          note_id = note_id,
+          conn_id = conn_id,
+          conn_name = conn_name,
+          conn_type = conn_type,
+        }
+      end,
+      result_set_call = function(call)
+        runtime.result_calls[#runtime.result_calls + 1] = vim.deepcopy(call)
+        runtime.last_result_call = vim.deepcopy(call)
+      end,
     },
     setup = function() end,
     current_config = function()
       return {
         window_layout = {
           is_open = function()
-            return true
+            return runtime.window_open
           end,
+          open = function()
+            runtime.window_open = true
+          end,
+          close = function()
+            runtime.window_open = false
+          end,
+          reset = function() end,
+          toggle_drawer = function() end,
         },
       }
+    end,
+  }
+
+  package.loaded["dbee.install"] = {
+    exec = function() end,
+  }
+
+  package.loaded["dbee.config"] = {
+    default = {},
+    merge_with_default = function(cfg)
+      return cfg or {}
+    end,
+    validate = function() end,
+  }
+
+  package.loaded["dbee.query_splitter"] = {
+    split = function(script)
+      return { script }
+    end,
+  }
+
+  package.loaded["dbee.variables"] = {
+    resolve_for_execute = function(query, var_opts)
+      local binds = var_opts and var_opts.values and vim.deepcopy(var_opts.values) or nil
+      if binds and next(binds) ~= nil then
+        return query, { binds = binds }, nil
+      end
+      return query, nil, nil
+    end,
+    resolve_for_execute_async = function(query, var_opts, on_done)
+      local resolved, exec_opts, err = package.loaded["dbee.variables"].resolve_for_execute(query, var_opts)
+      on_done(resolved, exec_opts, err)
+    end,
+    bind_opts_for_query = function(_, bind_opts)
+      local binds = bind_opts and bind_opts.binds and vim.deepcopy(bind_opts.binds) or nil
+      if binds and next(binds) ~= nil then
+        return { binds = binds }
+      end
+      return nil
     end,
   }
 
@@ -430,6 +521,7 @@ local function new_env(opts)
   install_dbee_functions(runtime)
 
   local Handler = require("dbee.handler")
+  local dbee = require("dbee")
   local convert = require("dbee.ui.drawer.convert")
   local reconnect = require("dbee.reconnect")
   local DrawerUI = require("dbee.ui.drawer")
@@ -489,6 +581,7 @@ local function new_env(opts)
     source = source,
     handler = handler,
     drawer = drawer,
+    dbee = dbee,
     reconnect = reconnect,
     lsp = lsp,
     convert = convert,
@@ -1195,6 +1288,81 @@ local function run_database_switch_and_reconnect_contracts()
 
   env_reconnect:cleanup()
 
+  local env_public_reconnect = new_db_env()
+  seed_drawer_root(env_public_reconnect, "conn-alpha", 2)
+  expand_connection(env_public_reconnect, "conn-alpha")
+  env_public_reconnect.handler.authoritative_root_epoch["conn-alpha"] = 2
+  env_public_reconnect.reconnect.register_call("call-note", {
+    conn_id = "conn-alpha",
+    conn_name = "Alpha",
+    conn_type = "postgres",
+    note_id = "note-1",
+    resolved_query = "select 1",
+  })
+  env_public_reconnect.source._specs[1] = {
+    id = "conn-alpha-v2",
+    name = "Alpha",
+    type = "postgres",
+    url = "postgres://alpha",
+  }
+  local rewrite_events = {}
+  env_public_reconnect.reconnect.register_connection_rewritten_listener("coord-public-reconnect", function(old_conn_id, new_conn_id)
+    rewrite_events[#rewrite_events + 1] = {
+      old_conn_id = old_conn_id,
+      new_conn_id = new_conn_id,
+    }
+  end)
+
+  local public_conn, public_err = env_public_reconnect.dbee.reconnect_current_connection({ notify = false })
+  Harness.drain()
+  assert_eq("public_reconnect_err", public_err, nil)
+  assert_true("public_reconnect_conn_present", public_conn ~= nil)
+  assert_eq("public_reconnect_conn_id", public_conn.id, "conn-alpha-v2")
+  assert_eq("public_reconnect_event_count", #rewrite_events, 1)
+  assert_eq("public_reconnect_event_old", rewrite_events[1].old_conn_id, "conn-alpha")
+  assert_eq("public_reconnect_event_new", rewrite_events[1].new_conn_id, "conn-alpha-v2")
+  assert_true("public_reconnect_root_migrated", env_public_reconnect.drawer._struct_cache.root["conn-alpha-v2"] ~= nil)
+  assert_eq("public_reconnect_root_old_cleared", env_public_reconnect.drawer._struct_cache.root["conn-alpha"], nil)
+  assert_eq("public_reconnect_current_conn", env_public_reconnect.handler:get_current_connection().id, "conn-alpha-v2")
+  assert_eq("public_reconnect_note_rebinds", #env_public_reconnect.runtime.note_rebinds, 1)
+  assert_eq("public_reconnect_note_target", env_public_reconnect.runtime.note_rebinds[1].conn_id, "conn-alpha-v2")
+  assert_eq(
+    "public_reconnect_call_rewritten",
+    env_public_reconnect.reconnect._debug_snapshot().calls_by_id["call-note"].conn_id,
+    "conn-alpha-v2"
+  )
+
+  env_public_reconnect.reconnect.forget_call("call-note")
+  env_public_reconnect.runtime.calls["conn-alpha-v2"] = {
+    {
+      id = "call-disconnected",
+      query = "select 42",
+      state = "executing_failed",
+      error_kind = "disconnected",
+      timestamp_us = 777,
+      time_taken_us = 1000,
+      error = "lost connection",
+    },
+  }
+  env_public_reconnect.source._specs[1] = {
+    id = "conn-alpha-v3",
+    name = "Alpha",
+    type = "postgres",
+    url = "postgres://alpha",
+  }
+  local retry_ok, retry_err = env_public_reconnect.dbee.retry_last_disconnected()
+  Harness.drain()
+  assert_true("public_retry_started", retry_ok)
+  assert_eq("public_retry_err", retry_err, nil)
+  assert_eq("public_retry_rewrite_count", #rewrite_events, 2)
+  assert_eq("public_retry_old", rewrite_events[2].old_conn_id, "conn-alpha-v2")
+  assert_eq("public_retry_new", rewrite_events[2].new_conn_id, "conn-alpha-v3")
+  assert_eq("public_retry_exec_conn", env_public_reconnect.runtime.executed_queries[#env_public_reconnect.runtime.executed_queries].conn_id, "conn-alpha-v3")
+  assert_eq("public_retry_result_conn", env_public_reconnect.runtime.last_result_call.conn_id, "conn-alpha-v3")
+  print("LIFECYCLE01_PUBLIC_RECONNECT_EMITS_REWRITE_OK=true")
+
+  env_public_reconnect:cleanup()
+
   local env_reconnect_lsp = new_env()
   env_reconnect_lsp.lsp.register_events()
   env_reconnect_lsp.runtime.structure_requests = {}
@@ -1315,6 +1483,7 @@ local function run_database_switch_and_reconnect_contracts()
   print("LIFECYCLE01_RECONNECT_FAILURE_CLEARS_OK=true")
 
   env_reconnect_restore:cleanup()
+
 end
 
 local function run_lsp_retarget_rewarm_contracts()
