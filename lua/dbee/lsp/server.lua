@@ -420,8 +420,9 @@ function M.create(cache)
             if not ok then
               diags = {}
             end
-            if dispatchers and dispatchers.on_notify then
-              dispatchers.on_notify("textDocument/publishDiagnostics", {
+            local notify = dispatchers and (dispatchers.notification or dispatchers.on_notify)
+            if notify then
+              notify("textDocument/publishDiagnostics", {
                 uri = uri,
                 diagnostics = diags,
               })
