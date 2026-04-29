@@ -589,8 +589,7 @@ local function with_fake_lsp_state(handler, fn)
   return result
 end
 
-local function queue_try_start(bufnr)
-  local lsp = require("dbee.lsp")
+local function queue_try_start(lsp, bufnr)
   -- Production queue_buffer() invokes the private _try_start() lifecycle.
   lsp.queue_buffer(bufnr)
   return lsp
@@ -616,9 +615,9 @@ local function wait_metadata_fallback(lsp, handler, opts)
   wait_running(lsp, opts.label or "metadata-fallback")
 end
 
-local function start_lsp_via_lifecycle(bufnr, handler, opts)
+local function start_lsp_via_lifecycle(lsp, bufnr, opts)
   opts = opts or {}
-  local lsp = queue_try_start(bufnr, handler, opts)
+  lsp = queue_try_start(lsp, bufnr)
   wait_running(lsp, opts.label)
   return lsp
 end
@@ -1678,15 +1677,24 @@ local function startup_after(state)
 end
 
 local function startup_run(state, finish, _, slug)
-  local start_ns = uv.hrtime()
-  with_fake_lsp_state(state.handler, function()
+  local elapsed_ns = nil
+  with_fake_lsp_state(state.handler, function(lsp_module)
     local lsp
+    -- TIMER WINDOW START: production startup begins here.
+    local start_ns = uv.hrtime()
     if state.label == "metadata" then
-      lsp = queue_try_start(state.bufnr, state.handler, { label = slug })
+      lsp = queue_try_start(lsp_module, state.bufnr)
       wait_metadata_fallback(lsp, state.handler, {
         label = slug,
         conn_id = DEFAULT_CONN_ID,
       })
+    else
+      lsp = start_lsp_via_lifecycle(lsp_module, state.bufnr, { label = slug })
+    end
+    elapsed_ns = uv.hrtime() - start_ns
+    -- TIMER WINDOW END: sentinel checks and marker output stay outside timing.
+
+    if state.label == "metadata" then
       local count = 1
       emit("LSP01_METADATA_FALLBACK_DEFERRED_CALLBACK_COUNT", count)
       if state.handler.metadata_execute_count ~= 1 then
@@ -1694,7 +1702,6 @@ local function startup_run(state, finish, _, slug)
       end
       emit("LSP01_METADATA_FALLBACK_FAKE_CALL_COUNT", state.handler.metadata_execute_count)
     else
-      lsp = start_lsp_via_lifecycle(state.bufnr, state.handler, { label = slug })
       local count = drain_deferred(0, slug)
       if slug == "STARTUP_COLD" then
         emit("LSP01_COLD_DISK_DEFERRED_CALLBACK_COUNT", count)
@@ -1718,7 +1725,10 @@ local function startup_run(state, finish, _, slug)
       scenario_sentinels[slug] = false
     end
   end)
-  finish(uv.hrtime() - start_ns)
+  if not elapsed_ns then
+    fail("startup sample did not record elapsed time: " .. slug)
+  end
+  finish(elapsed_ns)
 end
 
 register({
