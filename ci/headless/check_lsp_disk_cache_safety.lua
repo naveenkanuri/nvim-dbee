@@ -145,21 +145,23 @@ for i = 1, 10000 do
 end
 assert_eq("large schema loads", large_cache:load_from_disk(), true)
 local large_stats = large_cache:get_stats()
+assert_true("sync discovery bounded", large_stats.sync_column_files_discovered <= 100)
 assert_true("sync load bounded", large_stats.sync_column_files_loaded <= 100)
-assert_true("deferred load scheduled", large_stats.deferred_column_files_scheduled > 0)
 
 local fenced_cache = new_cache("disk-fenced")
-fenced_cache:build_from_metadata_rows({
-  { schema_name = "S", table_name = "T", obj_type = "table" },
-})
-fenced_cache:save_to_disk()
+local fenced_files = {}
 for i = 1, 125 do
   local key = string.format("S.DEFER_%03d", i)
-  write_file(fenced_cache:_columns_cache_path(key), vim.json.encode({
+  local path = fenced_cache:_columns_cache_path(key)
+  write_file(path, vim.json.encode({
     { name = "ID", type = "NUMBER" },
   }))
+  fenced_files[#fenced_files + 1] = {
+    path = path,
+    stat = (vim.uv or vim.loop).fs_stat(path),
+  }
 end
-assert_eq("fenced schema loads", fenced_cache:load_from_disk(), true)
+fenced_cache:_schedule_deferred_column_work(fenced_files, 1)
 assert_true("fenced work scheduled", fenced_cache:get_stats().deferred_column_files_scheduled > 0)
 fenced_cache:invalidate()
 vim.wait(1000, function()
@@ -177,6 +179,7 @@ print("LSP11_DISK_PRUNE_COUNT=" .. tostring(prune_cache:get_stats().disk_pruned)
 print("LSP11_DISK_CACHE_ISOLATED=true")
 print("LSP11_DISK_LOAD_BOUNDED=true")
 print("LSP11_DISK_DEFERRED_GENERATION_FENCED=true")
+print("LSP11_DISK_DISCOVERY_BOUNDED=true")
 
 vim.fn.delete(root, "rf")
 vim.cmd("qa!")

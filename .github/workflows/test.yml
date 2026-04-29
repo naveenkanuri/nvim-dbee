@@ -286,10 +286,15 @@ jobs:
           grep -q '^LSP01_COMPLETION_COLUMN_MISS_ASYNC_AUTO_RETRIGGER_OK=true$' "${log}"
           grep -q '^LSP01_STARTUP_LARGE_DISK_CACHE_10000_SENTINEL_OK=true$' "${log}"
           grep -q '^LSP11_DISK_LOAD_BOUNDED=true$' "${log}"
+          grep -q '^LSP11_DISK_DISCOVERY_BOUNDED=true$' "${log}"
+          grep -q '^LSP11_DISK_DEFERRED_GENERATION_FENCED=true$' "${log}"
+          grep -q '^LSP11_DISK_CORRUPT_RECOVERY_OK=true$' "${log}"
           grep -q '^LSP11_ASYNC_AUTO_RETRIGGER_OK=true$' "${log}"
           grep -q '^LSP11_ASYNC_PAYLOAD_ERROR_HANDLED=true$' "${log}"
           grep -q '^LSP11_ASYNC_MATERIALIZATION_PROBE_CHAIN_OK=true$' "${log}"
+          grep -q '^LSP11_ASYNC_DEDUPE_MATERIALIZATION_AWARE=true$' "${log}"
           grep -q '^LSP11_DIAGNOSTIC_NAMESPACE_OK=true$' "${log}"
+          grep -q '^LSP11_DIAGNOSTICS_SINGLE_NAMESPACE_OWNED=true$' "${log}"
           grep -Eq '^LSP01_REAL_LSP_PERF_ALL_PASS=(true|unfrozen)$' "${log}"
       - name: LSP advisory promotion seam
         if: always()

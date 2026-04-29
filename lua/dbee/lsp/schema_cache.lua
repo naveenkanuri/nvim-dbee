@@ -101,6 +101,7 @@ function SchemaCache:new(handler, conn_id)
     column_touch_clock = 0,
     column_evictions = 0,
     disk_pruned = 0,
+    sync_column_files_discovered = 0,
     sync_column_files_loaded = 0,
     deferred_column_files_scheduled = 0,
     deferred_disk_work_scheduled = false,
@@ -572,12 +573,14 @@ function SchemaCache:_prune_if_old(path, stat, now)
 end
 
 ---@private
+---@param limit? integer
 ---@return table[]
-function SchemaCache:_column_cache_files()
+function SchemaCache:_column_cache_files(limit)
   local prefix = self.conn_id .. "_cols_"
-  local pattern = self.cache_dir .. "/" .. prefix .. "*.json"
   local files = {}
-  for _, path in ipairs(vim.fn.glob(pattern, false, true)) do
+  local remaining = limit or SYNC_COLUMN_FILE_LOAD_LIMIT
+
+  local function add_path(path)
     local stat = self:_file_stat(path)
     files[#files + 1] = {
       path = path,
@@ -585,9 +588,35 @@ function SchemaCache:_column_cache_files()
       mtime = stat and stat.mtime and stat.mtime.sec or 0,
     }
   end
-  table.sort(files, function(a, b)
-    return a.mtime > b.mtime
-  end)
+
+  if vim.fs and type(vim.fs.dir) == "function" then
+    local ok, iter = pcall(vim.fs.dir, self.cache_dir)
+    if ok and iter then
+      for name, entry_type in iter do
+        if entry_type == "file"
+          and name:sub(1, #prefix) == prefix
+          and name:sub(-5) == ".json"
+        then
+          add_path(self.cache_dir .. "/" .. name)
+          remaining = remaining - 1
+          if remaining <= 0 then
+            break
+          end
+        end
+      end
+    end
+  else
+    local pattern = self.cache_dir .. "/" .. prefix .. "*.json"
+    for _, path in ipairs(vim.fn.glob(pattern, false, true)) do
+      add_path(path)
+      remaining = remaining - 1
+      if remaining <= 0 then
+        break
+      end
+    end
+  end
+
+  self.sync_column_files_discovered = #files
   return files
 end
 
@@ -858,11 +887,12 @@ end
 ---@private
 function SchemaCache:_load_columns_from_disk()
   self.sync_column_files_loaded = 0
+  self.sync_column_files_discovered = 0
   self.deferred_column_files_scheduled = 0
   self.deferred_disk_work_scheduled = false
 
   local prefix = self.conn_id .. "_cols_"
-  local files = self:_column_cache_files()
+  local files = self:_column_cache_files(SYNC_COLUMN_FILE_LOAD_LIMIT)
   local now = os.time()
   local sync_limit = math.min(#files, SYNC_COLUMN_FILE_LOAD_LIMIT)
   for i = 1, sync_limit do
@@ -879,7 +909,7 @@ end
 
 --- Schedule column disk pruning without running from completion handlers.
 function SchemaCache:schedule_disk_prune()
-  local files = self:_column_cache_files()
+  local files = self:_column_cache_files(SYNC_COLUMN_FILE_LOAD_LIMIT)
   self:_schedule_deferred_column_work(files, 1)
 end
 
@@ -890,6 +920,7 @@ function SchemaCache:get_stats()
     column_entry_count = self:_column_entry_count(),
     column_evictions = self.column_evictions or 0,
     disk_pruned = self.disk_pruned or 0,
+    sync_column_files_discovered = self.sync_column_files_discovered or 0,
     sync_column_files_loaded = self.sync_column_files_loaded or 0,
     deferred_column_files_scheduled = self.deferred_column_files_scheduled or 0,
     disk_work_generation = self.disk_work_generation or 0,
