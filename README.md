@@ -46,7 +46,7 @@ If you prefer to watch a video than to browse through docs, I made a video, whic
 
 ## Installation
 
-**requires nvim>=0.10**
+**requires nvim>=0.12**
 
 - packer.nvim:
 
@@ -55,6 +55,7 @@ If you prefer to watch a video than to browse through docs, I made a video, whic
     "kndndrj/nvim-dbee",
     requires = {
       "MunifTanjim/nui.nvim",
+      "nvim-neotest/nvim-nio",
     },
     run = function()
       -- Install tries to automatically detect the install method.
@@ -75,6 +76,7 @@ If you prefer to watch a video than to browse through docs, I made a video, whic
     "kndndrj/nvim-dbee",
     dependencies = {
       "MunifTanjim/nui.nvim",
+      "nvim-neotest/nvim-nio",
     },
     build = function()
       -- Install tries to automatically detect the install method.
@@ -156,6 +158,22 @@ have a few options:
 ## Configuration
 
 You can pass an optional table parameter to `setup()` function.
+
+The built-in LSP diagnostics can be configured under `lsp`:
+
+```lua
+require("dbee").setup({
+  lsp = {
+    diagnostics_mode = "debounce_didchange", -- "debounce_didchange", "save_only", or "off"
+    diagnostics_debounce_ms = 250,
+  },
+})
+```
+
+Cold table or schema-qualified alias completion now returns promptly while
+columns warm asynchronously. Trigger completion again after warmup to receive
+the full column list. External completion stacks such as `cmp-dbee` remain
+supported for custom setups.
 
 Here are the defaults:
 
