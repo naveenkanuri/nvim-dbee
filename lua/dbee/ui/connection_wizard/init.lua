@@ -1,7 +1,7 @@
 local Popup = require("nui.popup")
+local Input = require("nui.input")
 
 local menu = require("dbee.ui.drawer.menu")
-local utils = require("dbee.utils")
 
 local uv = vim.loop
 
@@ -133,30 +133,91 @@ local function read_lines(path)
   return table.concat(lines, "\n")
 end
 
+local function count_parens(input)
+  local depth = 0
+  for index = 1, #input do
+    local char = input:sub(index, index)
+    if char == "(" then
+      depth = depth + 1
+    elseif char == ")" then
+      depth = depth - 1
+    end
+  end
+  return depth
+end
+
 local function parse_wallet_aliases(contents)
   local aliases = {}
   local seen = {}
+  local alias_map = {}
+  local active_aliases = nil
+  local active_descriptor = nil
+  local active_depth = 0
+
+  local function flush_aliases()
+    if not active_aliases or not active_descriptor then
+      active_aliases = nil
+      active_descriptor = nil
+      active_depth = 0
+      return
+    end
+
+    local descriptor = table.concat(active_descriptor, "\n")
+    if descriptor ~= "" then
+      for _, alias in ipairs(active_aliases) do
+        alias_map[alias] = descriptor
+      end
+    end
+
+    active_aliases = nil
+    active_descriptor = nil
+    active_depth = 0
+  end
 
   for line in (contents .. "\n"):gmatch("([^\n]*)\n") do
     local trimmed = vim.trim(line)
-    if trimmed ~= "" and not vim.startswith(trimmed, "#") and not vim.startswith(trimmed, "!") then
+
+    if active_aliases then
+      if trimmed ~= "" then
+        active_descriptor[#active_descriptor + 1] = trimmed
+        active_depth = active_depth + count_parens(trimmed)
+      end
+      if active_depth <= 0 then
+        flush_aliases()
+      end
+    elseif trimmed ~= "" and not vim.startswith(trimmed, "#") and not vim.startswith(trimmed, "!") then
       local first = trimmed:sub(1, 1)
       if first ~= "(" then
-        local alias_group = trimmed:match("^([^=]+)%s*=")
+        local alias_group, remainder = trimmed:match("^([^=]+)%s*=%s*(.*)$")
         if alias_group then
+          active_aliases = {}
+          active_descriptor = {}
+
           for alias in alias_group:gmatch("[^,%s]+") do
             if alias ~= "" and not seen[alias] then
               seen[alias] = true
               aliases[#aliases + 1] = alias
             end
+            active_aliases[#active_aliases + 1] = alias
+          end
+
+          if remainder ~= "" then
+            active_descriptor[#active_descriptor + 1] = remainder
+            active_depth = count_parens(remainder)
+            if active_depth <= 0 then
+              flush_aliases()
+            end
+          else
+            active_depth = 1
           end
         end
       end
     end
   end
 
+  flush_aliases()
   table.sort(aliases)
-  return aliases
+  return aliases, alias_map
 end
 
 local function read_wallet_tnsnames(wallet_path)
@@ -183,8 +244,284 @@ local function read_wallet_tnsnames(wallet_path)
   return read_lines(tns_path), nil
 end
 
+local function percent_encode(input)
+  return tostring(input or ""):gsub("([^%w%-_%.~])", function(char)
+    return string.format("%%%02X", string.byte(char))
+  end)
+end
+
+local function percent_decode(input, plus_as_space)
+  local decoded = tostring(input or "")
+  if plus_as_space then
+    decoded = decoded:gsub("+", " ")
+  end
+  return (decoded:gsub("%%(%x%x)", function(hex)
+    return string.char(tonumber(hex, 16))
+  end))
+end
+
+local function parse_query_pairs(raw_query)
+  local pairs = {}
+  local ordered_keys = {}
+  if not raw_query or raw_query == "" then
+    return pairs, ordered_keys
+  end
+
+  for pair in raw_query:gmatch("[^&]+") do
+    local key, value = pair:match("^([^=]+)=?(.*)$")
+    if key and key ~= "" then
+      local decoded_key = percent_decode(key, true)
+      pairs[decoded_key] = percent_decode(value, true)
+      ordered_keys[#ordered_keys + 1] = decoded_key
+    end
+  end
+
+  return pairs, ordered_keys
+end
+
+local function normalize_descriptor_text(input)
+  return tostring(input or ""):gsub("%s+", "")
+end
+
+local function render_postgres_form_url(fields)
+  local auth = tostring(fields.username or "")
+  if fields.password and fields.password ~= "" then
+    auth = auth .. ":" .. tostring(fields.password)
+  end
+
+  local authority = auth ~= "" and (auth .. "@") or ""
+  authority = authority .. tostring(fields.host or "")
+  if fields.port and fields.port ~= "" then
+    authority = authority .. ":" .. tostring(fields.port)
+  end
+
+  local query = ""
+  if fields.sslmode and fields.sslmode ~= "" then
+    query = "?sslmode=" .. tostring(fields.sslmode)
+  end
+
+  return string.format("postgres://%s/%s%s", authority, tostring(fields.database or ""), query)
+end
+
+local function parse_postgres_url(raw_url)
+  if type(raw_url) ~= "string" or raw_url == "" then
+    return nil
+  end
+
+  local scheme, rest = raw_url:match("^(postgres://)(.+)$")
+  if not scheme then
+    scheme, rest = raw_url:match("^(postgresql://)(.+)$")
+  end
+  if not scheme then
+    return nil
+  end
+
+  local authority, path_and_query = rest:match("^([^/]+)/(.+)$")
+  if not authority then
+    return nil
+  end
+
+  local database, raw_query = path_and_query:match("^([^?]*)%??(.*)$")
+  local userinfo, hostport = authority:match("^(.*)@([^@]+)$")
+  if not hostport then
+    hostport = authority
+  end
+
+  local username, password = "", ""
+  if userinfo then
+    local sep = userinfo:find(":", 1, true)
+    if sep then
+      username = userinfo:sub(1, sep - 1)
+      password = userinfo:sub(sep + 1)
+    else
+      username = userinfo
+    end
+  end
+
+  local host = hostport
+  local port = nil
+  if hostport:match("^%[") then
+    local ipv6_host, ipv6_port = hostport:match("^(%b[]):(%d+)$")
+    if ipv6_host then
+      host = ipv6_host
+      port = ipv6_port
+    end
+  else
+    local parsed_host, parsed_port = hostport:match("^([^:]+):(%d+)$")
+    if parsed_host then
+      host = parsed_host
+      port = parsed_port
+    end
+  end
+
+  local sslmode = nil
+  local unsupported_query = {}
+  if raw_query and raw_query ~= "" then
+    for pair in raw_query:gmatch("[^&]+") do
+      local key, value = pair:match("^([^=]+)=?(.*)$")
+      if key == "sslmode" then
+        sslmode = value
+      else
+        unsupported_query[#unsupported_query + 1] = key
+      end
+    end
+  end
+
+  return {
+    scheme = scheme,
+    username = username,
+    password = password,
+    host = host,
+    port = port,
+    database = database,
+    sslmode = sslmode,
+    raw_query = raw_query or "",
+    unsupported_query = unsupported_query,
+  }
+end
+
+local function find_wallet_alias_for_descriptor(wallet_path, descriptor)
+  if not wallet_path or wallet_path == "" or not descriptor or descriptor == "" then
+    return nil
+  end
+
+  local contents = read_wallet_tnsnames(wallet_path)
+  if not contents or contents == "" then
+    return nil
+  end
+
+  local aliases, alias_map = parse_wallet_aliases(contents)
+  local wanted = normalize_descriptor_text(descriptor)
+  for _, alias in ipairs(aliases) do
+    if normalize_descriptor_text(alias_map[alias]) == wanted then
+      return alias
+    end
+  end
+
+  return nil
+end
+
+local function parse_oracle_url(raw_url)
+  if type(raw_url) ~= "string" or raw_url == "" then
+    return nil
+  end
+
+  local rest = raw_url:match("^oracle://(.+)$")
+  if not rest then
+    return nil
+  end
+
+  local authority, path_and_query = rest:match("^([^/]+)/?(.*)$")
+  if not authority then
+    return nil
+  end
+
+  local userinfo = authority:match("^(.*)@")
+  if not userinfo then
+    return nil
+  end
+
+  local username, password = userinfo:match("^(.*):(.*)$")
+  if username == nil then
+    username = userinfo
+    password = ""
+  end
+
+  local _, raw_query = tostring(path_and_query or ""):match("^([^?]*)%??(.*)$")
+  local query_pairs, ordered_keys = parse_query_pairs(raw_query or "")
+  local unsupported_query = {}
+  for _, key in ipairs(ordered_keys) do
+    local upper = key:upper()
+    if upper ~= "CONNSTR" and upper ~= "WALLET" then
+      unsupported_query[#unsupported_query + 1] = key
+    end
+  end
+
+  return {
+    username = percent_decode(username, false),
+    password = percent_decode(password, false),
+    descriptor = query_pairs.connStr or query_pairs.CONNSTR,
+    wallet_path = query_pairs.WALLET or query_pairs.wallet or query_pairs.Wallet,
+    unsupported_query = unsupported_query,
+  }
+end
+
+local function render_oracle_connection_url(fields, descriptor)
+  local resolved_descriptor = descriptor or fields.service_alias or ""
+  if resolved_descriptor == "" then
+    return nil, "Oracle descriptor data is required."
+  end
+
+  local query = {
+    "connStr=" .. percent_encode(resolved_descriptor),
+  }
+  if fields.wallet_path and fields.wallet_path ~= "" then
+    query[#query + 1] = "WALLET=" .. percent_encode(fields.wallet_path)
+  end
+
+  return string.format(
+    "oracle://%s:%s@:0/?%s",
+    percent_encode(fields.username or ""),
+    percent_encode(fields.password or ""),
+    table.concat(query, "&")
+  )
+end
+
+local function open_password_input(parent_winid, title, current_value, on_confirm, on_close)
+  local width = 56
+  if parent_winid and vim.api.nvim_win_is_valid(parent_winid) then
+    width = math.max(40, math.min(vim.api.nvim_win_get_width(parent_winid) - 6, 72))
+  end
+
+  local input = Input({
+    relative = parent_winid and {
+      type = "win",
+      winid = parent_winid,
+    } or "editor",
+    position = "50%",
+    size = width,
+    zindex = 180,
+    border = {
+      style = "rounded",
+      text = {
+        top = title,
+        top_align = "left",
+        bottom = " <CR> save • <Esc> cancel ",
+        bottom_align = "right",
+      },
+    },
+    win_options = {
+      conceallevel = 2,
+      concealcursor = "niv",
+    },
+  }, {
+    default_value = current_value,
+    on_submit = on_confirm,
+    on_close = on_close,
+  })
+
+  input:mount()
+  vim.bo[input.bufnr].bufhidden = "wipe"
+  vim.bo[input.bufnr].filetype = "dbee"
+  vim.api.nvim_buf_call(input.bufnr, function()
+    vim.cmd("syntax clear")
+    vim.cmd("syntax match DbeeWizardPassword /./ conceal cchar=*")
+  end)
+
+  local map_opts = { noremap = true, nowait = true }
+  input:map("n", "<Esc>", function()
+    input:unmount()
+  end, map_opts)
+  input:map("i", "<Esc>", function()
+    input:unmount()
+  end, map_opts)
+
+  return input
+end
+
 local function refresh_wallet_alias_state(state)
   state.wallet_aliases = {}
+  state.wallet_alias_map = {}
   state.wallet_alias_warning = nil
   if state.mode ~= "oracle_cloud_wallet" then
     return
@@ -200,8 +537,9 @@ local function refresh_wallet_alias_state(state)
     return
   end
 
-  local aliases = parse_wallet_aliases(contents)
+  local aliases, alias_map = parse_wallet_aliases(contents)
   state.wallet_aliases = aliases
+  state.wallet_alias_map = alias_map
   if #aliases == 0 then
     state.wallet_alias_warning = "No wallet aliases were discovered; manual alias entry remains available."
     return
@@ -216,58 +554,250 @@ local function refresh_wallet_alias_state(state)
   end
 end
 
-local function seed_state(seed)
+-- normalize_seed prefers persisted metadata first, then lossless parse fallback,
+-- then raw compatibility when normalization would be lossy.
+local function normalize_seed(seed)
   seed = seed or {}
   local params = deepcopy(seed.params or {})
   local wizard = deepcopy(seed.wizard or {})
-
-  local mode = wizard.mode
-  if not mode then
-    if params.type == "oracle" then
-      mode = "oracle_custom_jdbc"
-    elseif params.type == "postgres" then
-      mode = "postgres_url"
-    else
-      mode = "other_raw"
-    end
-  end
-
   local state = {
-    db_kind = wizard.db_kind or mode_db_kind(mode),
-    mode = mode,
+    db_kind = "postgres",
+    mode = "postgres_url",
     fields = {},
     selection = 1,
     wallet_aliases = {},
+    wallet_alias_map = {},
     wallet_alias_warning = nil,
     last_error = nil,
+    raw_fallback = false,
   }
 
   for known_mode in pairs(FIELD_DEFS) do
     ensure_mode_fields(state, known_mode)
   end
 
-  if type(wizard.fields) == "table" then
-    state.fields[mode] = vim.tbl_extend("force", state.fields[mode], deepcopy(wizard.fields))
+  local function seed_other_raw()
+    state.fields.other_raw = vim.tbl_extend("force", state.fields.other_raw, {
+      name = params.name or state.fields.other_raw.name,
+      type = params.type or state.fields.other_raw.type,
+      url = params.url or state.fields.other_raw.url,
+    })
   end
 
-  if params.name and state.fields[mode].name == nil then
-    state.fields[mode].name = params.name
+  seed_other_raw()
+
+  if type(wizard.fields) == "table" and wizard.mode then
+    state.mode = wizard.mode
+    state.db_kind = wizard.db_kind or mode_db_kind(wizard.mode)
+    state.raw_fallback = wizard.raw_fallback == true or wizard.mode == "other_raw"
+    state.fields[wizard.mode] = vim.tbl_extend("force", state.fields[wizard.mode], deepcopy(wizard.fields))
+    if params.name and not state.fields[wizard.mode].name then
+      state.fields[wizard.mode].name = params.name
+    end
+    refresh_wallet_alias_state(state)
+    return state
   end
-  if params.type and state.fields.other_raw.type == nil then
-    state.fields.other_raw.type = params.type
-  end
-  if params.url and state.fields.other_raw.url == nil then
-    state.fields.other_raw.url = params.url
-  end
-  if params.url and state.fields.postgres_url.url == nil then
-    state.fields.postgres_url.url = params.url
-  end
-  if params.url and state.fields.oracle_custom_jdbc.descriptor == nil then
-    state.fields.oracle_custom_jdbc.descriptor = params.url
+
+  if params.type == "postgres" then
+    local parsed = parse_postgres_url(params.url or "")
+    if parsed then
+      local form_fields = {
+        name = params.name or "",
+        host = parsed.host,
+        port = parsed.port or "5432",
+        database = parsed.database,
+        username = parsed.username,
+        password = parsed.password,
+        sslmode = parsed.sslmode or "require",
+      }
+      local rendered_url = render_postgres_form_url(form_fields)
+      -- unsupported query parameters keep the seed in URL/raw fallback mode.
+      local rendered_query = form_fields.sslmode ~= "" and ("sslmode=" .. form_fields.sslmode) or ""
+      if #parsed.unsupported_query == 0 and parsed.raw_query == rendered_query and rendered_url == params.url then
+        state.db_kind = "postgres"
+        state.mode = "postgres_form"
+        state.fields.postgres_form = vim.tbl_extend("force", state.fields.postgres_form, form_fields)
+      else
+        state.db_kind = "postgres"
+        state.mode = "postgres_url"
+        state.raw_fallback = true
+        state.fields.postgres_url = vim.tbl_extend("force", state.fields.postgres_url, {
+          name = params.name or "",
+          url = params.url or "",
+        })
+      end
+    else
+      state.db_kind = "postgres"
+      state.mode = "postgres_url"
+      state.raw_fallback = params.url and params.url ~= "" or false
+      state.fields.postgres_url = vim.tbl_extend("force", state.fields.postgres_url, {
+        name = params.name or "",
+        url = params.url or "",
+      })
+    end
+  elseif params.type == "oracle" then
+    local parsed = parse_oracle_url(params.url or "")
+    if parsed and #parsed.unsupported_query == 0 and parsed.wallet_path and parsed.wallet_path ~= "" then
+      local service_alias = find_wallet_alias_for_descriptor(parsed.wallet_path, parsed.descriptor)
+      if service_alias then
+        state.db_kind = "oracle"
+        state.mode = "oracle_cloud_wallet"
+        state.fields.oracle_cloud_wallet = vim.tbl_extend("force", state.fields.oracle_cloud_wallet, {
+          name = params.name or "",
+          wallet_path = parsed.wallet_path,
+          service_alias = service_alias,
+          username = parsed.username,
+          password = parsed.password,
+        })
+      else
+        state.db_kind = "other"
+        state.mode = "other_raw"
+        state.raw_fallback = true
+      end
+    elseif parsed and #parsed.unsupported_query == 0 and parsed.descriptor and parsed.descriptor ~= "" then
+      state.db_kind = "oracle"
+      state.mode = "oracle_custom_jdbc"
+      state.fields.oracle_custom_jdbc = vim.tbl_extend("force", state.fields.oracle_custom_jdbc, {
+        name = params.name or "",
+        username = parsed.username,
+        password = parsed.password,
+        descriptor = parsed.descriptor,
+      })
+    else
+      state.db_kind = "other"
+      state.mode = "other_raw"
+      state.raw_fallback = params.url and params.url ~= "" or false
+    end
+  elseif params.type and params.type ~= "" then
+    state.db_kind = "other"
+    state.mode = "other_raw"
+    state.raw_fallback = true
+  else
+    state.db_kind = "postgres"
+    state.mode = "postgres_url"
   end
 
   refresh_wallet_alias_state(state)
   return state
+end
+
+local function validate_submission(state)
+  local fields = ensure_mode_fields(state, state.mode)
+  local errors = {}
+
+  local function required(key, label)
+    if not fields[key] or vim.trim(tostring(fields[key])) == "" then
+      errors[#errors + 1] = label .. " is required."
+    end
+  end
+
+  required("name", "Name")
+
+  if state.mode == "oracle_cloud_wallet" then
+    required("wallet_path", "Wallet Path")
+    required("service_alias", "Service Alias")
+    required("username", "Username")
+    required("password", "Password")
+  elseif state.mode == "oracle_custom_jdbc" then
+    required("username", "Username")
+    required("password", "Password")
+    required("descriptor", "Descriptor")
+    local descriptor = tostring(fields.descriptor or "")
+    if descriptor ~= "" and descriptor:upper():find("(DESCRIPTION=", 1, true) == nil then
+      errors[#errors + 1] = "Descriptor must contain a `(DESCRIPTION=...)` block."
+    end
+  elseif state.mode == "postgres_url" then
+    required("url", "URL")
+    if fields.url and fields.url ~= "" and not parse_postgres_url(fields.url) then
+      errors[#errors + 1] = "URL must be a `postgres://` or `postgresql://` connection string."
+    end
+  elseif state.mode == "postgres_form" then
+    required("host", "Host")
+    required("port", "Port")
+    required("database", "Database")
+    required("username", "Username")
+    required("password", "Password")
+    required("sslmode", "SSL Mode")
+    if fields.port and fields.port ~= "" and not tonumber(fields.port) then
+      errors[#errors + 1] = "Port must be numeric."
+    end
+  elseif state.mode == "other_raw" then
+    required("type", "Type")
+    required("url", "URL")
+  end
+
+  return errors
+end
+
+local function serialize_submission(state)
+  local fields = ensure_mode_fields(state, state.mode)
+  -- Password placeholders are preserved byte-for-byte in wizard fields and the
+  -- rendered runtime params; no templating or auto-expansion happens here.
+  local wizard = {
+    db_kind = state.db_kind,
+    mode = state.mode,
+    fields = deepcopy(fields),
+    raw_fallback = state.raw_fallback or nil,
+  }
+
+  if state.mode == "oracle_cloud_wallet" then
+    local descriptor = state.wallet_alias_map[fields.service_alias or ""]
+    local url, err = render_oracle_connection_url(fields, descriptor)
+    if not url then
+      return nil, err
+    end
+    return {
+      params = {
+        name = fields.name,
+        type = "oracle",
+        url = url,
+      },
+      wizard = wizard,
+    }
+  elseif state.mode == "oracle_custom_jdbc" then
+    local url, err = render_oracle_connection_url(fields, fields.descriptor)
+    if not url then
+      return nil, err
+    end
+    return {
+      params = {
+        name = fields.name,
+        type = "oracle",
+        url = url,
+      },
+      wizard = wizard,
+    }
+  elseif state.mode == "postgres_url" then
+    return {
+      params = {
+        name = fields.name,
+        type = "postgres",
+        url = fields.url,
+      },
+      wizard = wizard,
+    }
+  elseif state.mode == "postgres_form" then
+    local rendered_url = render_postgres_form_url(fields)
+    wizard.rendered_url = rendered_url
+    return {
+      params = {
+        name = fields.name,
+        type = "postgres",
+        url = rendered_url,
+      },
+      wizard = wizard,
+    }
+  end
+
+  wizard.raw_fallback = true
+  return {
+    params = {
+      name = fields.name,
+      type = fields.type,
+      url = fields.url,
+    },
+    wizard = wizard,
+  }
 end
 
 local Wizard = {}
@@ -331,7 +861,7 @@ function Wizard:new(opts)
   local instance = setmetatable({
     opts = opts,
     popup = popup,
-    state = seed_state(opts.seed),
+    state = normalize_seed(opts.seed),
     entries = {},
     mounted = false,
   }, self)
@@ -346,6 +876,7 @@ function Wizard:set_mode(mode)
   local previous_fields = deepcopy(self:current_fields())
   self.state.mode = mode
   self.state.db_kind = mode_db_kind(mode)
+  self.state.raw_fallback = mode == "other_raw"
   local target_fields = ensure_mode_fields(self.state, mode)
   copy_shared_fields(previous_fields, target_fields)
   refresh_wallet_alias_state(self.state)
@@ -358,6 +889,7 @@ function Wizard:set_db_kind(db_kind)
   self.state.db_kind = db_kind
   local next_mode = first_mode_for_db_kind(db_kind)
   self.state.mode = next_mode
+  self.state.raw_fallback = next_mode == "other_raw"
   local target_fields = ensure_mode_fields(self.state, next_mode)
   copy_shared_fields(previous_fields, target_fields)
   refresh_wallet_alias_state(self.state)
@@ -456,17 +988,26 @@ function Wizard:cancel()
 end
 
 function Wizard:submit()
+  local errors = validate_submission(self.state)
+  if #errors > 0 then
+    self.state.last_error = errors[1]
+    self:render()
+    return nil, errors
+  end
+
+  local submission, serialize_err = serialize_submission(self.state)
+  if not submission then
+    self.state.last_error = serialize_err
+    self:render()
+    return nil, serialize_err
+  end
+
+  self.state.last_error = nil
   if self.opts.on_submit then
-    self.opts.on_submit({
-      params = {},
-      wizard = {
-        db_kind = self.state.db_kind,
-        mode = self.state.mode,
-        fields = deepcopy(self:current_fields()),
-      },
-    })
+    self.opts.on_submit(submission)
   end
   self:close()
+  return submission
 end
 
 function Wizard:edit_type()
@@ -539,9 +1080,6 @@ function Wizard:edit_field(field)
   local target_key = field.key:gsub("_manual$", "")
   local current_value = self:current_fields()[target_key] or ""
   local title = field.label
-  if field.kind == "multiline" then
-    title = field.label .. " (multiline)"
-  end
 
   if field.kind == "select" and field.options then
     menu.select({
@@ -554,6 +1092,62 @@ function Wizard:edit_field(field)
       end,
       on_yank = function() end,
     })
+    return
+  end
+
+  if field.kind == "password" then
+    open_password_input(self.popup.winid, title, current_value, function(value)
+      self:set_field(target_key, value)
+    end, function()
+      self:render()
+    end)
+    return
+  end
+
+  if field.kind == "multiline" then
+    local popup = Popup({
+      relative = {
+        type = "win",
+        winid = self.popup.winid,
+      },
+      position = "50%",
+      size = {
+        width = math.max(56, math.min(vim.api.nvim_win_get_width(self.popup.winid) - 6, 92)),
+        height = 10,
+      },
+      enter = true,
+      zindex = 180,
+      border = {
+        style = "rounded",
+        text = {
+          top = title,
+          top_align = "left",
+          bottom = " <C-s> save • q cancel ",
+          bottom_align = "right",
+        },
+      },
+    })
+    popup:mount()
+    vim.bo[popup.bufnr].bufhidden = "wipe"
+    vim.bo[popup.bufnr].filetype = "dbee"
+    vim.bo[popup.bufnr].modifiable = true
+    vim.api.nvim_buf_set_lines(popup.bufnr, 0, -1, false, vim.split(current_value ~= "" and current_value or "", "\n", { plain = true }))
+    local map_opts = { noremap = true, nowait = true }
+    local function close_popup()
+      popup:unmount()
+      self:render()
+    end
+    local function save_popup()
+      local lines = vim.api.nvim_buf_get_lines(popup.bufnr, 0, -1, false)
+      self:set_field(target_key, table.concat(lines, "\n"))
+      close_popup()
+    end
+    popup:map("n", "<C-s>", save_popup, map_opts)
+    popup:map("i", "<C-s>", save_popup, map_opts)
+    popup:map("n", "q", close_popup, map_opts)
+    popup:map("n", "<Esc>", close_popup, map_opts)
+    popup:map("i", "<Esc>", close_popup, map_opts)
+    vim.cmd("startinsert")
     return
   end
 
@@ -636,5 +1230,10 @@ M._MODE_OPTIONS = MODE_OPTIONS
 M._FIELD_DEFS = FIELD_DEFS
 M._parse_wallet_aliases = parse_wallet_aliases
 M._read_wallet_tnsnames = read_wallet_tnsnames
+M._validate = validate_submission
+M._serialize = serialize_submission
+M._normalize_seed = normalize_seed
+M._render_postgres_form_url = render_postgres_form_url
+M._parse_postgres_url = parse_postgres_url
 
 return M
