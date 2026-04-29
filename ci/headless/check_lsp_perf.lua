@@ -558,6 +558,7 @@ end
 
 local function queue_try_start(bufnr)
   local lsp = require("dbee.lsp")
+  -- Production queue_buffer() invokes the private _try_start() lifecycle.
   lsp.queue_buffer(bufnr)
   return lsp
 end
@@ -577,6 +578,7 @@ local function wait_metadata_fallback(lsp, handler, opts)
   if not handler.metadata_call_id then
     fail("metadata fallback did not create fake call")
   end
+  -- _process_metadata_result() calls SchemaCache:build_from_metadata_rows().
   lsp._process_metadata_result(handler, handler.metadata_call_id, opts.conn_id or DEFAULT_CONN_ID)
   wait_running(lsp, opts.label or "metadata-fallback")
 end
@@ -892,6 +894,145 @@ local function run_trace_only_mode()
   end
   vim.cmd("qa!")
 end
+
+local function clear_lsp_cache_dir()
+  vim.fn.delete(vim.fn.stdpath("state") .. "/dbee/lsp_cache", "rf")
+end
+
+local function seed_warm_disk_cache(handler)
+  clear_lsp_cache_dir()
+  local cache = make_cache(100, DEFAULT_COLUMNS_PER_TABLE, {
+    handler = handler,
+    conn_id = DEFAULT_CONN_ID,
+  })
+  cache:save_to_disk()
+  local key = schema_for_index(1) .. "." .. table_for_index(1)
+  local cols = make_columns(schema_for_index(1), table_for_index(1), DEFAULT_COLUMNS_PER_TABLE)
+  cache.columns[key] = cols
+  cache:_save_columns_to_disk(key, cols)
+end
+
+local function startup_before(kind)
+  assert_isolated_state()
+  local connection_type = kind == "metadata" and CONNECTION_TYPE_METADATA or CONNECTION_TYPE_NO_METADATA
+  local handler = make_handler({
+    table_count = 100,
+    columns_per_table = DEFAULT_COLUMNS_PER_TABLE,
+    connection_type = connection_type,
+    auto_structure = kind ~= "metadata",
+  })
+  if kind == "warm" then
+    seed_warm_disk_cache(handler)
+  else
+    clear_lsp_cache_dir()
+  end
+  local bufnr = make_buffer({ "select * from " .. table_for_index(1) })
+  capture_defer_fn()
+  return {
+    label = kind,
+    handler = handler,
+    bufnr = bufnr,
+    connection_type = connection_type,
+  }
+end
+
+local function startup_after(state)
+  local expected_metadata_count = state.label == "metadata" and 1 or 0
+  if state.handler.metadata_execute_count ~= expected_metadata_count then
+    fail(("metadata fake call count mismatch for %s: expected %d got %d"):format(
+      state.label,
+      expected_metadata_count,
+      state.handler.metadata_execute_count
+    ))
+  end
+  restore_defer_fn()
+  if state.bufnr and vim.api.nvim_buf_is_valid(state.bufnr) then
+    pcall(vim.api.nvim_buf_delete, state.bufnr, { force = true })
+  end
+end
+
+local function startup_run(state, finish, _, slug)
+  local start_ns = uv.hrtime()
+  with_fake_lsp_state(state.handler, function()
+    local lsp
+    if state.label == "metadata" then
+      lsp = queue_try_start(state.bufnr, state.handler, { label = slug })
+      wait_metadata_fallback(lsp, state.handler, {
+        label = slug,
+        conn_id = DEFAULT_CONN_ID,
+      })
+      local count = 1
+      emit("LSP01_METADATA_FALLBACK_DEFERRED_CALLBACK_COUNT", count)
+      if state.handler.metadata_execute_count ~= 1 then
+        scenario_sentinels[slug] = false
+      end
+      emit("LSP01_METADATA_FALLBACK_FAKE_CALL_COUNT", state.handler.metadata_execute_count)
+    else
+      lsp = start_lsp_via_lifecycle(state.bufnr, state.handler, { label = slug })
+      local count = drain_deferred(0, slug)
+      if slug == "STARTUP_COLD" then
+        emit("LSP01_COLD_DISK_DEFERRED_CALLBACK_COUNT", count)
+        if state.connection_type ~= CONNECTION_TYPE_NO_METADATA then
+          scenario_sentinels[slug] = false
+        end
+      else
+        emit("LSP01_WARM_DISK_DEFERRED_CALLBACK_COUNT", count)
+      end
+      if state.handler.metadata_execute_count ~= 0 then
+        scenario_sentinels[slug] = false
+      end
+    end
+
+    local lifecycle_ok = state.handler:assert_lifecycle_methods_complete(slug)
+    if not lifecycle_ok then
+      scenario_sentinels[slug] = false
+    end
+    local status = lsp.status()
+    if status.running ~= true or not status.client_id then
+      scenario_sentinels[slug] = false
+    end
+  end)
+  finish(uv.hrtime() - start_ns)
+end
+
+register({
+  slug = "STARTUP_COLD",
+  threshold_key = "startup_cold",
+  corpus = "conn_type:dbee-perf-no-metadata,tables:100,columns:10,state:fresh",
+  before = function()
+    return startup_before("cold")
+  end,
+  run = function(state, finish, iteration)
+    startup_run(state, finish, iteration, "STARTUP_COLD")
+  end,
+  after = startup_after,
+})
+
+register({
+  slug = "STARTUP_WARM",
+  threshold_key = "startup_warm",
+  corpus = "conn_type:dbee-perf-no-metadata,tables:100,columns:10,state:warm-disk",
+  before = function()
+    return startup_before("warm")
+  end,
+  run = function(state, finish, iteration)
+    startup_run(state, finish, iteration, "STARTUP_WARM")
+  end,
+  after = startup_after,
+})
+
+register({
+  slug = "STARTUP_METADATA_FALLBACK",
+  threshold_key = "startup_metadata_fallback",
+  corpus = "conn_type:postgres,tables:100,columns:10,state:metadata-fallback",
+  before = function()
+    return startup_before("metadata")
+  end,
+  run = function(state, finish, iteration)
+    startup_run(state, finish, iteration, "STARTUP_METADATA_FALLBACK")
+  end,
+  after = startup_after,
+})
 
 if trace_only then
   run_trace_only_mode()
