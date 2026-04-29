@@ -223,6 +223,26 @@ local function to_vim_diagnostics(diagnostics)
   return converted
 end
 
+function M.diagnostic_namespace()
+  return DIAGNOSTIC_NS
+end
+
+---@param bufnr? integer
+function M.clear_diagnostics(bufnr)
+  if bufnr then
+    if vim.api.nvim_buf_is_valid(bufnr) then
+      vim.diagnostic.set(DIAGNOSTIC_NS, bufnr, {})
+    end
+    return
+  end
+
+  for _, buffer in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_valid(buffer) then
+      vim.diagnostic.set(DIAGNOSTIC_NS, buffer, {})
+    end
+  end
+end
+
 --- Extract table references from SQL text and validate against cache.
 ---@param text string full buffer text
 ---@param cache SchemaCache
@@ -315,9 +335,7 @@ function M.create(cache)
 
     local function clear_all_diagnostics()
       for bufnr in pairs(diagnostic_buffers) do
-        if vim.api.nvim_buf_is_valid(bufnr) then
-          vim.diagnostic.set(DIAGNOSTIC_NS, bufnr, {})
-        end
+        M.clear_diagnostics(bufnr)
       end
       diagnostic_buffers = {}
       for uri in pairs(diagnostic_timers) do
@@ -330,13 +348,6 @@ function M.create(cache)
       if vim.api.nvim_buf_is_valid(bufnr) then
         diagnostic_buffers[bufnr] = true
         vim.diagnostic.set(DIAGNOSTIC_NS, bufnr, to_vim_diagnostics(diagnostics))
-      end
-      local notify = dispatchers and (dispatchers.notification or dispatchers.on_notify)
-      if notify then
-        notify("textDocument/publishDiagnostics", {
-          uri = uri,
-          diagnostics = diagnostics,
-        })
       end
     end
 

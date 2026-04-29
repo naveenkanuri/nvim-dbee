@@ -1127,7 +1127,8 @@ local function request_diagnostics(state, method, lines, expected_line)
   if not state.lines_preloaded then
     vim.api.nvim_buf_set_lines(state.bufnr, 0, -1, false, lines)
   end
-  local prior_handler = vim.lsp.handlers["textDocument/publishDiagnostics"]
+  local diagnostic_ns = vim.api.nvim_create_namespace("dbee/lsp")
+  local prior_diagnostic_set = vim.diagnostic.set
   local prior_schedule = vim.schedule
   local prior_new_timer = uv.new_timer
   local done = false
@@ -1170,16 +1171,36 @@ local function request_diagnostics(state, method, lines, expected_line)
       end)
     end
   end
-  vim.lsp.handlers["textDocument/publishDiagnostics"] = function(err, result, ctx, config)
-    if result and result.uri == state.uri then
+  vim.diagnostic.set = function(ns, bufnr, diagnostics, opts)
+    prior_diagnostic_set(ns, bufnr, diagnostics, opts)
+    if ns == diagnostic_ns and bufnr == state.bufnr then
+      local lsp_diagnostics = {}
+      for _, diagnostic in ipairs(diagnostics or {}) do
+        lsp_diagnostics[#lsp_diagnostics + 1] = {
+          message = diagnostic.message,
+          severity = diagnostic.severity,
+          source = diagnostic.source,
+          range = {
+            start = {
+              line = diagnostic.lnum or 0,
+              character = diagnostic.col or 0,
+            },
+            ["end"] = {
+              line = diagnostic.end_lnum or diagnostic.lnum or 0,
+              character = diagnostic.end_col or diagnostic.col or 0,
+            },
+          },
+        }
+      end
       response = {
-        err = err,
-        result = result,
+        err = nil,
+        result = {
+          uri = state.uri,
+          diagnostics = lsp_diagnostics,
+        },
         elapsed_ns = uv.hrtime() - (start_ns or uv.hrtime()),
       }
       done = true
-    elseif prior_handler then
-      prior_handler(err, result, ctx, config)
     end
   end
 
@@ -1200,7 +1221,7 @@ local function request_diagnostics(state, method, lines, expected_line)
   local ok = vim.wait(1000, function()
     return done
   end, 5)
-  vim.lsp.handlers["textDocument/publishDiagnostics"] = prior_handler
+  vim.diagnostic.set = prior_diagnostic_set
   vim.schedule = prior_schedule
   uv.new_timer = prior_new_timer
   if method == "textDocument/didChange" and not start_ns then

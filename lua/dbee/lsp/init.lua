@@ -81,6 +81,25 @@ local function cancel_active_async(reason)
   end
 end
 
+local function clear_lsp_diagnostics()
+  if type(server.clear_diagnostics) ~= "function" then
+    return
+  end
+
+  local cleared = false
+  for bufnr in pairs(M._attached_bufs or {}) do
+    server.clear_diagnostics(bufnr)
+    cleared = true
+  end
+  for bufnr in pairs(M._pending_bufs or {}) do
+    server.clear_diagnostics(bufnr)
+    cleared = true
+  end
+  if not cleared then
+    server.clear_diagnostics()
+  end
+end
+
 ---@param conn_id connection_id|nil
 local function clear_connection_tracking(conn_id)
   if conn_id and conn_id ~= "" then
@@ -521,6 +540,7 @@ function M.stop(conn_id, opts)
   opts = opts or {}
   clear_connection_tracking(conn_id)
   cancel_active_async("stop")
+  clear_lsp_diagnostics()
   if state.is_core_loaded() then
     local handler = state.handler()
     local preserve_structure_waiter = false
@@ -611,8 +631,17 @@ function M._flush_connection_invalidations()
 
   if should_rewarm then
     cancel_active_async("connection_invalidated")
+    clear_lsp_diagnostics()
     M._request_structure_refresh(handler, current.id)
   end
+end
+
+function M.clear_diagnostics(bufnr)
+  if bufnr and type(server.clear_diagnostics) == "function" then
+    server.clear_diagnostics(bufnr)
+    return
+  end
+  clear_lsp_diagnostics()
 end
 
 function M._on_connection_invalidated(data)
@@ -719,6 +748,7 @@ function M.register_events()
     end
     if M._conn_id == data.conn_id and M._cache then
       cancel_active_async("database_selected")
+      clear_lsp_diagnostics()
       M._cache:invalidate()
       -- trigger fresh structure load
       M._request_structure_refresh(handler, data.conn_id)

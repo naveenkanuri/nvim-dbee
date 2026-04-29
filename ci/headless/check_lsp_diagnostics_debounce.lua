@@ -42,20 +42,13 @@ local cache = SchemaCache:new({}, "diagnostics-debounce")
 cache:build_from_metadata_rows({
   { schema_name = "S", table_name = "VALID_TABLE", obj_type = "table" },
 })
+local ns = server.diagnostic_namespace()
 
 local function new_client(name)
-  local published = {}
-  local dispatchers = {
-    notification = function(method, params)
-      if method == "textDocument/publishDiagnostics" then
-        published[#published + 1] = params
-      end
-    end,
-  }
-  local client = server.create(cache)(dispatchers, {})
+  local client = server.create(cache)({}, {})
   local bufnr = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_buf_set_name(bufnr, "/tmp/dbee-lsp-diagnostics-" .. name .. ".sql")
-  return client, bufnr, vim.uri_from_bufnr(bufnr), published
+  return client, bufnr, vim.uri_from_bufnr(bufnr)
 end
 
 local function set_missing_buffer(bufnr)
@@ -65,7 +58,7 @@ local function set_missing_buffer(bufnr)
 end
 
 set_lsp_config("debounce_didchange", 25)
-local debounce_client, debounce_buf, debounce_uri, debounce_published = new_client("debounce")
+local debounce_client, debounce_buf, debounce_uri = new_client("debounce")
 set_missing_buffer(debounce_buf)
 for i = 1, 3 do
   debounce_client.notify("textDocument/didChange", {
@@ -76,14 +69,13 @@ for i = 1, 3 do
   })
 end
 vim.wait(1000, function()
-  return #debounce_published == 1
+  return #vim.diagnostic.get(debounce_buf, { namespace = ns }) == 1
 end, 10)
-assert_eq("debounced publish count", #debounce_published, 1)
-assert_eq("debounced diagnostic count", #debounce_published[1].diagnostics, 1)
+assert_eq("debounced diagnostic count", #vim.diagnostic.get(debounce_buf, { namespace = ns }), 1)
 debounce_client.terminate()
 
 set_lsp_config("save_only", 25)
-local save_client, save_buf, save_uri, save_published = new_client("save-only")
+local save_client, save_buf, save_uri = new_client("save-only")
 set_missing_buffer(save_buf)
 save_client.notify("textDocument/didChange", {
   textDocument = { uri = save_uri, version = 1 },
@@ -92,44 +84,42 @@ save_client.notify("textDocument/didChange", {
   },
 })
 vim.wait(100, function()
-  return #save_published > 0
+  return #vim.diagnostic.get(save_buf, { namespace = ns }) > 0
 end, 10)
-assert_eq("save_only didChange count", #save_published, 0)
+assert_eq("save_only didChange count", #vim.diagnostic.get(save_buf, { namespace = ns }), 0)
 save_client.notify("textDocument/didSave", {
   textDocument = { uri = save_uri },
 })
 vim.wait(1000, function()
-  return #save_published == 1
+  return #vim.diagnostic.get(save_buf, { namespace = ns }) == 1
 end, 10)
-assert_eq("save_only didSave count", #save_published, 1)
+assert_eq("save_only didSave count", #vim.diagnostic.get(save_buf, { namespace = ns }), 1)
 save_client.terminate()
 
 set_lsp_config("off", 25)
-local off_client, off_buf, off_uri, off_published = new_client("off")
+local off_client, off_buf, off_uri = new_client("off")
 set_missing_buffer(off_buf)
-local ns = vim.api.nvim_create_namespace("dbee/lsp")
 off_client.notify("textDocument/didChange", {
   textDocument = { uri = off_uri, version = 1 },
   contentChanges = {
     { text = "SELECT * FROM MISSING_TABLE" },
   },
 })
-vim.wait(1000, function()
-  return #off_published == 1
+vim.wait(100, function()
+  return #vim.diagnostic.get(off_buf, { namespace = ns }) > 0
 end, 10)
-assert_eq("off diagnostics empty", #off_published[1].diagnostics, 0)
 assert_eq("off namespace empty", #vim.diagnostic.get(off_buf, { namespace = ns }), 0)
 off_client.notify("textDocument/didSave", {
   textDocument = { uri = off_uri },
 })
-vim.wait(1000, function()
-  return #off_published == 2
+vim.wait(100, function()
+  return #vim.diagnostic.get(off_buf, { namespace = ns }) > 0
 end, 10)
-assert_eq("off didSave empty", #off_published[2].diagnostics, 0)
+assert_eq("off didSave empty", #vim.diagnostic.get(off_buf, { namespace = ns }), 0)
 off_client.terminate()
 
 set_lsp_config("debounce_didchange", 200)
-local cleanup_client, cleanup_buf, cleanup_uri, cleanup_published = new_client("cleanup")
+local cleanup_client, cleanup_buf, cleanup_uri = new_client("cleanup")
 set_missing_buffer(cleanup_buf)
 cleanup_client.notify("textDocument/didChange", {
   textDocument = { uri = cleanup_uri, version = 1 },
@@ -139,9 +129,9 @@ cleanup_client.notify("textDocument/didChange", {
 })
 cleanup_client.terminate()
 vim.wait(250, function()
-  return #cleanup_published > 0
+  return #vim.diagnostic.get(cleanup_buf, { namespace = ns }) > 0
 end, 10)
-assert_eq("cleanup prevents late debounce", #cleanup_published, 0)
+assert_eq("cleanup prevents late debounce", #vim.diagnostic.get(cleanup_buf, { namespace = ns }), 0)
 
 package.loaded["dbee.api.state"] = saved_state
 
@@ -150,5 +140,6 @@ print("LSP11_DIDSAVE_IMMEDIATE_OK=true")
 print("LSP11_SAVE_ONLY_OK=true")
 print("LSP11_DIAGNOSTICS_OFF_OK=true")
 print("LSP11_DEBOUNCE_CLEANUP_OK=true")
+print("LSP11_DIAGNOSTICS_SINGLE_NAMESPACE_OWNED=true")
 
 vim.cmd("qa!")
