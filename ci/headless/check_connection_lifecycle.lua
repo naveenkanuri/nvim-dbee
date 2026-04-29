@@ -292,6 +292,10 @@ local function install_dbee_functions(runtime)
     return runtime.connection_test_failures[conn_id] or vim.NIL
   end
 
+  vim.fn.DbeeConnectionTestSpec = function()
+    return vim.NIL
+  end
+
   vim.fn.DbeeCallStoreResult = function() end
   vim.fn.DbeeCallCancel = function() end
   vim.fn.DbeeAddHelpers = function() end
@@ -307,6 +311,7 @@ local function new_env(opts)
     "dbee.ui.drawer",
     "dbee.ui.drawer.convert",
     "dbee.ui.drawer.model",
+    "dbee.ui.connection_wizard",
     "dbee.reconnect",
   })
 
@@ -327,6 +332,8 @@ local function new_env(opts)
     next_prompt_response = nil,
     next_select_choice = nil,
     next_input_value = nil,
+    next_wizard_submission = nil,
+    last_wizard_submit_err = nil,
   }
 
   Harness.install_ui_stubs(runtime, {
@@ -353,6 +360,21 @@ local function new_env(opts)
   local Handler = require("dbee.handler")
   local convert = require("dbee.ui.drawer.convert")
   local DrawerUI = require("dbee.ui.drawer")
+  local connection_wizard = require("dbee.ui.connection_wizard")
+
+  local original_wizard_open = connection_wizard.open
+  connection_wizard.open = function(open_opts)
+    local wizard = original_wizard_open(open_opts)
+    if runtime.next_wizard_submission ~= nil and open_opts and type(open_opts.on_submit) == "function" then
+      local submission = vim.deepcopy(runtime.next_wizard_submission)
+      runtime.next_wizard_submission = nil
+      runtime.last_wizard_submit_err = open_opts.on_submit(submission)
+      if wizard and wizard.close then
+        pcall(wizard.close, wizard)
+      end
+    end
+    return wizard
+  end
 
   local handler = Handler:new({ source })
   Harness.drain()
@@ -610,16 +632,27 @@ local function run_drawer_contracts()
   print("DCFG01_SOURCE_EDIT_REACHABLE_OK=true")
 
   clear_notifications()
-  env.runtime.next_prompt_response = {
-    name = "Delta",
-    type = "postgres",
-    url = "postgres://delta",
+  env.runtime.next_wizard_submission = {
+    params = {
+      name = "Delta",
+      type = "postgres",
+      url = "postgres://delta",
+    },
+    wizard = {
+      db_kind = "postgres",
+      mode = "postgres_url",
+      fields = {
+        name = "Delta",
+        url = "postgres://delta",
+      },
+    },
   }
   Harness.set_current_node(env.winid, env.drawer.tree, "conn-alpha")
   local select_calls_before = #env.runtime.select_calls
   env.drawer:get_actions().add_connection()
   Harness.drain()
   assert_eq("add_connection_no_source_picker", #env.runtime.select_calls, select_calls_before)
+  assert_eq("add_connection_submit_err", env.runtime.last_wizard_submit_err, nil)
   assert_true("add_connection_created", env.source._specs[#env.source._specs].name == "Delta")
   print("DCFG01_ACTION_TARGETING_OK=true")
 

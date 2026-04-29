@@ -230,6 +230,84 @@ package.loaded["nui.line"] = function()
     append = function() end,
   }
 end
+package.loaded["nui.popup"] = function(popup_opts)
+  local popup = {
+    opts = popup_opts or {},
+    maps = {},
+    bufnr = nil,
+    winid = nil,
+  }
+
+  function popup:mount()
+    if self.winid and vim.api.nvim_win_is_valid(self.winid) then
+      return
+    end
+
+    self.bufnr = vim.api.nvim_create_buf(false, true)
+    local size = self.opts.size or {}
+    local width = type(size) == "table" and (size.width or size[1]) or size or 60
+    local height = type(size) == "table" and (size.height or size[2]) or size or 12
+    local config = {
+      relative = "editor",
+      row = 1,
+      col = 1,
+      width = width,
+      height = height,
+      style = "minimal",
+      border = "single",
+    }
+
+    local relative = self.opts.relative
+    if type(relative) == "table" and relative.type == "win" and vim.api.nvim_win_is_valid(relative.winid) then
+      config.relative = "win"
+      config.win = relative.winid
+      local position = self.opts.position
+      if type(position) == "table" then
+        config.row = position.row or 1
+        config.col = position.col or 1
+      end
+    end
+
+    self.winid = vim.api.nvim_open_win(self.bufnr, true, config)
+  end
+
+  function popup:unmount()
+    if self.winid and vim.api.nvim_win_is_valid(self.winid) then
+      pcall(vim.api.nvim_win_close, self.winid, true)
+    end
+    if self.bufnr and vim.api.nvim_buf_is_valid(self.bufnr) then
+      pcall(vim.api.nvim_buf_delete, self.bufnr, { force = true })
+    end
+    self.winid = nil
+    self.bufnr = nil
+  end
+
+  function popup:map(mode, lhs, rhs)
+    self.maps[(mode or "n") .. ":" .. tostring(lhs)] = rhs
+  end
+
+  return popup
+end
+package.loaded["nui.input"] = function(popup_opts, input_opts)
+  local input = package.loaded["nui.popup"](popup_opts)
+  input.input_opts = input_opts or {}
+  local base_unmount = input.unmount
+
+  function input:submit(value)
+    if self.input_opts.on_submit then
+      self.input_opts.on_submit(value)
+    end
+  end
+
+  function input:unmount()
+    if self.input_opts.on_close then
+      self.input_opts.on_close()
+    end
+    base_unmount(self)
+  end
+
+  return input
+end
 
 local stub_filter_sessions = {}
 package.loaded["dbee.ui.drawer.menu"] = {
