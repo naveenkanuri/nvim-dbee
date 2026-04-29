@@ -159,9 +159,40 @@ emit("DRAW01_FLAME_TRACE_ARTIFACT", trace_path)
 
 local WARMUP_COUNT = 5
 local MEASURED_COUNT = 10
+local FILTER_STABLE_IDLE_MS = 50
+local FILTER_STABLE_DEBOUNCE_MS = 25
+local COLUMNS_KIND = "columns"
+local STRUCTURES_KIND = "structures"
+local ID_SEP = convert.ID_SEP
 
 local active_buffer_watch = nil
 local real_set_lines = vim.api.nvim_buf_set_lines
+local real_set_current_win = vim.api.nvim_set_current_win
+
+vim.api.nvim_set_current_win = function(winid)
+  if not winid or not vim.api.nvim_win_is_valid(winid) then
+    return
+  end
+  return real_set_current_win(winid)
+end
+
+local function stop_buffer_watch(watch, stop_ns)
+  if not watch or watch.done then
+    return
+  end
+  watch.done = true
+  if watch.timer then
+    watch.timer:stop()
+    watch.timer:close()
+    watch.timer = nil
+  end
+  if active_buffer_watch == watch then
+    active_buffer_watch = nil
+  end
+  if type(watch.on_stop) == "function" then
+    watch.on_stop(stop_ns)
+  end
+end
 
 vim.api.nvim_buf_set_lines = function(bufnr, start, stop, strict_indexing, replacement)
   local result = { real_set_lines(bufnr, start, stop, strict_indexing, replacement) }
@@ -170,6 +201,20 @@ vim.api.nvim_buf_set_lines = function(bufnr, start, stop, strict_indexing, repla
     local now = uv.hrtime()
     watch.first_ns = watch.first_ns or now
     watch.last_ns = now
+    if watch.mode == "first" then
+      stop_buffer_watch(watch, now)
+    elseif watch.mode == "idle" then
+      if not watch.timer then
+        watch.timer = uv.new_timer()
+      end
+      local scheduled_ns = now
+      watch.timer:stop()
+      watch.timer:start(watch.idle_ms or 10, 0, vim.schedule_wrap(function()
+        if watch.last_ns == scheduled_ns then
+          stop_buffer_watch(watch, scheduled_ns)
+        end
+      end))
+    end
   end
   return unpack(result)
 end
@@ -520,6 +565,413 @@ local function measure_sync_drawer_write(bufnr, action)
   return (watch.last_ns or uv.hrtime()) - start_ns
 end
 
+local function branch_cache_key(branch_id, kind)
+  return branch_id .. ID_SEP .. (kind or COLUMNS_KIND)
+end
+
+local function branch_owner_conn_id(branch_id)
+  local sep = tostring(branch_id):find(ID_SEP, 1, true)
+  if sep then
+    return branch_id:sub(1, sep - 1)
+  end
+  return branch_id
+end
+
+local function wait_for_branch_ready(drawer, conn_id, branch_id, kind)
+  return vim.wait(1000, function()
+    local conn_branches = drawer._struct_cache.branches[conn_id] or {}
+    local state = conn_branches[branch_cache_key(branch_id, kind)]
+    if not state then
+      return false
+    end
+    return state.loading == false and state.raw ~= nil
+  end, 1)
+end
+
+local function count_visible_table_nodes(drawer)
+  local count = 0
+  local line_count = vim.api.nvim_buf_line_count(drawer.bufnr)
+  for row = 1, line_count do
+    local node = drawer.tree:get_node(row)
+    if node and drawer_model.SEARCHABLE_TYPES[node.type] then
+      count = count + 1
+    end
+  end
+  return count
+end
+
+local function wait_for_filter_text(drawer, expected)
+  return vim.wait(1000, function()
+    return drawer.filter_text == expected
+  end, 1)
+end
+
+local function expand_node_and_wait(state, node_id, kind)
+  set_current_node(state.winid, state.drawer.tree, node_id)
+  state.drawer:get_actions().expand()
+
+  if not kind then
+    return
+  end
+
+  local conn_id = branch_owner_conn_id(node_id)
+  assert_true("branch ready for " .. node_id, wait_for_branch_ready(state.drawer, conn_id, node_id, kind))
+end
+
+local function open_filter(drawer)
+  drawer:get_actions().filter()
+  assert_true("filter_input_present", drawer.filter_input ~= nil)
+  vim.wait(20, function()
+    return false
+  end, 1)
+  return drawer.filter_input
+end
+
+local function set_filter_text(drawer, input, value)
+  assert_true("nui_input_on_change", type(input._ and input._.on_change) == "function")
+  input._.on_change(value)
+  assert_true("filter_text_applied", wait_for_filter_text(drawer, value))
+end
+
+local function close_filter_input(input)
+  input:unmount()
+  vim.wait(50, function()
+    return false
+  end, 1)
+end
+
+local function submit_filter_input(input, value)
+  input._.pending_submit_value = value
+  input:unmount()
+  vim.wait(50, function()
+    return false
+  end, 1)
+end
+
+local function measure_async_drawer_write(bufnr, mode, idle_ms, trigger, finish)
+  local start_ns = uv.hrtime()
+  local watch = {
+    bufnr = bufnr,
+    mode = mode,
+    idle_ms = idle_ms,
+    on_stop = function(stop_ns)
+      finish(stop_ns - start_ns)
+    end,
+  }
+  active_buffer_watch = watch
+
+  local ok, err = xpcall(trigger, debug.traceback)
+  if not ok then
+    stop_buffer_watch(watch, uv.hrtime())
+    fail(err)
+  end
+
+  vim.defer_fn(function()
+    if active_buffer_watch == watch and not watch.done then
+      active_buffer_watch = nil
+      fail("buffer-watch timeout for " .. tostring(mode))
+    end
+  end, 2000)
+end
+
+local function emit_median_max(label, samples)
+  emit(label, format_float(ns_to_ms(median(samples))) .. "/" .. format_float(ns_to_ms(maximum(samples))))
+end
+
+local function assert_locked_query_counts()
+  local state = new_drawer_fixture()
+  local ok_capture, err_capture = state.drawer:capture_filter_snapshot()
+  assert_true("capture_filter_snapshot_locked_corpus", ok_capture ~= false and err_capture == nil)
+
+  local expectations = {
+    { query = LOCKED_QUERY_COHORT.max_hit_query, expected = 1000 },
+    { query = LOCKED_QUERY_COHORT.broad_query, expected = 599 },
+    { query = LOCKED_QUERY_COHORT.secondary_broad_query, expected = 400 },
+    { query = LOCKED_QUERY_COHORT.narrow_query, expected = 1 },
+    { query = LOCKED_QUERY_COHORT.miss_query, expected = 0 },
+  }
+
+  for _, case in ipairs(expectations) do
+    state.drawer:apply_filter(case.query)
+    local got = count_visible_table_nodes(state.drawer)
+    if got ~= case.expected then
+      fail(("locked query mismatch for %s: expected %d got %d"):format(case.query, case.expected, got))
+    end
+  end
+
+  state.cleanup()
+end
+
+local function build_expanded_filter_fixture(expansions_per_conn)
+  local state = new_drawer_fixture()
+  local expanded_ids = {}
+
+  for _, conn_id in ipairs(LOCKED_CORPUS.ids.connection_ids) do
+    expanded_ids[#expanded_ids + 1] = conn_id
+    expand_node_and_wait(state, conn_id, STRUCTURES_KIND)
+
+    local schema_id = LOCKED_CORPUS.ids.schemas_by_conn[conn_id][1].id
+    expanded_ids[#expanded_ids + 1] = schema_id
+    expand_node_and_wait(state, schema_id, STRUCTURES_KIND)
+
+    for index = 1, expansions_per_conn do
+      local table_spec = LOCKED_CORPUS.ids.tables_by_conn[conn_id][index]
+      expanded_ids[#expanded_ids + 1] = table_spec.id
+      expand_node_and_wait(state, table_spec.id, COLUMNS_KIND)
+    end
+  end
+
+  return state, expanded_ids
+end
+
+local function schema_id_for_conn(conn_id, schema_name)
+  for _, schema_spec in ipairs(LOCKED_CORPUS.ids.schemas_by_conn[conn_id] or {}) do
+    if schema_spec.name == schema_name then
+      return schema_spec.id
+    end
+  end
+  return nil
+end
+
+local function evaluate_large_expansion_restore()
+  local state = new_drawer_fixture()
+  local expanded_ids = {}
+  local expanded_schema_ids = {}
+
+  for _, conn_id in ipairs(LOCKED_CORPUS.ids.connection_ids) do
+    expanded_ids[#expanded_ids + 1] = conn_id
+    expand_node_and_wait(state, conn_id, STRUCTURES_KIND)
+
+    local seen = 0
+    for _, table_spec in ipairs(LOCKED_CORPUS.ids.tables_by_conn[conn_id]) do
+      local empty_key = table.concat({ conn_id, table_spec.schema, table_spec.name }, "|")
+      if not LOCKED_CORPUS.ids.empty_tables[empty_key] then
+        local schema_id = schema_id_for_conn(conn_id, table_spec.schema)
+        assert_true("schema id for " .. table_spec.schema, schema_id ~= nil)
+        if not expanded_schema_ids[schema_id] then
+          expanded_schema_ids[schema_id] = true
+          expanded_ids[#expanded_ids + 1] = schema_id
+          expand_node_and_wait(state, schema_id, STRUCTURES_KIND)
+        end
+        expanded_ids[#expanded_ids + 1] = table_spec.id
+        expand_node_and_wait(state, table_spec.id, COLUMNS_KIND)
+        seen = seen + 1
+      end
+      if seen == 100 then
+        break
+      end
+    end
+  end
+
+  local input = open_filter(state.drawer)
+  set_filter_text(state.drawer, input, LOCKED_QUERY_COHORT.secondary_broad_query)
+  close_filter_input(input)
+
+  local restored = true
+  for _, node_id in ipairs(expanded_ids) do
+    local node = state.drawer.tree:get_node(node_id)
+    if not (node and node:is_expanded()) then
+      restored = false
+      break
+    end
+  end
+
+  state.cleanup()
+  return restored
+end
+
+local function build_startup_metrics()
+  return run_benchmark({
+    title = "DRAW01 filter start",
+    before = function()
+      collectgarbage("collect")
+      return new_drawer_fixture()
+    end,
+    run = function(state, finish)
+      local build_ns = 0
+      local capture_ns = 0
+      local prompt_ns = 0
+      local heap_before = collectgarbage("count")
+
+      local real_build_search_model = drawer_model.build_search_model
+      local real_capture_filter_snapshot = state.drawer.capture_filter_snapshot
+      local real_menu_filter = require("dbee.ui.drawer.menu").filter
+
+      drawer_model.build_search_model = function(...)
+        local started = uv.hrtime()
+        local nodes, coverage = real_build_search_model(...)
+        build_ns = uv.hrtime() - started
+        return nodes, coverage
+      end
+
+      state.drawer.capture_filter_snapshot = function(self, ...)
+        local started = uv.hrtime()
+        local ok, err = real_capture_filter_snapshot(self, ...)
+        capture_ns = uv.hrtime() - started
+        return ok, err
+      end
+
+      require("dbee.ui.drawer.menu").filter = function(opts)
+        local started = uv.hrtime()
+        local input = real_menu_filter(opts)
+        prompt_ns = uv.hrtime() - started
+        return input
+      end
+
+      local started = uv.hrtime()
+      state.drawer:get_actions().filter()
+      local total_ns = uv.hrtime() - started
+      local heap_delta_kb = collectgarbage("count") - heap_before
+
+      if state.drawer.filter_input then
+        close_filter_input(state.drawer.filter_input)
+      end
+
+      require("dbee.ui.drawer.menu").filter = real_menu_filter
+      state.drawer.capture_filter_snapshot = real_capture_filter_snapshot
+      drawer_model.build_search_model = real_build_search_model
+
+      finish(total_ns, {
+        snapshot_ns = math.max(capture_ns - build_ns, 0),
+        model_ns = build_ns,
+        prompt_ns = prompt_ns,
+        heap_kb = heap_delta_kb,
+      })
+    end,
+  })
+end
+
+local function build_refresh_metrics()
+  return run_benchmark({
+    title = "DRAW01 refresh",
+    before = function()
+      return new_drawer_fixture()
+    end,
+    run = function(state, finish)
+      local sample_ns = measure_sync_drawer_write(state.drawer.bufnr, function()
+        state.drawer:refresh()
+      end)
+      finish(sample_ns)
+    end,
+  })
+end
+
+local function build_restart_metrics()
+  return run_benchmark({
+    title = "DRAW01 filter restart",
+    before = function()
+      return new_drawer_fixture()
+    end,
+    run = function(state, finish)
+      local started = uv.hrtime()
+      local input = open_filter(state.drawer)
+      active_buffer_watch = {
+        bufnr = state.drawer.bufnr,
+        mode = "idle",
+        idle_ms = 10,
+        on_stop = function(stop_ns)
+          finish(stop_ns - started)
+        end,
+      }
+      local ok, err = xpcall(function()
+        input:unmount()
+      end, debug.traceback)
+      if not ok then
+        stop_buffer_watch(active_buffer_watch, uv.hrtime())
+        fail(err)
+      end
+    end,
+  })
+end
+
+local function build_apply_metrics(query)
+  return run_benchmark({
+    title = "DRAW01 apply " .. query,
+    before = function()
+      collectgarbage("collect")
+      local state = new_drawer_fixture()
+      local ok_capture, err_capture = state.drawer:capture_filter_snapshot()
+      assert_true("capture_filter_snapshot_apply_" .. query, ok_capture ~= false and err_capture == nil)
+      return state
+    end,
+    run = function(state, finish)
+      local sample_ns = measure_sync_drawer_write(state.drawer.bufnr, function()
+        state.drawer:apply_filter(query)
+      end)
+      finish(sample_ns)
+    end,
+  })
+end
+
+local function build_restore_metrics(submit_mode)
+  return run_benchmark({
+    title = submit_mode and "DRAW01 submit restore" or "DRAW01 cancel restore",
+    before = function()
+      local state = build_expanded_filter_fixture(10)
+      local input = open_filter(state.drawer)
+      local query = LOCKED_QUERY_COHORT.secondary_broad_query
+      set_filter_text(state.drawer, input, query)
+      state.filter_input = input
+      state.filter_query = query
+
+      local selected_id = LOCKED_CORPUS.ids.tables_by_conn["conn-ready"][1].id
+      set_current_node(state.winid, state.drawer.tree, selected_id)
+      return state
+    end,
+    run = function(state, finish)
+      measure_async_drawer_write(state.drawer.bufnr, "idle", 10, function()
+        if submit_mode then
+          submit_filter_input(state.filter_input, state.filter_query)
+        else
+          close_filter_input(state.filter_input)
+        end
+      end, function(sample_ns)
+        finish(sample_ns)
+      end)
+    end,
+  })
+end
+
+local function run_apply_soak()
+  local state = new_drawer_fixture()
+  local ok_capture, err_capture = state.drawer:capture_filter_snapshot()
+  assert_true("capture_filter_snapshot_soak", ok_capture ~= false and err_capture == nil)
+
+  collectgarbage("collect")
+  local baseline_kb = collectgarbage("count")
+  local high_water_kb = baseline_kb
+  local sequence = {}
+  local cohort_queries = {
+    LOCKED_QUERY_COHORT.max_hit_query,
+    LOCKED_QUERY_COHORT.broad_query,
+    LOCKED_QUERY_COHORT.secondary_broad_query,
+    LOCKED_QUERY_COHORT.narrow_query,
+    LOCKED_QUERY_COHORT.miss_query,
+    "",
+  }
+
+  for index = 1, 100 do
+    sequence[#sequence + 1] = cohort_queries[((index - 1) % #cohort_queries) + 1]
+  end
+
+  local samples = {}
+  for _, query in ipairs(sequence) do
+    local sample_ns = measure_sync_drawer_write(state.drawer.bufnr, function()
+      state.drawer:apply_filter(query)
+    end)
+    samples[#samples + 1] = sample_ns
+    collectgarbage("step", 100000)
+    high_water_kb = math.max(high_water_kb, collectgarbage("count"))
+  end
+
+  collectgarbage("collect")
+  local retained_kb = collectgarbage("count") - baseline_kb
+  state.cleanup()
+  return samples, high_water_kb - baseline_kb, retained_kb
+end
+
+assert_locked_query_counts()
+
 emit("DRAW01_CORPUS", 'connections:2 schemas_per_conn:5 tables_per_schema:100 naming_distribution:"acct_ x400, ledger_ x599, table_003_042 x1" max_hit_query:"' .. LOCKED_QUERY_COHORT.max_hit_query .. '" max_hit_expected_matches:1000 broad_query:"' .. LOCKED_QUERY_COHORT.broad_query .. '" broad_expected_matches:599 secondary_broad_query:"' .. LOCKED_QUERY_COHORT.secondary_broad_query .. '" secondary_broad_expected_matches:400 narrow_query:"' .. LOCKED_QUERY_COHORT.narrow_query .. '" narrow_expected_matches:1 miss_query:"' .. LOCKED_QUERY_COHORT.miss_query .. '" miss_expected_matches:0 empty_restore_expected_nodes:1000')
 
 local initial_render_samples = run_benchmark({
@@ -537,7 +989,95 @@ local initial_render_samples = run_benchmark({
   end,
 })
 
-emit("DRAW01_INITIAL_RENDER_MEDIAN_MS", format_float(ns_to_ms(median(initial_render_samples))))
-emit("DRAW01_INITIAL_RENDER_P95_MS", format_float(ns_to_ms(percentile(initial_render_samples, 0.95))))
+local startup_samples, startup_extras = build_startup_metrics()
+local refresh_samples = build_refresh_metrics()
+local restart_samples = build_restart_metrics()
+
+local apply_max_hit_samples = build_apply_metrics(LOCKED_QUERY_COHORT.max_hit_query)
+local apply_broad_samples = build_apply_metrics(LOCKED_QUERY_COHORT.broad_query)
+local apply_secondary_broad_samples = build_apply_metrics(LOCKED_QUERY_COHORT.secondary_broad_query)
+local apply_narrow_samples = build_apply_metrics(LOCKED_QUERY_COHORT.narrow_query)
+local apply_miss_samples = build_apply_metrics(LOCKED_QUERY_COHORT.miss_query)
+local apply_empty_samples = build_apply_metrics("")
+
+local cancel_restore_samples = build_restore_metrics(false)
+local submit_restore_samples = build_restore_metrics(true)
+local large_expansion_restore_ok = evaluate_large_expansion_restore()
+local soak_samples, soak_high_water_kb, soak_retained_kb = run_apply_soak()
+
+local initial_render_median_ns = median(initial_render_samples)
+local initial_render_p95_ns = percentile(initial_render_samples, 0.95)
+local startup_median_ns = median(startup_samples)
+local startup_max_ns = maximum(startup_samples)
+local startup_heap_kb = maximum(startup_extras.heap_kb or {})
+local snapshot_median_ns = median(startup_extras.snapshot_ns or {})
+local model_build_median_ns = median(startup_extras.model_ns or {})
+local prompt_mount_median_ns = median(startup_extras.prompt_ns or {})
+local refresh_median_ns = median(refresh_samples)
+local refresh_max_ns = maximum(refresh_samples)
+local restart_median_ns = median(restart_samples)
+
+local apply_max_hit_median_ns = median(apply_max_hit_samples)
+local apply_broad_median_ns = median(apply_broad_samples)
+local apply_secondary_broad_median_ns = median(apply_secondary_broad_samples)
+local apply_narrow_median_ns = median(apply_narrow_samples)
+local apply_miss_median_ns = median(apply_miss_samples)
+local apply_empty_median_ns = median(apply_empty_samples)
+
+local cancel_restore_median_ns = median(cancel_restore_samples)
+local cancel_restore_max_ns = maximum(cancel_restore_samples)
+local submit_restore_median_ns = median(submit_restore_samples)
+local submit_restore_max_ns = maximum(submit_restore_samples)
+local apply_soak_p95_ns = percentile(soak_samples, 0.95)
+local apply_soak_max_ns = maximum(soak_samples)
+
+emit("DRAW01_FILTER_START_MS", format_float(ns_to_ms(startup_median_ns)))
+emit("DRAW01_FILTER_START_MAX_MS", format_float(ns_to_ms(startup_max_ns)))
+emit("DRAW01_FILTER_START_KB_DELTA", format_float(startup_heap_kb))
+emit("DRAW01_SNAPSHOT_MS", format_float(ns_to_ms(snapshot_median_ns)))
+emit("DRAW01_MODEL_BUILD_MS", format_float(ns_to_ms(model_build_median_ns)))
+emit("DRAW01_PROMPT_MOUNT_MS", format_float(ns_to_ms(prompt_mount_median_ns)))
+emit("DRAW01_REFRESH_MS", format_float(ns_to_ms(refresh_median_ns)) .. "/" .. format_float(ns_to_ms(refresh_max_ns)))
+emit("DRAW01_FILTER_RESTART_MS", format_float(ns_to_ms(restart_median_ns)))
+
+emit_median_max("DRAW01_APPLY_MAX_HIT_MS", apply_max_hit_samples)
+emit_median_max("DRAW01_APPLY_BROAD_MS", apply_broad_samples)
+emit_median_max("DRAW01_APPLY_SECONDARY_BROAD_MS", apply_secondary_broad_samples)
+emit_median_max("DRAW01_APPLY_NARROW_MS", apply_narrow_samples)
+emit_median_max("DRAW01_APPLY_MISS_MS", apply_miss_samples)
+emit_median_max("DRAW01_APPLY_EMPTY_MS", apply_empty_samples)
+
+emit_median_max("DRAW01_CANCEL_RESTORE_MS", cancel_restore_samples)
+emit_median_max("DRAW01_SUBMIT_RESTORE_MS", submit_restore_samples)
+emit("DRAW01_LARGE_EXPANSION_RESTORE_OK", large_expansion_restore_ok and "true" or "false")
+emit("DRAW01_APPLY_P95_MS", format_float(ns_to_ms(apply_soak_p95_ns)))
+emit("DRAW01_APPLY_SOAK_MAX_MS", format_float(ns_to_ms(apply_soak_max_ns)))
+emit("DRAW01_APPLY_SOAK_KB_HIGH_WATER", format_float(soak_high_water_kb))
+emit("DRAW01_APPLY_SOAK_RETAINED_KB", format_float(soak_retained_kb))
+
+local phase4_budgets_pass = ns_to_ms(startup_median_ns) < 150
+  and ns_to_ms(startup_max_ns) < 250
+  and startup_heap_kb < 4096
+  and ns_to_ms(snapshot_median_ns) < 50
+  and ns_to_ms(restart_median_ns) < 150
+  and ns_to_ms(apply_max_hit_median_ns) < 100
+  and ns_to_ms(apply_broad_median_ns) < 100
+  and ns_to_ms(apply_secondary_broad_median_ns) < 100
+  and ns_to_ms(apply_narrow_median_ns) < 100
+  and ns_to_ms(apply_miss_median_ns) < 100
+  and ns_to_ms(apply_empty_median_ns) < 100
+  and ns_to_ms(cancel_restore_median_ns) < 150
+  and ns_to_ms(cancel_restore_max_ns) < 250
+  and ns_to_ms(submit_restore_median_ns) < 150
+  and ns_to_ms(submit_restore_max_ns) < 250
+  and large_expansion_restore_ok
+  and ns_to_ms(apply_soak_p95_ns) < 150
+  and ns_to_ms(apply_soak_max_ns) < 250
+  and soak_high_water_kb < 8192
+  and soak_retained_kb < 2048
+
+emit("DRAW01_PHASE4_BUDGETS_PASS", phase4_budgets_pass and "true" or "false")
+emit("DRAW01_INITIAL_RENDER_MEDIAN_MS", format_float(ns_to_ms(initial_render_median_ns)))
+emit("DRAW01_INITIAL_RENDER_P95_MS", format_float(ns_to_ms(initial_render_p95_ns)))
 
 vim.cmd("qa!")
