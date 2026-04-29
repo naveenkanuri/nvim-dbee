@@ -1183,6 +1183,137 @@ register_alias_completion(
   "lines:1,joins:5,aliases:5,cursor:t5_dot"
 )
 
+local function new_empty_cache(table_count, conn_id)
+  local SchemaCache = require("dbee.lsp.schema_cache")
+  local handler = make_handler({
+    table_count = table_count,
+    columns_per_table = DEFAULT_COLUMNS_PER_TABLE,
+    conn_id = conn_id,
+  })
+  return SchemaCache:new(handler, conn_id), handler
+end
+
+local function count_cached_tables(cache)
+  return #cache:get_all_table_names()
+end
+
+local function cache_index_path(conn_id)
+  return vim.fn.stdpath("state") .. "/dbee/lsp_cache/" .. conn_id .. ".json"
+end
+
+local function assert_cache_file(conn_id)
+  local path = cache_index_path(conn_id)
+  local stat = uv.fs_stat(path)
+  if not stat or stat.size <= 0 then
+    error("cache file missing or empty: " .. path)
+  end
+end
+
+local function register_cache_build(slug, threshold_key, table_count)
+  register({
+    slug = slug,
+    threshold_key = threshold_key,
+    corpus = ("tables:%d,cache:build_from_structure"):format(table_count),
+    before = function()
+      assert_isolated_state()
+      clear_lsp_cache_dir()
+      local conn_id = "lsp01-build-" .. tostring(table_count)
+      local cache = new_empty_cache(table_count, conn_id)
+      return {
+        cache = cache,
+        structure = make_structure(table_count, DEFAULT_COLUMNS_PER_TABLE),
+        table_count = table_count,
+      }
+    end,
+    run = function(state, finish)
+      local start_ns = uv.hrtime()
+      state.cache:build_from_structure(state.structure)
+      local elapsed_ns = uv.hrtime() - start_ns
+      if count_cached_tables(state.cache) ~= state.table_count then
+        error(("cache build expected %d tables, got %d"):format(state.table_count, count_cached_tables(state.cache)))
+      end
+      finish(elapsed_ns)
+    end,
+  })
+end
+
+local function register_cache_load(slug, threshold_key, table_count)
+  register({
+    slug = slug,
+    threshold_key = threshold_key,
+    corpus = ("tables:%d,cache:load_from_disk"):format(table_count),
+    before = function()
+      assert_isolated_state()
+      clear_lsp_cache_dir()
+      local conn_id = "lsp01-load-" .. tostring(table_count)
+      local seed_cache = make_cache(table_count, DEFAULT_COLUMNS_PER_TABLE, {
+        conn_id = conn_id,
+      })
+      seed_cache:save_to_disk()
+      assert_cache_file(conn_id)
+      local cache = new_empty_cache(table_count, conn_id)
+      return {
+        cache = cache,
+        conn_id = conn_id,
+        table_count = table_count,
+      }
+    end,
+    run = function(state, finish)
+      local start_ns = uv.hrtime()
+      local loaded = state.cache:load_from_disk()
+      local elapsed_ns = uv.hrtime() - start_ns
+      if not loaded then
+        error("cache load returned false")
+      end
+      if count_cached_tables(state.cache) ~= state.table_count then
+        error(("cache load expected %d tables, got %d"):format(state.table_count, count_cached_tables(state.cache)))
+      end
+      finish(elapsed_ns)
+    end,
+  })
+end
+
+local function register_cache_save(slug, threshold_key, table_count)
+  register({
+    slug = slug,
+    threshold_key = threshold_key,
+    corpus = ("tables:%d,cache:save_to_disk"):format(table_count),
+    before = function()
+      assert_isolated_state()
+      clear_lsp_cache_dir()
+      local conn_id = "lsp01-save-" .. tostring(table_count)
+      local cache = make_cache(table_count, DEFAULT_COLUMNS_PER_TABLE, {
+        conn_id = conn_id,
+      })
+      return {
+        cache = cache,
+        conn_id = conn_id,
+        table_count = table_count,
+      }
+    end,
+    run = function(state, finish)
+      local start_ns = uv.hrtime()
+      state.cache:save_to_disk()
+      local elapsed_ns = uv.hrtime() - start_ns
+      assert_cache_file(state.conn_id)
+      if count_cached_tables(state.cache) ~= state.table_count then
+        error(("cache save expected %d tables, got %d"):format(state.table_count, count_cached_tables(state.cache)))
+      end
+      finish(elapsed_ns)
+    end,
+  })
+end
+
+register_cache_build("CACHE_BUILD_100", "cache_build_100", 100)
+register_cache_build("CACHE_BUILD_1000", "cache_build_1000", 1000)
+register_cache_build("CACHE_BUILD_10000", "cache_build_10000", 10000)
+register_cache_load("CACHE_LOAD_100", "cache_load_100", 100)
+register_cache_load("CACHE_LOAD_1000", "cache_load_1000", 1000)
+register_cache_load("CACHE_LOAD_10000", "cache_load_10000", 10000)
+register_cache_save("CACHE_SAVE_100", "cache_save_100", 100)
+register_cache_save("CACHE_SAVE_1000", "cache_save_1000", 1000)
+register_cache_save("CACHE_SAVE_10000", "cache_save_10000", 10000)
+
 local function run_benchmark(spec)
   local iteration = 0
   local state = nil
