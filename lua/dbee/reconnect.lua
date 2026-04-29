@@ -160,78 +160,58 @@ local function find_source_id_for_connection(conn_id)
   return nil
 end
 
----@param source_id source_id
+---@param conn_ids connection_id[]?
+---@param conn_id connection_id
+---@return boolean
+local function connection_id_in_list(conn_ids, conn_id)
+  for _, candidate in ipairs(conn_ids or {}) do
+    if candidate == conn_id then
+      return true
+    end
+  end
+  return false
+end
+
+---@param rewrites { old_conn_id: connection_id, new_conn_id: connection_id }[]?
+---@param conn_id connection_id
+---@return connection_id|nil
+local function rewritten_conn_id_for(rewrites, conn_id)
+  for _, rewrite in ipairs(rewrites or {}) do
+    if rewrite.old_conn_id == conn_id then
+      return rewrite.new_conn_id
+    end
+  end
+  return nil
+end
+
+---@param reload_result { new_conn_ids?: connection_id[], rewrites?: { old_conn_id: connection_id, new_conn_id: connection_id }[] }
 ---@param previous ConnectionParams
 ---@return ConnectionParams|nil
 ---@return string|nil
-local function resolve_reloaded_connection(source_id, previous)
+local function resolve_reloaded_connection(reload_result, previous)
   local api = get_api()
-  local ok_conns, source_conns = pcall(api.core.source_get_connections, source_id)
-  if not ok_conns then
-    return nil, "failed reading reloaded source connections"
-  end
-  if type(source_conns) ~= "table" or #source_conns == 0 then
-    return nil, "source reload produced no connections"
-  end
-
   local prev_id = tostring(previous.id or "")
-  local prev_type = tostring(previous.type or "")
-  local prev_url = tostring(previous.url or "")
-  local prev_name = tostring(previous.name or "")
-
-  local function find_unique_match(predicate)
-    local match = nil
-    for _, candidate in ipairs(source_conns) do
-      if candidate and candidate.id and candidate.id ~= "" and predicate(candidate) then
-        if match ~= nil then
-          return nil, true
-        end
-        match = candidate
-      end
-    end
-    return match, false
+  if prev_id == "" then
+    return nil, "unable to map reloaded connection; reconnect manually from connection picker"
   end
 
-  if prev_id ~= "" then
-    local match, ambiguous = find_unique_match(function(candidate)
-      return tostring(candidate.id or "") == prev_id
-        and (prev_type == "" or tostring(candidate.type or "") == prev_type)
-    end)
-    if match then
-      return match, nil
-    end
-    if ambiguous then
-      return nil, "reloaded connection id mapping is ambiguous"
-    end
+  local resolved_conn_id = nil
+  if connection_id_in_list(reload_result and reload_result.new_conn_ids, prev_id) then
+    resolved_conn_id = prev_id
+  else
+    resolved_conn_id = rewritten_conn_id_for(reload_result and reload_result.rewrites, prev_id)
   end
 
-  if prev_type ~= "" and prev_url ~= "" then
-    local match, ambiguous = find_unique_match(function(candidate)
-      return tostring(candidate.type or "") == prev_type
-        and tostring(candidate.url or "") == prev_url
-    end)
-    if match then
-      return match, nil
-    end
-    if ambiguous then
-      return nil, "reloaded connection URL mapping is ambiguous"
-    end
+  if not resolved_conn_id or resolved_conn_id == "" then
+    return nil, "unable to map reloaded connection; reconnect manually from connection picker"
   end
 
-  if prev_type ~= "" and prev_name ~= "" then
-    local match, ambiguous = find_unique_match(function(candidate)
-      return tostring(candidate.type or "") == prev_type
-        and tostring(candidate.name or "") == prev_name
-    end)
-    if match then
-      return match, nil
-    end
-    if ambiguous then
-      return nil, "reloaded connection name mapping is ambiguous"
-    end
+  local ok_params, params = pcall(api.core.connection_get_params, resolved_conn_id)
+  if not ok_params or not params then
+    return nil, "failed loading reloaded connection params"
   end
 
-  return nil, "unable to map reloaded connection; reconnect manually from connection picker"
+  return params, nil
 end
 
 ---@param conn_id connection_id
@@ -508,7 +488,7 @@ function M.reconnect_connection(conn_id, opts)
   end
   local reload_result = reload_result_or_err
 
-  local reloaded_conn, resolve_err = resolve_reloaded_connection(source_id, target_conn)
+  local reloaded_conn, resolve_err = resolve_reloaded_connection(reload_result, target_conn)
   if not reloaded_conn then
     return false, resolve_err, nil, nil
   end

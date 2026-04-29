@@ -1484,6 +1484,52 @@ local function run_database_switch_and_reconnect_contracts()
 
   env_reconnect_restore:cleanup()
 
+  local env_reconnect_ambiguous = new_env({
+    initial_specs = {
+      {
+        id = "conn-alpha",
+        name = "Alpha",
+        type = "postgres",
+        url = "postgres://shared",
+      },
+      {
+        id = "conn-beta",
+        name = "Beta",
+        type = "postgres",
+        url = "postgres://shared",
+      },
+    },
+    current_conn_id = "conn-beta",
+  })
+  local ambiguous_rewrites = {}
+  env_reconnect_ambiguous.reconnect.register_connection_rewritten_listener("coord-ambiguous-reconnect", function(old_conn_id, new_conn_id)
+    ambiguous_rewrites[#ambiguous_rewrites + 1] = {
+      old_conn_id = old_conn_id,
+      new_conn_id = new_conn_id,
+    }
+  end)
+
+  clear_notifications()
+  env_reconnect_ambiguous.source._specs = {
+    {
+      id = "conn-survivor",
+      name = "Shared",
+      type = "postgres",
+      url = "postgres://shared",
+    },
+  }
+  local ambiguous_conn, ambiguous_err = env_reconnect_ambiguous.dbee.reconnect_current_connection({ notify = false })
+  Harness.drain()
+  assert_eq("reconnect_ambiguous_conn", ambiguous_conn, nil)
+  assert_match("reconnect_ambiguous_error", tostring(ambiguous_err), "unable to map reloaded connection")
+  assert_eq("reconnect_ambiguous_current_cleared", env_reconnect_ambiguous.handler:get_current_connection(), nil)
+  assert_eq("reconnect_ambiguous_runtime_current_cleared", env_reconnect_ambiguous.runtime.current_conn_id, nil)
+  assert_eq("reconnect_ambiguous_rewrite_count", #ambiguous_rewrites, 0)
+  assert_true("reconnect_ambiguous_survivor_not_selected", env_reconnect_ambiguous.runtime.current_conn_id ~= "conn-survivor")
+  print("LIFECYCLE01_RECONNECT_AMBIGUOUS_REJECTED_OK=true")
+
+  env_reconnect_ambiguous:cleanup()
+
 end
 
 local function run_lsp_retarget_rewarm_contracts()
