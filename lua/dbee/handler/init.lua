@@ -505,6 +505,18 @@ function Handler:_notify_structure_waiter(waiter, payload)
 end
 
 ---@private
+---@param key string
+---@param flight? { request_id?: integer }
+function Handler:_drop_structure_flight(key, flight)
+  flight = flight or self._structure_flights[key]
+  if not flight then
+    return
+  end
+  self._structure_request_lookup[flight.request_id] = nil
+  self._structure_flights[key] = nil
+end
+
+---@private
 ---@param conn_id connection_id
 ---@param new_epoch integer
 function Handler:_supersede_structure_flights(conn_id, new_epoch)
@@ -526,11 +538,7 @@ function Handler:_supersede_structure_flights(conn_id, new_epoch)
   end
 
   for _, key in ipairs(keys_to_drop) do
-    local flight = self._structure_flights[key]
-    if flight then
-      self._structure_request_lookup[flight.request_id] = nil
-    end
-    self._structure_flights[key] = nil
+    self:_drop_structure_flight(key)
   end
 end
 
@@ -554,7 +562,23 @@ function Handler:connection_get_structure_singleflight(opts)
   }
 
   local flight = self._structure_flights[key]
+  if flight and #(flight.waiters or {}) == 0 then
+    self:_drop_structure_flight(key, flight)
+    flight = nil
+  end
   if flight then
+    for _, existing_waiter in ipairs(flight.waiters or {}) do
+      if existing_waiter.consumer == opts.consumer then
+        existing_waiter.request_id = waiter.request_id
+        existing_waiter.caller_token = waiter.caller_token
+        existing_waiter.callback = waiter.callback
+        return {
+          epoch = epoch,
+          request_id = waiter.request_id,
+          joined = true,
+        }
+      end
+    end
     flight.waiters[#flight.waiters + 1] = waiter
     flight.consumer_slots[opts.consumer] = true
     return {
@@ -589,7 +613,8 @@ end
 
 ---@param consumer string
 function Handler:teardown_structure_consumer(consumer)
-  for _, flight in pairs(self._structure_flights) do
+  local keys_to_drop = {}
+  for key, flight in pairs(self._structure_flights) do
     local kept = {}
     for _, waiter in ipairs(flight.waiters or {}) do
       if waiter.consumer ~= consumer then
@@ -598,6 +623,13 @@ function Handler:teardown_structure_consumer(consumer)
     end
     flight.waiters = kept
     flight.consumer_slots[consumer] = nil
+    if #kept == 0 then
+      keys_to_drop[#keys_to_drop + 1] = key
+    end
+  end
+
+  for _, key in ipairs(keys_to_drop) do
+    self:_drop_structure_flight(key)
   end
 end
 

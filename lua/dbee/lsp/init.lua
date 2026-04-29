@@ -508,11 +508,26 @@ end
 
 --- Stop the dbee LSP server.
 ---@param conn_id? connection_id
-function M.stop(conn_id)
+---@param opts? { preserve_structure_waiter_for?: connection_id|nil }
+function M.stop(conn_id, opts)
+  opts = opts or {}
   clear_connection_tracking(conn_id)
   if state.is_core_loaded() then
     local handler = state.handler()
-    handler:teardown_structure_consumer(M._bootstrap_consumer_id)
+    local preserve_structure_waiter = false
+    if opts.preserve_structure_waiter_for then
+      for _, flight in pairs(handler._structure_flights or {}) do
+        if flight.conn_id == opts.preserve_structure_waiter_for
+          and (flight.consumer_slots or {})[M._bootstrap_consumer_id]
+        then
+          preserve_structure_waiter = true
+          break
+        end
+      end
+    end
+    if not preserve_structure_waiter then
+      handler:teardown_structure_consumer(M._bootstrap_consumer_id)
+    end
     if type(handler.teardown_connection_invalidated_consumer) == "function" then
       handler:teardown_connection_invalidated_consumer(M._bootstrap_consumer_id)
     end
@@ -663,7 +678,9 @@ function M.register_events()
       return
     end
 
-    M.stop()
+    M.stop(M._conn_id, {
+      preserve_structure_waiter_for = data.conn_id,
+    })
     if data.cleared == true or not data.conn_id then
       return
     end

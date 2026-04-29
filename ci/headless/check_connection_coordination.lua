@@ -163,6 +163,9 @@ local function install_dbee_functions(runtime)
   end
 
   vim.fn.DbeeSetCurrentConnection = function(conn_id)
+    if runtime.current_conn_id == conn_id then
+      return
+    end
     runtime.current_conn_id = conn_id
     events.trigger("current_connection_changed", {
       conn_id = conn_id,
@@ -924,6 +927,7 @@ local function run_supersession_and_cleanup_contracts()
   env.drawer:request_structure_reload("conn-alpha", { force_new = true })
   local flight_key = next(env.handler._structure_flights)
   assert_true("cleanup_flight_present", flight_key ~= nil)
+  local orphan_request_id = env.runtime.structure_requests[1].request_id
   env.drawer:prepare_close()
   local remaining = 0
   for _, waiter in ipairs((env.handler._structure_flights[flight_key] or {}).waiters or {}) do
@@ -932,7 +936,30 @@ local function run_supersession_and_cleanup_contracts()
     end
   end
   assert_eq("cleanup_waiters", remaining, 0)
+  assert_eq("cleanup_orphan_flight_dropped", env.handler._structure_flights[flight_key], nil)
+  assert_eq("cleanup_orphan_lookup_dropped", env.handler._structure_request_lookup[orphan_request_id], nil)
   print("DCFG01_WAITER_CLEANUP_OK=true")
+
+  env.runtime.structure_requests = {}
+  local replacement_payload = nil
+  local restart = env.handler:connection_get_structure_singleflight({
+    conn_id = "conn-alpha",
+    consumer = "lsp",
+    request_id = 77,
+    caller_token = "lsp",
+    callback = function(data)
+      replacement_payload = data
+    end,
+  })
+  assert_true("cleanup_restart_new_flight", restart.joined == false)
+  assert_eq("cleanup_restart_underlying_requests", #env.runtime.structure_requests, 1)
+  assert_true("cleanup_restart_request_new_id", env.runtime.structure_requests[1].request_id ~= orphan_request_id)
+  emit_structure_loaded(env, env.runtime.structure_requests[1], {
+    caller_token = "__singleflight",
+  })
+  assert_true("cleanup_restart_payload", replacement_payload ~= nil)
+  assert_eq("cleanup_restart_payload_request", replacement_payload.request_id, 77)
+  print("LIFECYCLE01_TEARDOWN_DROPS_ORPHAN_FLIGHT_OK=true")
 
   env:cleanup()
 end
