@@ -88,6 +88,27 @@ local function write_lines(path, lines)
   end
 end
 
+local function sanitize_trace_file(path)
+  local f = io.open(path, "rb")
+  if not f then
+    fail("failed to open trace artifact: " .. path)
+  end
+  local raw = f:read("*a")
+  f:close()
+  local sanitized = raw:gsub("[\128-\255]", function(ch)
+    return string.format("\\u%04x", ch:byte())
+  end)
+  if sanitized == raw then
+    return
+  end
+  f = io.open(path, "wb")
+  if not f then
+    fail("failed to rewrite trace artifact: " .. path)
+  end
+  f:write(sanitized)
+  f:close()
+end
+
 local function load_threshold_file(path)
   local chunk, err = loadfile(path)
   if not chunk then
@@ -1614,6 +1635,7 @@ local function run_flame_trace_subprocess()
   if not uv.fs_stat(trace_path) then
     fail("flame trace artifact missing: " .. trace_path)
   end
+  sanitize_trace_file(trace_path)
 end
 
 local run_representative_trace_workload
