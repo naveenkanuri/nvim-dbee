@@ -1,76 +1,75 @@
 -- Headless regression check for alias dot-completion in dbee LSP.
---
--- Repro this guard covers:
---   select * from sas_principals sp where sp.
---
--- Includes both completion timing variants:
--- 1) pre-insert trigger (client sends completion before "." is inserted)
--- 2) post-insert trigger (line already ends with ".")
---
--- This test is hermetic: it uses an in-memory fake cache and does not require
--- any live DB connection, local dbee state, or external files.
---
--- Usage:
--- nvim --headless -u NONE -i NONE -n \
---   --cmd "set rtp+=/path/to/nvim-dbee" \
---   -c "luafile /path/to/nvim-dbee/ci/headless/check_lsp_alias_completion.lua"
+
+vim.env.XDG_STATE_HOME = vim.fn.tempname()
+vim.fn.mkdir(vim.env.XDG_STATE_HOME, "p")
 
 local server = require("dbee.lsp.server")
+local SchemaCache = require("dbee.lsp.schema_cache")
 
-local fake_cache = {
-  get_schemas = function(_)
-    return { "FUSION" }
+local function fail(msg)
+  print("LSP_ALIAS_FATAL=true")
+  print("LSP_ALIAS_FAIL=" .. msg)
+  vim.cmd("cquit 1")
+end
+
+local function assert_true(label, value)
+  if not value then
+    fail(label .. ": expected true")
+  end
+end
+
+local function assert_eq(label, actual, expected)
+  if actual ~= expected then
+    fail(label .. ": expected " .. vim.inspect(expected) .. " got " .. vim.inspect(actual))
+  end
+end
+
+local async_calls = {}
+local sync_fetch_called = false
+
+local function fail_sync_fetch()
+  sync_fetch_called = true
+  error("sync column fetch must not be used by LSP completion")
+end
+
+local fake_handler = {
+  connection_get_columns = fail_sync_fetch,
+  get_authoritative_root_epoch = function()
+    return 1
   end,
-  get_tables = function(_, schema)
-    if schema ~= "FUSION" then
-      return {}
-    end
-    return {
-      sas_principals = { type = "table" },
-      sas_policies = { type = "table" },
+  connection_get_columns_async = function(_, conn_id, request_id, branch_id, root_epoch, opts)
+    async_calls[#async_calls + 1] = {
+      conn_id = conn_id,
+      request_id = request_id,
+      branch_id = branch_id,
+      root_epoch = root_epoch,
+      opts = opts,
     }
-  end,
-  find_table = function(_, table_name)
-    local lower = table_name:lower()
-    if lower == "sas_principals" then
-      return "sas_principals", "FUSION"
-    end
-    if lower == "sas_policies" then
-      return "sas_policies", "FUSION"
-    end
-    return nil, nil
-  end,
-  get_columns = function(_, schema, table_name)
-    if schema ~= "FUSION" then
-      return {}
-    end
-    if table_name == "sas_principals" then
-      return {
-        { name = "PRINCIPAL_ID", type = "NUMBER" },
-        { name = "PRINCIPAL_NAME", type = "VARCHAR2" },
-      }
-    end
-    if table_name == "sas_policies" then
-      return {
-        { name = "POLICY_ID", type = "NUMBER" },
-        { name = "POLICY_NAME", type = "VARCHAR2" },
-      }
-    end
-    return {}
-  end,
-  get_cached_columns = function(_)
-    return {}
   end,
 }
 
-local client = server.create(fake_cache)({}, {})
+local cache = SchemaCache:new(fake_handler, "test-alias")
+cache:build_from_metadata_rows({
+  { schema_name = "FUSION", table_name = "sas_principals", obj_type = "table" },
+  { schema_name = "FUSION", table_name = "sas_policies", obj_type = "table" },
+  { schema_name = "FUSION", table_name = "sas_queues", obj_type = "table" },
+})
+cache:_store_columns("FUSION.sas_principals", {
+  { name = "PRINCIPAL_ID", type = "NUMBER" },
+  { name = "PRINCIPAL_NAME", type = "VARCHAR2" },
+})
+cache:_store_columns("FUSION.sas_policies", {
+  { name = "POLICY_ID", type = "NUMBER" },
+  { name = "POLICY_NAME", type = "VARCHAR2" },
+})
+
+local client = server.create(cache)({}, {})
 local bufnr = vim.api.nvim_create_buf(false, true)
 vim.api.nvim_buf_set_name(bufnr, "/tmp/dbee-alias-completion.sql")
 local uri = vim.uri_from_bufnr(bufnr)
 
-local function request_items(line_text, trigger_char)
+local function request_completion(line_text, trigger_char)
   vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { line_text })
-
   local params = {
     textDocument = { uri = uri },
     position = { line = 0, character = #line_text },
@@ -91,24 +90,27 @@ local function request_items(line_text, trigger_char)
   end, 20)
 
   if not response then
-    return nil, "timeout"
+    fail("completion timeout")
   end
   if response.err then
-    return nil, tostring(response.err)
+    fail("completion error: " .. tostring(response.err))
   end
+  return response.result
+end
 
-  if type(response.result) ~= "table" then
-    return nil, "invalid_completion_result_type:" .. type(response.result)
-  end
-  if type(response.result.items) ~= "table" then
-    return nil, "invalid_completion_items_type:" .. type(response.result.items)
-  end
-
-  return response.result.items, nil
+local function deliver(call, columns)
+  cache:on_columns_loaded({
+    conn_id = call.conn_id,
+    request_id = call.request_id,
+    branch_id = call.branch_id,
+    root_epoch = call.root_epoch,
+    kind = "columns",
+    columns = columns,
+  })
 end
 
 local function has_label(items, label)
-  for _, item in ipairs(items) do
+  for _, item in ipairs(items or {}) do
     if item.label == label then
       return true
     end
@@ -117,34 +119,42 @@ local function has_label(items, label)
 end
 
 local pre_line = "select * from sas_principals sp where sp"
-local pre_items, pre_err = request_items(pre_line, ".")
-local post_items, post_err = request_items(pre_line .. ".")
+local pre = request_completion(pre_line, ".")
+local post = request_completion(pre_line .. ".")
 
-if pre_err or post_err then
-  print("LSP_ALIAS_FATAL=true")
-  print("LSP_ALIAS_PRE_ERR=" .. tostring(pre_err))
-  print("LSP_ALIAS_POST_ERR=" .. tostring(post_err))
-  vim.cmd("cquit 1")
-  return
-end
+assert_eq("pre complete", pre.isIncomplete, false)
+assert_eq("post complete", post.isIncomplete, false)
 
-local pre_has_principal = has_label(pre_items, "PRINCIPAL_ID")
-local pre_has_policy = has_label(pre_items, "POLICY_ID")
-local post_has_principal = has_label(post_items, "PRINCIPAL_ID")
-local post_has_policy = has_label(post_items, "POLICY_ID")
+local pre_has_principal = has_label(pre.items, "PRINCIPAL_ID")
+local pre_has_policy = has_label(pre.items, "POLICY_ID")
+local post_has_principal = has_label(post.items, "PRINCIPAL_ID")
+local post_has_policy = has_label(post.items, "POLICY_ID")
 
-print("LSP_ALIAS_PRE_ITEMS=" .. tostring(#pre_items))
-print("LSP_ALIAS_POST_ITEMS=" .. tostring(#post_items))
+local cold_line = "select * from sas_queues sq where sq."
+local cold = request_completion(cold_line)
+assert_eq("cold first incomplete", cold.isIncomplete, true)
+assert_eq("cold first empty", #cold.items, 0)
+deliver(async_calls[#async_calls], {
+  { name = "QUEUE_ID", type = "NUMBER" },
+  { name = "QUEUE_NAME", type = "VARCHAR2" },
+})
+local warm = request_completion(cold_line)
+assert_eq("warm complete", warm.isIncomplete, false)
+assert_true("warm queue labels", has_label(warm.items, "QUEUE_ID"))
+
+print("LSP_ALIAS_PRE_ITEMS=" .. tostring(#pre.items))
+print("LSP_ALIAS_POST_ITEMS=" .. tostring(#post.items))
 print("LSP_ALIAS_PRE_HAS_PRINCIPAL=" .. tostring(pre_has_principal))
 print("LSP_ALIAS_PRE_HAS_POLICY=" .. tostring(pre_has_policy))
 print("LSP_ALIAS_POST_HAS_PRINCIPAL=" .. tostring(post_has_principal))
 print("LSP_ALIAS_POST_HAS_POLICY=" .. tostring(post_has_policy))
+print("LSP_ALIAS_FIRST_INCOMPLETE=true")
+print("LSP_ALIAS_WARM_LABELS=true")
+assert_true("no sync fetch", not sync_fetch_called)
+print("LSP_ALIAS_NO_SYNC_FETCH=true")
 
--- Alias `sp` must resolve to sas_principals columns in both trigger timings,
--- and must not leak sas_policies columns.
 if not pre_has_principal or pre_has_policy or not post_has_principal or post_has_policy then
-  vim.cmd("cquit 1")
-  return
+  fail("cache-hit alias labels incorrect")
 end
 
 vim.cmd("qa!")
