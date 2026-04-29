@@ -1003,6 +1003,14 @@ local function run_navigation_and_seed_contracts()
   do
     local broken_wallet = vim.fs.joinpath(env.temp_dir, "broken_wallet")
     vim.fn.mkdir(broken_wallet, "p")
+    local broken_tns = vim.fs.joinpath(broken_wallet, "tnsnames.ora")
+    local broken_fd = assert(io.open(broken_tns, "w"))
+    broken_fd:write("BROKEN = (DESCRIPTION=")
+    broken_fd:close()
+
+    local malformed_aliases, malformed_map = env.connection_wizard._parse_wallet_aliases("BROKEN = (DESCRIPTION=")
+    assert_eq("malformed aliases empty", #malformed_aliases, 0)
+    assert_eq("malformed alias map empty", vim.tbl_count(malformed_map), 0)
 
     local wizard = env.connection_wizard.open({
       title = "Wallet Fallback",
@@ -1025,6 +1033,7 @@ local function run_navigation_and_seed_contracts()
         },
       },
     })
+    assert_eq("wallet fallback aliases empty", #wizard.state.wallet_aliases, 0)
     assert_match("wallet fallback warning", wizard.state.wallet_alias_warning, "manual alias entry remains available")
     env.runtime.next_input_value = "MANUAL_ALIAS"
     wizard:edit_field({

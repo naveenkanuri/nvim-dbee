@@ -154,24 +154,35 @@ local function parse_wallet_aliases(contents)
   local active_descriptor = nil
   local active_depth = 0
 
+  local function reset_active()
+    active_aliases = nil
+    active_descriptor = nil
+    active_depth = 0
+  end
+
   local function flush_aliases()
     if not active_aliases or not active_descriptor then
-      active_aliases = nil
-      active_descriptor = nil
-      active_depth = 0
+      reset_active()
+      return
+    end
+
+    if active_depth ~= 0 then
+      reset_active()
       return
     end
 
     local descriptor = table.concat(active_descriptor, "\n")
     if descriptor ~= "" then
       for _, alias in ipairs(active_aliases) do
+        if alias ~= "" and not seen[alias] then
+          seen[alias] = true
+          aliases[#aliases + 1] = alias
+        end
         alias_map[alias] = descriptor
       end
     end
 
-    active_aliases = nil
-    active_descriptor = nil
-    active_depth = 0
+    reset_active()
   end
 
   for line in (contents .. "\n"):gmatch("([^\n]*)\n") do
@@ -194,10 +205,6 @@ local function parse_wallet_aliases(contents)
           active_descriptor = {}
 
           for alias in alias_group:gmatch("[^,%s]+") do
-            if alias ~= "" and not seen[alias] then
-              seen[alias] = true
-              aliases[#aliases + 1] = alias
-            end
             active_aliases[#active_aliases + 1] = alias
           end
 
