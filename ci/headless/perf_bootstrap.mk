@@ -1,4 +1,5 @@
-# Shared plugin/bootstrap contract for Phase 9 DRAW-01 real-nui perf runs.
+# Shared plugin/bootstrap contract for Phase 9 DRAW-01 real-nui perf runs
+# and Phase 10 LSP perf runs.
 
 PERF_PLUGIN_ROOT ?= $(if $(RUNNER_TEMP),$(RUNNER_TEMP)/nvim-dbee-perf-plugins,$(if $(TMPDIR),$(TMPDIR)nvim-dbee-perf-plugins,/tmp/nvim-dbee-perf-plugins))
 
@@ -23,6 +24,14 @@ PERF_NVIM_HEADLESS = $(NVIM_BIN) --headless -u NONE -i NONE -n --cmd "$(PERF_RUN
 
 perf-bootstrap:
 	@set -eu; \
+	test -f ci/headless/perf_bootstrap.mk || { echo "perf-bootstrap: missing shared bootstrap" >&2; exit 1; }; \
+	test -f ci/headless/perf_thresholds.lua || { echo "perf-bootstrap: missing DRAW01 threshold source" >&2; exit 1; }; \
+	test -f ci/headless/check_drawer_perf.lua || { echo "perf-bootstrap: missing DRAW01 perf harness" >&2; exit 1; }; \
+	grep -q "NUI_NVIM_COMMIT" ci/headless/perf_bootstrap.mk || { echo "perf-bootstrap: missing nui.nvim pin" >&2; exit 1; }; \
+	grep -q "BENCHMARK_NVIM_COMMIT" ci/headless/perf_bootstrap.mk || { echo "perf-bootstrap: missing benchmark.nvim pin" >&2; exit 1; }; \
+	grep -q "PROFILE_NVIM_COMMIT" ci/headless/perf_bootstrap.mk || { echo "perf-bootstrap: missing profile.nvim pin" >&2; exit 1; }; \
+	grep -q "DRAW01_REAL_NUI_PERF_ALL_PASS" ci/headless/check_drawer_perf.lua || { echo "perf-bootstrap: DRAW01 harness missing rollup marker" >&2; exit 1; }; \
+	grep -q "include ci/headless/perf_bootstrap.mk" Makefile || { echo "perf-bootstrap: Makefile does not include shared bootstrap" >&2; exit 1; }; \
 	mkdir -p "$(PERF_PLUGIN_ROOT)"; \
 	checkout_repo() { \
 	  repo_url="$$1"; \
@@ -63,4 +72,5 @@ perf-bootstrap-print:
 	  "NUI_NVIM_DIR=$(NUI_NVIM_DIR)" \
 	  "BENCHMARK_NVIM_DIR=$(BENCHMARK_NVIM_DIR)" \
 	  "PROFILE_NVIM_DIR=$(PROFILE_NVIM_DIR)" \
-	  "PERF_RUNTIMEPATH_CMD=$(PERF_RUNTIMEPATH_CMD)"
+	  "PERF_RUNTIMEPATH_CMD=$(PERF_RUNTIMEPATH_CMD)" \
+	  "PERF_BOOTSTRAP_CONSUMERS=draw01,lsp01"
