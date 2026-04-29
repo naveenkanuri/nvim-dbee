@@ -1,80 +1,81 @@
 -- Headless regression check for alias rebinding in SQL completion context.
---
--- Repro this guard covers:
---   select * from sas_principals sp where sp.
---   select * from sas_policies sp where sp.
---   select * from sas_policies s where s.
---
--- The same alias ("sp") is reused across separate statements and must resolve
--- to the latest table in scope, not a stale table from earlier text.
---
--- Usage:
--- nvim --headless -u NONE -i NONE -n \
---   --cmd "set rtp+=/path/to/nui.nvim" \
---   --cmd "set rtp+=/path/to/nvim-dbee" \
---   -c "luafile ci/headless/check_lsp_alias_rebinding.lua"
+
+vim.env.XDG_STATE_HOME = vim.fn.tempname()
+vim.fn.mkdir(vim.env.XDG_STATE_HOME, "p")
 
 local server = require("dbee.lsp.server")
+local SchemaCache = require("dbee.lsp.schema_cache")
 
-local fake_cache = {
-  get_schemas = function()
-    return { "FUSION" }
+local function fail(msg)
+  print("ALIAS_REBIND_FATAL=true")
+  print("ALIAS_REBIND_FAIL=" .. msg)
+  vim.cmd("cquit 1")
+end
+
+local function assert_true(label, value)
+  if not value then
+    fail(label .. ": expected true")
+  end
+end
+
+local function assert_eq(label, actual, expected)
+  if actual ~= expected then
+    fail(label .. ": expected " .. vim.inspect(expected) .. " got " .. vim.inspect(actual))
+  end
+end
+
+local async_calls = {}
+local sync_fetch_called = false
+
+local function fail_sync_fetch()
+  sync_fetch_called = true
+  error("sync column fetch must not be used by LSP completion")
+end
+
+local fake_handler = {
+  connection_get_columns = fail_sync_fetch,
+  get_authoritative_root_epoch = function()
+    return 1
   end,
-  get_tables = function(_, schema)
-    if schema ~= "FUSION" then
-      return {}
-    end
-    return {
-      sas_principals = { type = "table" },
-      sas_policies = { type = "table" },
+  connection_get_columns_async = function(_, conn_id, request_id, branch_id, root_epoch, opts)
+    async_calls[#async_calls + 1] = {
+      conn_id = conn_id,
+      request_id = request_id,
+      branch_id = branch_id,
+      root_epoch = root_epoch,
+      opts = opts,
     }
-  end,
-  find_table = function(_, table_name)
-    local lower = table_name:lower()
-    if lower == "sas_principals" then
-      return "sas_principals", "FUSION"
-    end
-    if lower == "sas_policies" then
-      return "sas_policies", "FUSION"
-    end
-    return nil, nil
-  end,
-  get_columns = function(_, schema, table_name)
-    if schema ~= "FUSION" then
-      return {}
-    end
-    if table_name == "sas_principals" then
-      return {
-        { name = "PRINCIPAL_ID", type = "NUMBER" },
-        { name = "PRINCIPAL_NAME", type = "VARCHAR2" },
-      }
-    end
-    if table_name == "sas_policies" then
-      return {
-        { name = "POLICY_ID", type = "NUMBER" },
-        { name = "POLICY_NAME", type = "VARCHAR2" },
-      }
-    end
-    return {}
-  end,
-  get_cached_columns = function()
-    return {}
   end,
 }
 
-local client = server.create(fake_cache)({}, {})
+local cache = SchemaCache:new(fake_handler, "test-rebinding")
+cache:build_from_metadata_rows({
+  { schema_name = "FUSION", table_name = "sas_principals", obj_type = "table" },
+  { schema_name = "FUSION", table_name = "sas_policies", obj_type = "table" },
+  { schema_name = "FUSION", table_name = "sas_groups", obj_type = "table" },
+})
+cache:_store_columns("FUSION.sas_principals", {
+  { name = "PRINCIPAL_ID", type = "NUMBER" },
+  { name = "PRINCIPAL_NAME", type = "VARCHAR2" },
+})
+cache:_store_columns("FUSION.sas_policies", {
+  { name = "POLICY_ID", type = "NUMBER" },
+  { name = "POLICY_NAME", type = "VARCHAR2" },
+})
 
+local client = server.create(cache)({}, {})
 local bufnr = vim.api.nvim_create_buf(false, true)
 local lines = {
   "select * from sas_principals sp where sp.",
   "select * from sas_policies sp where sp.",
   "select * from sas_policies s where s.",
+  "select * from sas_groups sp where sp.",
 }
 vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
 vim.api.nvim_buf_set_name(bufnr, "/tmp/dbee-alias-rebinding.sql")
 local uri = vim.uri_from_bufnr(bufnr)
 
-local function request_items(line_index, opts)
+local function request_completion(line_index, opts)
   opts = opts or {}
   local line = opts.line_text or lines[line_index + 1]
   if opts.line_text then
@@ -83,7 +84,6 @@ local function request_items(line_index, opts)
 
   local done = false
   local response = nil
-
   local params = {
     textDocument = { uri = uri },
     position = { line = line_index, character = #line },
@@ -102,17 +102,27 @@ local function request_items(line_index, opts)
   end, 20)
 
   if not response then
-    return nil, "timeout"
+    fail("completion timeout")
   end
   if response.err then
-    return nil, tostring(response.err)
+    fail("completion error: " .. tostring(response.err))
   end
-
-  return (response.result and response.result.items) or {}, nil
+  return response.result
 end
 
-local function has_label(items, label)
-  for _, item in ipairs(items) do
+local function deliver(call, columns)
+  cache:on_columns_loaded({
+    conn_id = call.conn_id,
+    request_id = call.request_id,
+    branch_id = call.branch_id,
+    root_epoch = call.root_epoch,
+    kind = "columns",
+    columns = columns,
+  })
+end
+
+local function has_label(result, label)
+  for _, item in ipairs((result and result.items) or {}) do
     if item.label == label then
       return true
     end
@@ -120,23 +130,13 @@ local function has_label(items, label)
   return false
 end
 
-local q1, q1_err = request_items(0)
-local q2, q2_err = request_items(1)
-local q3, q3_err = request_items(2)
-local q2_pre, q2_pre_err = request_items(1, {
+local q1 = request_completion(0)
+local q2 = request_completion(1)
+local q3 = request_completion(2)
+local q2_pre = request_completion(1, {
   line_text = "select * from sas_policies sp where sp",
   trigger_char = ".",
 })
-
-if q1_err or q2_err or q3_err or q2_pre_err then
-  print("ALIAS_REBIND_FATAL=true")
-  print("ALIAS_REBIND_Q1_ERR=" .. tostring(q1_err))
-  print("ALIAS_REBIND_Q2_ERR=" .. tostring(q2_err))
-  print("ALIAS_REBIND_Q3_ERR=" .. tostring(q3_err))
-  print("ALIAS_REBIND_Q2_PRE_ERR=" .. tostring(q2_pre_err))
-  vim.cmd("cquit 1")
-  return
-end
 
 local q1_has_principal = has_label(q1, "PRINCIPAL_ID")
 local q1_has_policy = has_label(q1, "POLICY_ID")
@@ -146,6 +146,28 @@ local q2_pre_has_principal = has_label(q2_pre, "PRINCIPAL_ID")
 local q2_pre_has_policy = has_label(q2_pre, "POLICY_ID")
 local q3_has_policy = has_label(q3, "POLICY_ID")
 
+assert_eq("q1 complete", q1.isIncomplete, false)
+assert_eq("q2 complete", q2.isIncomplete, false)
+assert_eq("q3 complete", q3.isIncomplete, false)
+assert_true("q1 principal", q1_has_principal)
+assert_true("q1 no policy", not q1_has_policy)
+assert_true("q2 no principal", not q2_has_principal)
+assert_true("q2 policy", q2_has_policy)
+assert_true("q2 pre no principal", not q2_pre_has_principal)
+assert_true("q2 pre policy", q2_pre_has_policy)
+assert_true("q3 policy", q3_has_policy)
+
+local cold = request_completion(3)
+assert_eq("cold rebind incomplete", cold.isIncomplete, true)
+deliver(async_calls[#async_calls], {
+  { name = "GROUP_ID", type = "NUMBER" },
+  { name = "GROUP_NAME", type = "VARCHAR2" },
+})
+local warm = request_completion(3)
+assert_eq("warm rebind complete", warm.isIncomplete, false)
+assert_true("warm group labels", has_label(warm, "GROUP_ID"))
+assert_true("warm no stale principal", not has_label(warm, "PRINCIPAL_ID"))
+
 print("ALIAS_REBIND_Q1_PRINCIPAL=" .. tostring(q1_has_principal))
 print("ALIAS_REBIND_Q1_POLICY=" .. tostring(q1_has_policy))
 print("ALIAS_REBIND_Q2_PRINCIPAL=" .. tostring(q2_has_principal))
@@ -153,13 +175,9 @@ print("ALIAS_REBIND_Q2_POLICY=" .. tostring(q2_has_policy))
 print("ALIAS_REBIND_Q2_PRE_PRINCIPAL=" .. tostring(q2_pre_has_principal))
 print("ALIAS_REBIND_Q2_PRE_POLICY=" .. tostring(q2_pre_has_policy))
 print("ALIAS_REBIND_Q3_POLICY=" .. tostring(q3_has_policy))
-
-if not q1_has_principal or q1_has_policy
-  or q2_has_principal or not q2_has_policy
-  or q2_pre_has_principal or not q2_pre_has_policy
-  or not q3_has_policy then
-  vim.cmd("cquit 1")
-  return
-end
+print("LSP_REBIND_FIRST_INCOMPLETE=true")
+print("LSP_REBIND_WARM_LABELS=true")
+assert_true("no sync fetch", not sync_fetch_called)
+print("LSP_REBIND_NO_SYNC_FETCH=true")
 
 vim.cmd("qa!")
