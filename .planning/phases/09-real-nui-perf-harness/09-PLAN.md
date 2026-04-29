@@ -1,7 +1,7 @@
 ---
 phase: 09-real-nui-perf-harness
 plan: 01
-revision: 3
+revision: 4
 type: execute
 wave: 1
 depends_on: []
@@ -849,10 +849,10 @@ Required grep targets for plan-gate and execute-phase verification:
 3. `grep -n "v0.12\|make perf-bootstrap\|make perf\|DRAW01_PERF_GATE_MODE=advisory\|upload-artifact\|check_drawer_filter.lua\|check_structure_lazy.lua\|act " .github/workflows/test.yml` proves the dual-platform advisory jobs, artifact handling, smoke reruns, and promotion seam are wired.
 4. `grep -n "DRAW01_CORPUS\|DRAW01_FILTER_START_MS\|DRAW01_APPLY_MAX_HIT_MS\|DRAW01_CANCEL_RESTORE_MS\|DRAW01_LARGE_EXPANSION_RESTORE_OK\|DRAW01_APPLY_SOAK_RETAINED_KB\|DRAW01_PHASE4_BUDGETS_PASS\|DRAW01_INITIAL_RENDER_MEDIAN_MS\|DRAW01_FILTER_FIRST_REDRAW_MEDIAN_MS\|DRAW01_FILTER_STABLE_MEDIAN_MS\|DRAW01_LAZY_EXPAND_MEDIAN_MS\|DRAW01_CACHED_EXPAND_MEDIAN_MS\|DRAW01_LOAD_MORE_MEDIAN_MS\|DRAW01_LINUX_PERF_THRESHOLD_INITIAL_RENDER_MEDIAN_MS\|DRAW01_LINUX_PERF_THRESHOLD_INITIAL_RENDER_MEDIAN_CANDIDATE_MS\|DRAW01_LINUX_PERF_THRESHOLD_INITIAL_RENDER_STATUS\|DRAW01_MACOS_PERF_THRESHOLD_LOAD_MORE_P95_MS\|DRAW01_MACOS_PERF_THRESHOLD_LOAD_MORE_P95_CANDIDATE_MS\|DRAW01_MACOS_PERF_THRESHOLD_LOAD_MORE_STATUS\|DRAW01_LINUX_PERF_THRESHOLD_PASS\|DRAW01_MACOS_PERF_THRESHOLD_PASS\|DRAW01_REAL_NUI_PERF_ALL_PASS" ci/headless/check_drawer_perf.lua` proves the inherited, additive, candidate, status, and rollup marker families are explicit in the harness.
 5. Final local macOS verification command:
-   `ART_DIR=$(mktemp -d) && DRAW01_PERF_GATE_MODE=advisory DRAW01_PERF_ARTIFACT_DIR="$ART_DIR" make perf PERF_PLATFORM=macos && test -f "$ART_DIR"/draw01-perf-summary-macos.txt && test -f "$ART_DIR"/draw01-perf-trace-macos.json`
+   `ART_DIR=$(mktemp -d) && DRAW01_PERF_GATE_MODE=advisory DRAW01_PERF_ARTIFACT_DIR="$ART_DIR" make perf PERF_PLATFORM=macos && test -f "$ART_DIR"/draw01-summary.txt && test -f "$ART_DIR"/draw01-trace.json`
 6. Final Linux verification command shape:
-   - native Linux dev box: `ART_DIR=$(mktemp -d) && DRAW01_PERF_GATE_MODE=advisory DRAW01_PERF_ARTIFACT_DIR="$ART_DIR" make perf PERF_PLATFORM=linux && test -f "$ART_DIR"/draw01-perf-summary-linux.txt && test -f "$ART_DIR"/draw01-perf-trace-linux.json`
-   - or CI-shaped replay: `act -W .github/workflows/test.yml -j perf-linux`
+   - native Linux dev box: `ART_DIR=$(mktemp -d) && DRAW01_PERF_GATE_MODE=advisory DRAW01_PERF_ARTIFACT_DIR="$ART_DIR" make perf PERF_PLATFORM=linux && test -f "$ART_DIR"/draw01-summary.txt && test -f "$ART_DIR"/draw01-trace.json`
+   - or CI-shaped replay: `act -W .github/workflows/test.yml -j lua-real-nui-perf-advisory`
 7. Preserved smoke verification commands:
    - `nvim --headless -u NONE -i NONE -n --cmd "set rtp+=$(pwd)" -c "luafile ci/headless/check_drawer_filter.lua"`
    - `nvim --headless -u NONE -i NONE -n --cmd "set rtp+=$(pwd)" -c "luafile ci/headless/check_structure_lazy.lua"`
