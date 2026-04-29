@@ -379,10 +379,33 @@ end
 
 ---@private
 ---@param entry table
-function SchemaCache:_finish_async_entry(entry)
-  if entry.active_key then
-    self.async_inflight[entry.active_key] = nil
+function SchemaCache:_detach_async_entry(entry)
+  local key = entry.active_key
+  if key then
+    local probe = self.async_inflight[key]
+    if probe and probe.entries then
+      for index, candidate in ipairs(probe.entries) do
+        if candidate == entry then
+          table.remove(probe.entries, index)
+          break
+        end
+      end
+      if #probe.entries == 0 then
+        self.async_inflight[key] = nil
+      end
+    elseif probe == entry then
+      self.async_inflight[key] = nil
+    end
   end
+  entry.active_key = nil
+  entry.request_id = nil
+  entry.branch_id = nil
+end
+
+---@private
+---@param entry table
+function SchemaCache:_finish_async_entry(entry)
+  self:_detach_async_entry(entry)
   self.async_chains[entry.chain_key] = nil
 end
 
@@ -410,6 +433,19 @@ function SchemaCache:_queue_async_probe(entry)
   local key = self:_async_key(entry.conn_id, schema, table_name, materialization, entry.root_epoch)
   local query_schema = (schema == "_default") and "" or schema
 
+  local active_probe = self.async_inflight[key]
+  if active_probe then
+    entry.active_key = key
+    entry.request_id = active_probe.request_id
+    entry.branch_id = active_probe.branch_id
+    entry.schema = schema
+    entry.table_name = table_name
+    entry.materialization = materialization
+    active_probe.entries[#active_probe.entries + 1] = entry
+    self.async_chains[entry.chain_key] = entry
+    return true
+  end
+
   local ok = pcall(self.handler.connection_get_columns_async, self.handler, entry.conn_id, request_id, branch_id, entry.root_epoch, {
     table = table_name,
     schema = query_schema,
@@ -428,7 +464,17 @@ function SchemaCache:_queue_async_probe(entry)
   entry.schema = schema
   entry.table_name = table_name
   entry.materialization = materialization
-  self.async_inflight[key] = entry
+  self.async_inflight[key] = {
+    active_key = key,
+    conn_id = entry.conn_id,
+    request_id = request_id,
+    branch_id = branch_id,
+    root_epoch = entry.root_epoch,
+    schema = schema,
+    table_name = table_name,
+    materialization = materialization,
+    entries = { entry },
+  }
   self.async_chains[entry.chain_key] = entry
   return true
 end
@@ -437,10 +483,7 @@ end
 ---@param entry table
 ---@return boolean
 function SchemaCache:_advance_async_probe(entry)
-  if entry.active_key then
-    self.async_inflight[entry.active_key] = nil
-    entry.active_key = nil
-  end
+  self:_detach_async_entry(entry)
 
   entry.materialization_index = entry.materialization_index + 1
   if entry.materialization_index <= #entry.materializations then
@@ -1175,45 +1218,63 @@ function SchemaCache:on_columns_loaded(data)
   end
 
   local payload_epoch = tonumber(data.root_epoch) or 0
-  local entry = nil
+  local probe = nil
   for _, candidate in pairs(self.async_inflight) do
     if candidate.conn_id == data.conn_id
       and candidate.request_id == data.request_id
       and candidate.branch_id == data.branch_id
       and candidate.root_epoch == payload_epoch
     then
-      entry = candidate
+      probe = candidate
       break
     end
   end
-  if not entry then
+  if not probe then
     return false
   end
 
+  self.async_inflight[probe.active_key] = nil
+  local entries = probe.entries or {}
+
   if data.error then
-    self:_finish_async_entry(entry)
-    self.async_failed[entry.chain_key] = true
+    self.async_failed[probe.active_key] = true
+    for _, entry in ipairs(entries) do
+      entry.active_key = nil
+      self.async_chains[entry.chain_key] = nil
+      self.async_failed[entry.chain_key] = true
+    end
     return true
   end
 
   local cols = data.columns or {}
   if #cols == 0 then
-    return self:_advance_async_probe(entry)
+    self.async_failed[probe.active_key] = true
+    local advanced = false
+    for _, entry in ipairs(entries) do
+      entry.active_key = nil
+      if self:_advance_async_probe(entry) then
+        advanced = true
+      end
+    end
+    return advanced
   end
 
-  if not self.schemas[entry.schema] then
-    self.schemas[entry.schema] = true
+  if not self.schemas[probe.schema] then
+    self.schemas[probe.schema] = true
   end
-  if not self.tables[entry.schema] then
-    self.tables[entry.schema] = {}
+  if not self.tables[probe.schema] then
+    self.tables[probe.schema] = {}
   end
-  self.tables[entry.schema][entry.table_name] = { type = entry.materialization }
+  self.tables[probe.schema][probe.table_name] = { type = probe.materialization }
   self:_rebuild_structure_indexes()
 
-  local key = table_key(entry.schema, entry.table_name)
+  local key = table_key(probe.schema, probe.table_name)
   self:_store_columns(key, cols)
   self:_save_columns_to_disk(key, cols)
-  self:_finish_async_entry(entry)
+  for _, entry in ipairs(entries) do
+    entry.active_key = nil
+    self.async_chains[entry.chain_key] = nil
+  end
   return true
 end
 

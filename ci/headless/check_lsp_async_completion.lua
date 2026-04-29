@@ -206,6 +206,34 @@ deliver(materialization_env.cache, materialization_env.calls[2], {
 local materialized_items = materialization_env.cache:get_column_completion_items("S", "T")
 assert_eq("view materialization resolved", materialized_items[1].label, "VIEW_ONLY_COL")
 
+local overlap_default_env = new_async_env("async-overlap-default")
+local overlap_default = overlap_default_env.cache:get_columns_async("S", "T")
+local overlap_explicit_table = overlap_default_env.cache:get_columns_async("S", "T", { materialization = "table" })
+assert_eq("overlap default incomplete", overlap_default.is_incomplete, true)
+assert_eq("overlap explicit table attaches", overlap_explicit_table.is_incomplete, true)
+assert_eq("overlap default plus table call count", #overlap_default_env.calls, 1)
+deliver(overlap_default_env.cache, overlap_default_env.calls[1], {
+  { name = "OVERLAP_TABLE_COL", type = "NUMBER" },
+})
+local overlap_default_warm = overlap_default_env.cache:get_columns_async("S", "T")
+assert_eq("overlap default warm complete", overlap_default_warm.is_incomplete, false)
+
+local overlap_reversed_env = new_async_env("async-overlap-reversed")
+local overlap_reversed_table = overlap_reversed_env.cache:get_columns_async("S", "T", { materialization = "table" })
+local overlap_reversed_default = overlap_reversed_env.cache:get_columns_async("S", "T")
+assert_eq("overlap reversed table incomplete", overlap_reversed_table.is_incomplete, true)
+assert_eq("overlap reversed default attaches", overlap_reversed_default.is_incomplete, true)
+assert_eq("overlap reversed initial call count", #overlap_reversed_env.calls, 1)
+deliver(overlap_reversed_env.cache, overlap_reversed_env.calls[1], {})
+assert_eq("overlap reversed view probe queued", #overlap_reversed_env.calls, 2)
+assert_eq("overlap reversed view materialization", overlap_reversed_env.calls[2].opts.materialization, "view")
+local overlap_reversed_table_after_empty = overlap_reversed_env.cache:get_columns_async("S", "T", { materialization = "table" })
+assert_eq("overlap reversed table-only complete after empty", overlap_reversed_table_after_empty.is_incomplete, false)
+deliver(overlap_reversed_env.cache, overlap_reversed_env.calls[2], {
+  { name = "OVERLAP_VIEW_COL", type = "VARCHAR2" },
+})
+assert_true("overlap reversed view warmed", #overlap_reversed_env.cache:get_column_completion_items("S", "T") == 1)
+
 local listeners = {}
 local fake_state = {}
 local event_calls = {}
