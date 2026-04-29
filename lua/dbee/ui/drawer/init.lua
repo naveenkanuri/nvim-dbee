@@ -5,9 +5,17 @@ local menu = require("dbee.ui.drawer.menu")
 local convert = require("dbee.ui.drawer.convert")
 local drawer_model = require("dbee.ui.drawer.model")
 local expansion = require("dbee.ui.drawer.expansion")
-local connection_wizard = require("dbee.ui.connection_wizard")
 local reconnect = require("dbee.reconnect")
 local utils = require("dbee.utils")
+
+local connection_wizard = nil
+
+local function get_connection_wizard()
+  if not connection_wizard then
+    connection_wizard = require("dbee.ui.connection_wizard")
+  end
+  return connection_wizard
+end
 
 -- action function of drawer nodes
 ---@alias drawer_node_action fun(cb: fun(), select: menu_select, input: menu_input)
@@ -2327,7 +2335,7 @@ end
 function DrawerUI:_open_connection_wizard(source_meta, opts)
   opts = opts or {}
 
-  connection_wizard.open({
+  get_connection_wizard().open({
     relative_winid = self.winid,
     mode = opts.mode,
     title = opts.title,
