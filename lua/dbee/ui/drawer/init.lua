@@ -69,7 +69,7 @@ end
 ---@field private pending_generated_calls table<string, { note_id: note_id, fallback_template: string }>
 ---@field private _manual_refresh_conns table<string, boolean>
 ---@field private _replay_container_expansions table<string, table<string, boolean>>
----@field private _reconnect_listener_id string
+---@field private _reconnect_listener_id string|nil
 ---@field private _connection_invalidated_consumer_id string
 ---@field private _pending_connection_invalidations ConnectionInvalidatedEvent[]
 ---@field private _connection_invalidation_flush_scheduled boolean
@@ -2292,6 +2292,11 @@ function DrawerUI:prepare_close()
   -- so any scheduled on_close/on_submit callbacks see an invalidated session and no-op.
   self.active_filter_session_id = nil
   self:cancel_pending_filter_apply()
+
+  if self._reconnect_listener_id then
+    reconnect.unregister_connection_rewritten_listener(self._reconnect_listener_id)
+    self._reconnect_listener_id = nil
+  end
 
   local input = self.filter_input
   if input and type(input.unmount) == "function" then

@@ -481,6 +481,19 @@ function M.register_connection_rewritten_listener(subscriber_key, listener)
   connection_rewritten_listeners[subscriber_key] = listener
 end
 
+---@param subscriber_key string|nil
+---@return boolean
+function M.unregister_connection_rewritten_listener(subscriber_key)
+  if not subscriber_key or subscriber_key == "" then
+    return false
+  end
+  if connection_rewritten_listeners[subscriber_key] == nil then
+    return false
+  end
+  connection_rewritten_listeners[subscriber_key] = nil
+  return true
+end
+
 ---@param conn_id connection_id
 ---@return dbee_retry_meta|nil
 ---@return call_id|nil
