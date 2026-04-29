@@ -74,6 +74,22 @@ local function copy_items(items)
   return vim.deepcopy(items or {})
 end
 
+---@param schema string
+---@param name string
+---@param table_type string?
+---@return lsp.CompletionItem
+local function table_completion_item(schema, name, table_type)
+  table_type = table_type or "table"
+  local detail = (schema ~= "_default") and (schema .. "." .. name) or name
+  return {
+    label = name,
+    kind = (table_type == "view") and CompletionItemKind.Class or CompletionItemKind.Struct,
+    detail = detail .. " (" .. table_type .. ")",
+    insertText = name,
+    sortText = "0_" .. name,
+  }
+end
+
 ---@param message string
 local function warn(message)
   vim.notify(message, vim.log.levels.WARN)
@@ -104,6 +120,7 @@ function SchemaCache:new(handler, conn_id)
     disk_pruned = 0,
     sync_column_files_discovered = 0,
     sync_column_files_scanned = 0,
+    sync_column_discovery_degraded = false,
     sync_column_files_loaded = 0,
     deferred_column_files_scheduled = 0,
     deferred_column_files_processed = 0,
@@ -229,27 +246,32 @@ function SchemaCache:_rebuild_structure_indexes()
       local info = self.tables[schema][name] or { type = "table" }
       local folded = fold(name)
       schema_lookup[folded] = schema_lookup[folded] or name
-      self.table_lookup_global[folded] = self.table_lookup_global[folded]
-        or { name = name, schema = schema }
 
-      local detail = (schema ~= "_default") and (schema .. "." .. name) or name
-      local item = {
-        label = name,
-        kind = (info.type == "view") and CompletionItemKind.Class or CompletionItemKind.Struct,
-        detail = detail .. " (" .. (info.type or "table") .. ")",
-        insertText = name,
-        sortText = "0_" .. name,
-      }
-      schema_items[#schema_items + 1] = item
+      schema_items[#schema_items + 1] = table_completion_item(schema, name, info.type)
     end
 
     self.table_lookup_by_schema[schema] = schema_lookup
     self.table_items_by_schema[schema] = schema_items
   end
 
+  self:_refresh_global_table_index()
+end
+
+---@private
+function SchemaCache:_refresh_global_table_index()
+  self.table_lookup_global = {}
+  self.all_table_items = {}
+  self.all_table_names = {}
+
+  local schema_names = vim.tbl_keys(self.schemas)
+  table.sort(schema_names)
+
   local seen = {}
   for _, schema in ipairs(schema_names) do
     for _, item in ipairs(self.table_items_by_schema[schema] or {}) do
+      local folded = fold(item.label)
+      self.table_lookup_global[folded] = self.table_lookup_global[folded]
+        or { name = item.label, schema = schema }
       if not seen[item.label] then
         seen[item.label] = true
         self.all_table_items[#self.all_table_items + 1] = vim.deepcopy(item)
@@ -278,7 +300,6 @@ function SchemaCache:_upsert_table_index(schema, name, table_type)
   if not self.tables[schema] then
     self.tables[schema] = {}
   end
-  local existing = self.tables[schema][name]
   self.tables[schema][name] = { type = table_type }
 
   if new_schema and schema ~= "_default" then
@@ -294,41 +315,31 @@ function SchemaCache:_upsert_table_index(schema, name, table_type)
     end)
   end
 
-  if existing then
-    return
-  end
-
   local schema_lookup = self.table_lookup_by_schema[schema] or {}
   schema_lookup[fold(name)] = schema_lookup[fold(name)] or name
   self.table_lookup_by_schema[schema] = schema_lookup
-  self.table_lookup_global[fold(name)] = self.table_lookup_global[fold(name)]
-    or { name = name, schema = schema }
-
-  local detail = (schema ~= "_default") and (schema .. "." .. name) or name
-  local item = {
-    label = name,
-    kind = (table_type == "view") and CompletionItemKind.Class or CompletionItemKind.Struct,
-    detail = detail .. " (" .. table_type .. ")",
-    insertText = name,
-    sortText = "0_" .. name,
-  }
 
   if not self.table_items_by_schema[schema] then
     self.table_items_by_schema[schema] = {}
   end
-  self.table_items_by_schema[schema][#self.table_items_by_schema[schema] + 1] = item
-  table.sort(self.table_items_by_schema[schema], function(a, b)
+  local item = table_completion_item(schema, name, table_type)
+  local schema_items = self.table_items_by_schema[schema]
+  local replaced = false
+  for index, existing_item in ipairs(schema_items) do
+    if existing_item.label == name then
+      schema_items[index] = item
+      replaced = true
+      break
+    end
+  end
+  if not replaced then
+    schema_items[#schema_items + 1] = item
+  end
+  table.sort(schema_items, function(a, b)
     return a.label < b.label
   end)
 
-  self.all_table_items[#self.all_table_items + 1] = item
-  table.sort(self.all_table_items, function(a, b)
-    return a.label < b.label
-  end)
-  self.all_table_names = {}
-  for _, table_item in ipairs(self.all_table_items) do
-    self.all_table_names[#self.all_table_names + 1] = table_item.label
-  end
+  self:_refresh_global_table_index()
 end
 
 ---@private
@@ -770,6 +781,7 @@ function SchemaCache:_column_cache_files(limit)
   local max_files = limit or SYNC_COLUMN_FILE_LOAD_LIMIT
   local max_scans = math.max(max_files, SYNC_COLUMN_FILE_SCAN_LIMIT)
   local scanned = 0
+  local scan_limit_hit = false
 
   local function add_path(path)
     local stat = self:_file_stat(path)
@@ -792,6 +804,7 @@ function SchemaCache:_column_cache_files(limit)
           add_path(self.cache_dir .. "/" .. name)
         end
         if #files >= max_files or scanned >= max_scans then
+          scan_limit_hit = scanned >= max_scans and #files < max_files
           break
         end
       end
@@ -802,6 +815,7 @@ function SchemaCache:_column_cache_files(limit)
       scanned = scanned + 1
       add_path(path)
       if #files >= max_files or scanned >= max_scans then
+        scan_limit_hit = scanned >= max_scans and #files < max_files
         break
       end
     end
@@ -815,6 +829,7 @@ function SchemaCache:_column_cache_files(limit)
   end)
   self.sync_column_files_discovered = #files
   self.sync_column_files_scanned = scanned
+  self.sync_column_discovery_degraded = scan_limit_hit
   return files
 end
 
@@ -1179,6 +1194,7 @@ function SchemaCache:_load_columns_from_disk()
   self.sync_column_files_loaded = 0
   self.sync_column_files_discovered = 0
   self.sync_column_files_scanned = 0
+  self.sync_column_discovery_degraded = false
   self.deferred_column_files_scheduled = 0
   self.deferred_column_files_processed = 0
   self.deferred_disk_work_scheduled = false
@@ -1216,6 +1232,7 @@ function SchemaCache:get_stats()
     disk_pruned = self.disk_pruned or 0,
     sync_column_files_discovered = self.sync_column_files_discovered or 0,
     sync_column_files_scanned = self.sync_column_files_scanned or 0,
+    sync_column_discovery_degraded = self.sync_column_discovery_degraded == true,
     sync_column_files_loaded = self.sync_column_files_loaded or 0,
     deferred_column_files_scheduled = self.deferred_column_files_scheduled or 0,
     deferred_column_files_processed = self.deferred_column_files_processed or 0,
@@ -1388,6 +1405,27 @@ function SchemaCache:get_columns_async(schema, table_name, opts)
       is_incomplete = false,
       in_flight = false,
       reason = "queue_failed",
+    }
+  end
+
+  local resolved_key = (entry.schema and entry.table_name) and table_key(entry.schema, entry.table_name) or key
+  local cols_key = self.columns[resolved_key] and resolved_key or key
+  local cols = self.columns[cols_key]
+  if cols then
+    self:_touch_column(cols_key)
+    return {
+      columns = cols,
+      is_incomplete = false,
+      in_flight = false,
+    }
+  end
+
+  if not self.async_chains[chain_key] then
+    return {
+      columns = {},
+      is_incomplete = false,
+      in_flight = false,
+      reason = self.async_failed[chain_key] and "previous_failure" or "completed_empty",
     }
   end
 

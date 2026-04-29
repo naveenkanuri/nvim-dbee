@@ -215,6 +215,61 @@ local bounded_scan_stats = bounded_scan_cache:get_stats()
 assert_true("unrelated scan bounded", bounded_scan_stats.sync_column_files_scanned <= bounded_scan_stats.sync_column_file_scan_limit)
 assert_true("current files prioritized", bounded_scan_stats.sync_column_files_loaded > 0)
 
+local adversarial_cache = new_isolated_cache("disk-adversarial-scan")
+adversarial_cache:build_from_metadata_rows({
+  { schema_name = "S", table_name = "T", obj_type = "table" },
+})
+adversarial_cache:save_to_disk()
+local adversarial_other_names = {}
+local adversarial_current_names = {}
+for i = 1, 250 do
+  local name = string.format("other_conn_cols_%05d.json", i)
+  adversarial_other_names[#adversarial_other_names + 1] = name
+  write_file(adversarial_cache.cache_dir .. "/" .. name, vim.json.encode({
+    { name = "OTHER_ID", type = "NUMBER" },
+  }))
+end
+for i = 1, 50 do
+  local key = string.format("S.CURRENT_%03d", i)
+  local path = adversarial_cache:_columns_cache_path(key)
+  adversarial_current_names[#adversarial_current_names + 1] = vim.fn.fnamemodify(path, ":t")
+  write_file(path, vim.json.encode({
+    { name = "ID", type = "NUMBER" },
+  }))
+end
+
+local saved_fs_dir = vim.fs and vim.fs.dir
+if saved_fs_dir then
+  vim.fs.dir = function(path)
+    if path == adversarial_cache.cache_dir then
+      local names = {}
+      vim.list_extend(names, adversarial_other_names)
+      vim.list_extend(names, adversarial_current_names)
+      local index = 0
+      return function()
+        index = index + 1
+        local name = names[index]
+        if name then
+          return name, "file"
+        end
+      end
+    end
+    return saved_fs_dir(path)
+  end
+end
+local adversarial_ok, adversarial_loaded = pcall(function()
+  return adversarial_cache:load_from_disk()
+end)
+if saved_fs_dir then
+  vim.fs.dir = saved_fs_dir
+end
+assert_true("adversarial scan does not throw", adversarial_ok)
+assert_eq("adversarial schema loads", adversarial_loaded, true)
+local adversarial_stats = adversarial_cache:get_stats()
+assert_true("adversarial scan bounded", adversarial_stats.sync_column_files_scanned <= adversarial_stats.sync_column_file_scan_limit)
+assert_eq("adversarial sync loaded zero current files", adversarial_stats.sync_column_files_loaded, 0)
+assert_eq("adversarial scan degraded", adversarial_stats.sync_column_discovery_degraded, true)
+
 local deferred_count_cache = new_isolated_cache("disk-deferred-count")
 deferred_count_cache:build_from_metadata_rows({
   { schema_name = "S", table_name = "T", obj_type = "table" },
@@ -299,6 +354,7 @@ print("LSP11_DISK_CACHE_ISOLATED=true")
 print("LSP11_DISK_LOAD_BOUNDED=true")
 print("LSP11_DISK_DEFERRED_GENERATION_FENCED=true")
 print("LSP11_DISK_DISCOVERY_BOUNDED=true")
+print("LSP11_DISK_DISCOVERY_ADVERSARIAL_OK=true")
 print("LSP11_DISK_DEFERRED_PRUNE_DRAINED=true")
 
 vim.fn.delete(root, "rf")

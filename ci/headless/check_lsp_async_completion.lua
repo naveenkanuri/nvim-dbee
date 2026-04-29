@@ -199,7 +199,9 @@ sync_delivery_cache:build_from_metadata_rows({
   { schema_name = "S", table_name = "T", obj_type = "table" },
 })
 local sync_delivery_first = sync_delivery_cache:get_columns_async("S", "T")
-assert_eq("sync delivery first incomplete", sync_delivery_first.is_incomplete, true)
+assert_eq("sync delivery first complete", sync_delivery_first.is_incomplete, false)
+assert_eq("sync delivery first column count", #sync_delivery_first.columns, 1)
+assert_eq("sync delivery first column label", sync_delivery_first.columns[1].name, "SYNC_DELIVERED_COL")
 assert_eq("sync delivery call count", sync_delivery_calls, 1)
 assert_eq("sync delivery inflight drained", vim.tbl_count(sync_delivery_cache.async_inflight), 0)
 assert_eq("sync delivery chains drained", vim.tbl_count(sync_delivery_cache.async_chains), 0)
