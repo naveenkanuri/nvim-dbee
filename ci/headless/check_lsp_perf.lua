@@ -634,6 +634,208 @@ local function cleanup_lsp(state)
   end)
 end
 
+local function has_label(items, label)
+  for _, item in ipairs(items or {}) do
+    if item.label == label then
+      return true
+    end
+  end
+  return false
+end
+
+local function request_completion(state, line_text, character, context)
+  vim.api.nvim_buf_set_lines(state.bufnr, 0, -1, false, { line_text })
+  local params = {
+    textDocument = { uri = state.uri },
+    position = { line = 0, character = character or #line_text },
+  }
+  if context then
+    params.context = context
+  end
+
+  local done = false
+  local response = nil
+  local start_ns = uv.hrtime()
+  state.client:request("textDocument/completion", params, function(err, result)
+    response = {
+      err = err,
+      result = result,
+      elapsed_ns = uv.hrtime() - start_ns,
+    }
+    done = true
+  end, state.bufnr)
+
+  local ok = vim.wait(1000, function()
+    return done
+  end, 5)
+  if not ok or not response then
+    error("completion timeout")
+  end
+  if response.err then
+    error("completion error: " .. tostring(response.err))
+  end
+  if type(response.result) ~= "table" or type(response.result.items) ~= "table" then
+    error("invalid completion response")
+  end
+  return response.result.items, response.elapsed_ns
+end
+
+local function completion_before(table_count, opts)
+  opts = opts or {}
+  local cache = make_cache(table_count, DEFAULT_COLUMNS_PER_TABLE, {
+    preload_columns = opts.preload_columns,
+  })
+  local bufnr, uri = make_buffer({ "" })
+  local client, client_id = start_lsp(cache, bufnr)
+  return {
+    cache = cache,
+    bufnr = bufnr,
+    uri = uri,
+    client = client,
+    client_id = client_id,
+    table_count = table_count,
+  }
+end
+
+local function completion_after(state)
+  cleanup_lsp(state)
+end
+
+local function require_completion_labels(slug, items, required, forbidden)
+  if #items == 0 then
+    scenario_sentinels[slug] = false
+    error(slug .. " returned empty completion list")
+  end
+  for _, label in ipairs(required or {}) do
+    if not has_label(items, label) then
+      scenario_sentinels[slug] = false
+      error(slug .. " missing completion label " .. label)
+    end
+  end
+  for _, label in ipairs(forbidden or {}) do
+    if has_label(items, label) then
+      scenario_sentinels[slug] = false
+      error(slug .. " returned forbidden completion label " .. label)
+    end
+  end
+end
+
+local function cached_completion_run(state, finish, _, spec)
+  local items, elapsed_ns = request_completion(state, spec.line, #spec.line, spec.context)
+  require_completion_labels(spec.slug, items, spec.required, spec.forbidden)
+  if spec.min_count and #items < spec.min_count then
+    scenario_sentinels[spec.slug] = false
+    error(("%s expected at least %d items, got %d"):format(spec.slug, spec.min_count, #items))
+  end
+  if spec.assert_no_column_fetch and state.cache.handler and (state.cache.handler.counters.connection_get_columns or 0) ~= 0 then
+    scenario_sentinels[spec.slug] = false
+    error(spec.slug .. " unexpectedly fetched columns")
+  end
+  finish(elapsed_ns)
+end
+
+local function register_cached_completion(slug, threshold_key, table_count, line, required, opts)
+  opts = opts or {}
+  register({
+    slug = slug,
+    threshold_key = threshold_key,
+    corpus = opts.corpus or ("tables:" .. tostring(table_count) .. ",columns:10"),
+    before = function()
+      return completion_before(table_count, {
+        preload_columns = opts.preload_columns,
+      })
+    end,
+    run = function(state, finish, iteration)
+      cached_completion_run(state, finish, iteration, {
+        slug = slug,
+        line = line,
+        context = opts.context,
+        required = required,
+        forbidden = opts.forbidden,
+        min_count = opts.min_count,
+        assert_no_column_fetch = opts.assert_no_column_fetch,
+      })
+    end,
+    after = completion_after,
+  })
+end
+
+register_cached_completion(
+  "COMPLETION_TABLE_100",
+  "completion_table_100",
+  100,
+  "select * from ",
+  { "TABLE_000001", "TABLE_000100" },
+  {
+    forbidden = { "TABLE_999999" },
+    min_count = 100,
+    corpus = "tables:100,context:table",
+  }
+)
+
+register_cached_completion(
+  "COMPLETION_TABLE_1000",
+  "completion_table_1000",
+  1000,
+  "select * from ",
+  { "TABLE_000001", "TABLE_001000" },
+  {
+    forbidden = { "TABLE_999999" },
+    min_count = 1000,
+    corpus = "tables:1000,context:table",
+  }
+)
+
+register_cached_completion(
+  "COMPLETION_TABLE_10000",
+  "completion_table_10000",
+  10000,
+  "select * from ",
+  { "TABLE_000001", "TABLE_010000" },
+  {
+    forbidden = { "TABLE_999999" },
+    min_count = 10000,
+    corpus = "tables:10000,context:table",
+  }
+)
+
+register_cached_completion(
+  "COMPLETION_SCHEMA",
+  "completion_schema",
+  100,
+  "select * from ",
+  { "SCHEMA_001" },
+  {
+    forbidden = { "_missing_schema" },
+    corpus = "tables:100,context:schema-via-table",
+  }
+)
+
+register_cached_completion(
+  "COMPLETION_KEYWORD",
+  "completion_keyword",
+  100,
+  "",
+  { "SELECT", "FROM", "WHERE" },
+  {
+    corpus = "tables:100,context:keyword",
+  }
+)
+
+register_cached_completion(
+  "COMPLETION_COLUMN_HIT",
+  "completion_column_hit",
+  100,
+  "SELECT * FROM SCHEMA_001.TABLE_000001 t WHERE t.",
+  { "COL_001", "COL_010" },
+  {
+    preload_columns = true,
+    forbidden = { "COL_999" },
+    assert_no_column_fetch = true,
+    corpus = "tables:100,context:column-hit,alias:t",
+  }
+)
+
 local function run_benchmark(spec)
   local iteration = 0
   local state = nil
