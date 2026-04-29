@@ -31,6 +31,24 @@ local function current_script_path()
   return source
 end
 
+local function load_threshold_file(path)
+  local chunk, err = loadfile(path)
+  if not chunk then
+    fail("failed to load threshold file: " .. tostring(err))
+  end
+
+  local ok, loaded = pcall(chunk)
+  if not ok then
+    fail("failed to execute threshold file: " .. tostring(loaded))
+  end
+
+  if type(loaded) ~= "table" or type(loaded.linux) ~= "table" or type(loaded.macos) ~= "table" then
+    fail("threshold file must return { linux = {...}, macos = {...} }: " .. path)
+  end
+
+  return loaded
+end
+
 local function median(values)
   if #values == 0 then
     return 0
@@ -120,10 +138,7 @@ if not uv.fs_stat(threshold_path) then
   fail("missing threshold file: " .. threshold_path)
 end
 
-local thresholds_ok, thresholds = pcall(require, "ci.headless.perf_thresholds")
-if not thresholds_ok then
-  fail("failed to load threshold file: " .. tostring(thresholds))
-end
+local thresholds = load_threshold_file(threshold_path)
 
 local gate_mode = vim.env.DRAW01_PERF_GATE_MODE or "advisory"
 if gate_mode ~= "advisory" and gate_mode ~= "blocking" then
