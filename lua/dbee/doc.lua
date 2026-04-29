@@ -86,6 +86,26 @@
 ---@class SourceConnectionRecord: ConnectionParams
 ---@field wizard? table additive source-local metadata persisted by FileSource-backed wizard flows
 
+---@alias connection_wizard_db_kind
+---| '"oracle"'
+---| '"postgres"'
+---| '"other"'
+
+---@alias connection_wizard_mode
+---| '"oracle_cloud_wallet"'
+---| '"oracle_custom_jdbc"'
+---| '"postgres_url"'
+---| '"postgres_form"'
+---| '"other_raw"'
+
+---@class ConnectionWizardSeed
+---@field params ConnectionParams?
+---@field wizard? { db_kind?: connection_wizard_db_kind, mode?: connection_wizard_mode, fields?: table<string, any> }
+
+---@class ConnectionWizardSubmission
+---@field params ConnectionParams
+---@field wizard { db_kind: connection_wizard_db_kind, mode: connection_wizard_mode, fields: table<string, any>, rendered_url?: string }
+
 ---Query execution options.
 ---@class QueryExecuteOpts
 ---@field binds? table<string, string> named bind values (Oracle). Supports typed literal prefixes: int:, float:, bool:, null, date:, timestamp:, str:. Use str: to force a literal string (e.g. str:int:42).
