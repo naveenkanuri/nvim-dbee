@@ -98,6 +98,8 @@ function SchemaCache:new(handler, conn_id)
     sync_column_files_loaded = 0,
     deferred_column_files_scheduled = 0,
     deferred_disk_work_scheduled = false,
+    disk_work_generation = 0,
+    deferred_disk_work_canceled = 0,
     async_inflight = {},
     async_chains = {},
     async_failed = {},
@@ -262,6 +264,12 @@ end
 ---@return integer
 function SchemaCache:_column_entry_count()
   return vim.tbl_count(self.columns)
+end
+
+---@private
+function SchemaCache:_bump_disk_work_generation()
+  self.disk_work_generation = (self.disk_work_generation or 0) + 1
+  self.deferred_disk_work_scheduled = false
 end
 
 ---@private
@@ -566,12 +574,19 @@ function SchemaCache:_schedule_deferred_column_work(files, start_index)
 
   self.deferred_column_files_scheduled = #files - start_index + 1
   self.deferred_disk_work_scheduled = true
+  local generation = self.disk_work_generation or 0
   local prefix = self.conn_id .. "_cols_"
   local index = start_index
   local now = os.time()
   local chunk_size = SYNC_COLUMN_FILE_LOAD_LIMIT
 
   local function step()
+    if self.disk_work_generation ~= generation then
+      self.deferred_disk_work_canceled = (self.deferred_disk_work_canceled or 0) + 1
+      self.deferred_disk_work_scheduled = false
+      return
+    end
+
     local last = math.min(index + chunk_size - 1, #files)
     for i = index, last do
       local entry = files[i]
@@ -582,6 +597,8 @@ function SchemaCache:_schedule_deferred_column_work(files, start_index)
     index = last + 1
     if index <= #files then
       vim.schedule(step)
+    else
+      self.deferred_disk_work_scheduled = false
     end
   end
 
@@ -748,6 +765,7 @@ function SchemaCache:load_from_disk()
   self.schemas = {}
   self.tables = {}
   self.columns = {}
+  self:_bump_disk_work_generation()
   self:_reset_indexes()
 
   if data.schemas then
@@ -819,6 +837,8 @@ function SchemaCache:get_stats()
     disk_pruned = self.disk_pruned or 0,
     sync_column_files_loaded = self.sync_column_files_loaded or 0,
     deferred_column_files_scheduled = self.deferred_column_files_scheduled or 0,
+    disk_work_generation = self.disk_work_generation or 0,
+    deferred_disk_work_canceled = self.deferred_disk_work_canceled or 0,
     max_columns_in_memory = MAX_COLUMNS_IN_MEMORY,
     sync_column_file_load_limit = SYNC_COLUMN_FILE_LOAD_LIMIT,
   }
@@ -1046,6 +1066,7 @@ function SchemaCache:cancel_async(_reason, _opts)
   self.async_inflight = {}
   self.async_chains = {}
   self.async_failed = {}
+  self:_bump_disk_work_generation()
 end
 
 --- Get columns for a specific table, lazy-loading from handler on first access.

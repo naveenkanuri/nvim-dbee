@@ -135,6 +135,26 @@ local large_stats = large_cache:get_stats()
 assert_true("sync load bounded", large_stats.sync_column_files_loaded <= 100)
 assert_true("deferred load scheduled", large_stats.deferred_column_files_scheduled > 0)
 
+local fenced_cache = new_cache("disk-fenced")
+fenced_cache:build_from_metadata_rows({
+  { schema_name = "S", table_name = "T", obj_type = "table" },
+})
+fenced_cache:save_to_disk()
+for i = 1, 125 do
+  local key = string.format("S.DEFER_%03d", i)
+  write_file(fenced_cache:_columns_cache_path(key), vim.json.encode({
+    { name = "ID", type = "NUMBER" },
+  }))
+end
+assert_eq("fenced schema loads", fenced_cache:load_from_disk(), true)
+assert_true("fenced work scheduled", fenced_cache:get_stats().deferred_column_files_scheduled > 0)
+fenced_cache:invalidate()
+vim.wait(1000, function()
+  return fenced_cache:get_stats().deferred_disk_work_canceled > 0
+end, 20)
+assert_eq("fenced columns stay empty", fenced_cache:get_stats().column_entry_count, 0)
+assert_true("deferred work canceled", fenced_cache:get_stats().deferred_disk_work_canceled > 0)
+
 vim.notify = saved_notify
 
 print("LSP11_ATOMIC_WRITE_OK=true")
@@ -142,6 +162,7 @@ print("LSP11_CORRUPT_CACHE_RECOVERED=true")
 print("LSP11_DISK_PRUNE_COUNT=" .. tostring(prune_cache:get_stats().disk_pruned))
 print("LSP11_DISK_CACHE_ISOLATED=true")
 print("LSP11_DISK_LOAD_BOUNDED=true")
+print("LSP11_DISK_DEFERRED_GENERATION_FENCED=true")
 
 vim.fn.delete(root, "rf")
 vim.cmd("qa!")
