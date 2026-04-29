@@ -23,6 +23,14 @@ local function deepcopy(value)
   return vim.deepcopy(value)
 end
 
+local function current_script_path()
+  local source = debug.getinfo(1, "S").source or ""
+  if source:sub(1, 1) == "@" then
+    return source:sub(2)
+  end
+  return source
+end
+
 local function median(values)
   if #values == 0 then
     return 0
@@ -62,8 +70,12 @@ local function format_float(value)
   return string.format("%.2f", value)
 end
 
+local emitted_markers = {}
+
 local function emit(label, value)
-  print(label .. "=" .. tostring(value))
+  local line = label .. "=" .. tostring(value)
+  emitted_markers[#emitted_markers + 1] = line
+  print(line)
 end
 
 local function emit_ms(label, value_ns)
@@ -103,14 +115,6 @@ if benchmark_ui_ok and benchmark_ui then
   benchmark_ui.show_message = function() end
 end
 
-if not pcall(require, "nui.tree") then
-  fail("nui.nvim missing from runtimepath")
-end
-
-local DrawerUI = require("dbee.ui.drawer")
-local convert = require("dbee.ui.drawer.convert")
-local drawer_model = require("dbee.ui.drawer.model")
-
 local threshold_path = vim.env.DRAW01_PERF_THRESHOLD_FILE or "ci/headless/perf_thresholds.lua"
 if not uv.fs_stat(threshold_path) then
   fail("missing threshold file: " .. threshold_path)
@@ -143,8 +147,34 @@ end
 local artifact_dir = vim.env.DRAW01_PERF_ARTIFACT_DIR or ("/tmp/nvim-dbee-draw01-perf/" .. platform)
 local summary_path = vim.env.DRAW01_PERF_SUMMARY_PATH or (artifact_dir .. "/draw01-summary.txt")
 local trace_path = vim.env.DRAW01_PERF_TRACE_PATH or (artifact_dir .. "/draw01-trace.json")
+local trace_only = vim.env.DRAW01_PERF_TRACE_ONLY == "1"
 
 vim.fn.mkdir(artifact_dir, "p")
+
+local flame_profile_start
+local flame_profile_stop
+if trace_only then
+  local real_install_plugin = benchmark.install_plugin
+  benchmark.install_plugin = function(path)
+    if path == "stevearc/profile.nvim" then
+      return
+    end
+    return real_install_plugin(path)
+  end
+  flame_profile_start, flame_profile_stop = benchmark.flame_profile({
+    pattern = "*",
+    filename = trace_path,
+  })
+  benchmark.install_plugin = real_install_plugin
+end
+
+if not pcall(require, "nui.tree") then
+  fail("nui.nvim missing from runtimepath")
+end
+
+local DrawerUI = require("dbee.ui.drawer")
+local convert = require("dbee.ui.drawer.convert")
+local drawer_model = require("dbee.ui.drawer.model")
 
 local nvim_version = vim.version()
 local nvim_version_string = string.format("%d.%d.%d", nvim_version.major, nvim_version.minor, nvim_version.patch)
@@ -563,6 +593,91 @@ local function measure_sync_drawer_write(bufnr, action)
   action()
   active_buffer_watch = nil
   return (watch.last_ns or uv.hrtime()) - start_ns
+end
+
+local function write_lines(path, lines)
+  local ok, result = pcall(vim.fn.writefile, lines, path)
+  if not ok or result ~= 0 then
+    fail("failed to write artifact: " .. path)
+  end
+end
+
+local function run_flame_trace_subprocess()
+  pcall(vim.fn.delete, trace_path)
+
+  local env = vim.fn.environ()
+  env.DRAW01_PERF_GATE_MODE = gate_mode
+  env.PERF_PLATFORM = platform
+  env.DRAW01_PERF_ARTIFACT_DIR = artifact_dir
+  env.DRAW01_PERF_SUMMARY_PATH = summary_path
+  env.DRAW01_PERF_TRACE_PATH = trace_path
+  env.DRAW01_PERF_THRESHOLD_FILE = threshold_path
+  env.DRAW01_PERF_TRACE_ONLY = "1"
+
+  local result = vim.system({
+    vim.v.progpath,
+    "--headless",
+    "-u",
+    "NONE",
+    "-i",
+    "NONE",
+    "-n",
+    "--cmd",
+    "set runtimepath=" .. vim.o.runtimepath,
+    "-c",
+    "luafile " .. vim.fn.fnameescape(current_script_path()),
+  }, {
+    cwd = vim.fn.getcwd(),
+    env = env,
+    text = true,
+  }):wait()
+
+  if result.code ~= 0 then
+    fail(("flame trace subprocess failed (%s): %s %s"):format(
+      tostring(result.code),
+      tostring(result.stdout or ""),
+      tostring(result.stderr or "")
+    ))
+  end
+
+  if not uv.fs_stat(trace_path) then
+    fail("flame trace artifact missing: " .. trace_path)
+  end
+end
+
+local function run_trace_only_mode()
+  assert_true("flame_profile_start", type(flame_profile_start) == "function")
+  assert_true("flame_profile_stop", type(flame_profile_stop) == "function")
+
+  local state = new_drawer_fixture({
+    show_immediately = false,
+  })
+  local complete = false
+
+  local ok, err = xpcall(function()
+    flame_profile_start()
+    measure_sync_drawer_write(state.drawer.bufnr, function()
+      state.drawer:show(state.winid)
+    end)
+    flame_profile_stop(function()
+      state.cleanup()
+      complete = true
+    end)
+  end, debug.traceback)
+
+  if not ok then
+    state.cleanup()
+    fail(err)
+  end
+
+  local wrote_trace = vim.wait(5000, function()
+    return complete and uv.fs_stat(trace_path) ~= nil
+  end, 10)
+  if not wrote_trace then
+    fail("flame trace timeout: " .. trace_path)
+  end
+
+  vim.cmd("qa!")
 end
 
 local function branch_cache_key(branch_id, kind)
@@ -1157,6 +1272,11 @@ local function run_apply_soak()
   return samples, high_water_kb - baseline_kb, retained_kb
 end
 
+if trace_only then
+  run_trace_only_mode()
+  return
+end
+
 assert_locked_query_counts()
 
 emit("DRAW01_CORPUS", 'connections:2 schemas_per_conn:5 tables_per_schema:100 naming_distribution:"acct_ x400, ledger_ x599, table_003_042 x1" max_hit_query:"' .. LOCKED_QUERY_COHORT.max_hit_query .. '" max_hit_expected_matches:1000 broad_query:"' .. LOCKED_QUERY_COHORT.broad_query .. '" broad_expected_matches:599 secondary_broad_query:"' .. LOCKED_QUERY_COHORT.secondary_broad_query .. '" secondary_broad_expected_matches:400 narrow_query:"' .. LOCKED_QUERY_COHORT.narrow_query .. '" narrow_expected_matches:1 miss_query:"' .. LOCKED_QUERY_COHORT.miss_query .. '" miss_expected_matches:0 empty_restore_expected_nodes:1000')
@@ -1349,7 +1469,8 @@ local function resolve_threshold(platform_name, scenario_name, measurement)
     median_ms = slot.median_ms,
     p95_ms = slot.p95_ms,
     frozen = platform_thresholds.frozen == true,
-    source = slot.source or "missing",
+    median_source = slot.median_ms ~= nil and (platform_thresholds.frozen and "frozen-file" or (slot.source or "file")) or "missing",
+    p95_source = slot.p95_ms ~= nil and (platform_thresholds.frozen and "frozen-file" or (slot.source or "file")) or "missing",
   }
 
   if gate_mode == "blocking" then
@@ -1362,9 +1483,11 @@ local function resolve_threshold(platform_name, scenario_name, measurement)
   if platform_name == platform then
     if resolved.median_ms == nil then
       resolved.median_ms = measurement.median_ms
+      resolved.median_source = "advisory-measured"
     end
     if resolved.p95_ms == nil then
       resolved.p95_ms = measurement.p95_ms
+      resolved.p95_source = "advisory-measured"
     end
   end
 
@@ -1404,7 +1527,57 @@ local function platform_threshold_status(platform_name)
   return verdict and "true" or "false"
 end
 
-emit("DRAW01_LINUX_PERF_THRESHOLD_PASS", platform_threshold_status("linux"))
-emit("DRAW01_MACOS_PERF_THRESHOLD_PASS", platform_threshold_status("macos"))
+local linux_threshold_status = platform_threshold_status("linux")
+local macos_threshold_status = platform_threshold_status("macos")
+
+emit("DRAW01_LINUX_PERF_THRESHOLD_PASS", linux_threshold_status)
+emit("DRAW01_MACOS_PERF_THRESHOLD_PASS", macos_threshold_status)
+
+local real_nui_perf_all_pass = phase4_budgets_pass and platform_threshold_status(platform) == "true"
+emit("DRAW01_REAL_NUI_PERF_ALL_PASS", real_nui_perf_all_pass and "true" or "false")
+
+run_flame_trace_subprocess()
+
+local summary_lines = {
+  "DRAW01 Phase 9 real-nui perf summary",
+  "platform=" .. platform,
+  "gate_mode=" .. gate_mode,
+  "nvim_version=" .. nvim_version_string,
+  "threshold_file=" .. threshold_path,
+  "summary_artifact=" .. summary_path,
+  "flame_trace_artifact=" .. trace_path,
+  "promotion_reminder=Freeze Linux and macOS thresholds in ci/headless/perf_thresholds.lua after four weeks at >=95% pass rate per platform, then flip DRAW01_PERF_GATE_MODE=blocking in .github/workflows/test.yml.",
+  "",
+  "threshold_sources:",
+}
+
+for _, platform_name in ipairs({ "linux", "macos" }) do
+  summary_lines[#summary_lines + 1] = string.format(
+    "%s frozen=%s status=%s",
+    platform_name,
+    ((thresholds[platform_name] or {}).frozen == true) and "true" or "false",
+    platform_name == "linux" and linux_threshold_status or macos_threshold_status
+  )
+  for _, scenario_name in ipairs(additive_scenarios) do
+    local threshold = platform_threshold_markers[platform_name][scenario_name]
+    summary_lines[#summary_lines + 1] = string.format(
+      "  %s median_ms=%s p95_ms=%s median_source=%s p95_source=%s",
+      scenario_name,
+      marker_value(threshold.median_ms),
+      marker_value(threshold.p95_ms),
+      threshold.median_source,
+      threshold.p95_source
+    )
+  end
+end
+
+summary_lines[#summary_lines + 1] = ""
+summary_lines[#summary_lines + 1] = "markers:"
+vim.list_extend(summary_lines, emitted_markers)
+write_lines(summary_path, summary_lines)
+
+if not real_nui_perf_all_pass then
+  fail("DRAW01_REAL_NUI_PERF_ALL_PASS=false")
+end
 
 vim.cmd("qa!")
