@@ -25,6 +25,7 @@ local MAX_COLUMNS_IN_MEMORY = 500
 local SYNC_COLUMN_FILE_LOAD_LIMIT = 100
 local SYNC_COLUMN_FILE_SCAN_LIMIT = 200
 local COLUMN_CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
+local SCHEMA_CACHE_VERSION = 2
 local MATERIALIZATIONS = { "table", "view" }
 
 local CompletionItemKind = {
@@ -1139,6 +1140,17 @@ end
 
 ---@private
 ---@param path string
+function SchemaCache:_remove_legacy_schema_index(path)
+  vim.g.dbee_lsp_schema_cache_legacy_v1_migrated = {
+    conn_id = self.conn_id,
+    path = path,
+    version = SCHEMA_CACHE_VERSION,
+  }
+  os.remove(path)
+end
+
+---@private
+---@param path string
 ---@param value any
 ---@param operation string
 ---@return boolean
@@ -1195,6 +1207,7 @@ function SchemaCache:save_to_disk()
   vim.fn.mkdir(self.cache_dir, "p")
 
   local data = {
+    version = SCHEMA_CACHE_VERSION,
     conn_id = self.conn_id,
     schemas = vim.tbl_keys(self.schemas),
     tables = {},
@@ -1226,6 +1239,27 @@ function SchemaCache:load_from_disk()
     self:_remove_corrupt_file(path, "loading schema index")
     return false
   end
+
+  if type(data) ~= "table" then
+    self:_remove_corrupt_file(path, "loading schema index")
+    return false
+  end
+
+  if data.version == nil then
+    local legacy = self:_normalize_schema_index(data)
+    if legacy then
+      self:_remove_legacy_schema_index(path)
+    else
+      self:_remove_corrupt_file(path, "loading schema index")
+    end
+    return false
+  end
+
+  if data.version ~= SCHEMA_CACHE_VERSION then
+    self:_remove_corrupt_file(path, "loading schema index")
+    return false
+  end
+
   local normalized = self:_normalize_schema_index(data)
   if not normalized then
     self:_remove_corrupt_file(path, "loading schema index")

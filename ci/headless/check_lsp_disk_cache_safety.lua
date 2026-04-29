@@ -34,6 +34,16 @@ local function has_warning(fragment)
   return false
 end
 
+local function warning_count(fragment)
+  local count = 0
+  for _, entry in ipairs(notifications) do
+    if entry.level == vim.log.levels.WARN and entry.msg:find(fragment, 1, true) then
+      count = count + 1
+    end
+  end
+  return count
+end
+
 local root = vim.fn.tempname()
 vim.fn.mkdir(root, "p")
 
@@ -81,6 +91,8 @@ cache:_save_columns_to_disk("S.T", {
 assert_true("schema file written", vim.fn.filereadable(cache:_cache_path()) == 1)
 assert_true("column file written", vim.fn.filereadable(cache:_columns_cache_path("S.T")) == 1)
 assert_eq("no temp residue", temp_residue_count(cache.cache_dir), 0)
+local schema_index = vim.json.decode(read_file(cache:_cache_path()))
+assert_eq("schema cache version written", schema_index.version, 2)
 
 local original = read_file(cache:_cache_path())
 local saved_rename = os.rename
@@ -100,11 +112,41 @@ assert_eq("corrupt schema load returns false", cache:load_from_disk(), false)
 assert_true("corrupt schema warning", has_warning("corrupt cache"))
 assert_true("corrupt schema removed", vim.fn.filereadable(cache:_cache_path()) == 0)
 
+local legacy_cache = new_isolated_cache("disk-legacy-v1")
+local legacy_path = legacy_cache:_cache_path()
+write_file(legacy_path, vim.json.encode({
+  conn_id = "disk-legacy-v1",
+  schemas = { "LEGACY" },
+  tables = {
+    LEGACY = {
+      CUSTOMERS = "table",
+    },
+  },
+}))
+local warn_before_legacy = warning_count("corrupt cache")
+assert_eq("legacy v1 load returns false", legacy_cache:load_from_disk(), false)
+assert_eq("legacy v1 no corrupt warning", warning_count("corrupt cache"), warn_before_legacy)
+assert_true("legacy v1 removed", vim.fn.filereadable(legacy_path) == 0)
+assert_true("legacy v1 migration recorded", vim.g.dbee_lsp_schema_cache_legacy_v1_migrated ~= nil)
+assert_eq("legacy v1 migration conn", vim.g.dbee_lsp_schema_cache_legacy_v1_migrated.conn_id, "disk-legacy-v1")
+
+local malformed_missing_version_cache = new_isolated_cache("disk-malformed-missing-version")
+local malformed_missing_version_path = malformed_missing_version_cache:_cache_path()
+write_file(malformed_missing_version_path, [[{"schemas":"bad","tables":{}}]])
+local warn_before_malformed_missing_version = warning_count("corrupt cache")
+assert_eq("malformed missing-version load returns false", malformed_missing_version_cache:load_from_disk(), false)
+assert_true(
+  "malformed missing-version warning retained",
+  warning_count("corrupt cache") > warn_before_malformed_missing_version
+)
+assert_true("malformed missing-version removed", vim.fn.filereadable(malformed_missing_version_path) == 0)
+
 local malformed_schema_payloads = {
-  [[{"schemas":"bad","tables":{}}]],
+  [[{"version":2,"schemas":"bad","tables":{}}]],
   [[{"schemas":["S"],"tables":"bad"}]],
   [[{"schemas":["S"],"tables":{"S":[]}}]],
   [[{"schemas":[],"tables":{"S":{"T":{"type":"table"}}}}]],
+  [[{"version":3,"schemas":["S"],"tables":{"S":{"T":"table"}}}]],
   [[null]],
   [[]],
 }
@@ -372,6 +414,12 @@ print("LSP11_DISK_DEFERRED_GENERATION_FENCED=true")
 print("LSP11_DISK_DISCOVERY_BOUNDED=true")
 print("LSP11_DISK_DISCOVERY_ADVERSARIAL_OK=true")
 print("LSP11_DISK_DEFERRED_PRUNE_DRAINED=true")
+print("UX13_CACHE_VERSION2_WRITTEN=true")
+print("UX13_CACHE_LEGACY_V1_SILENT=true")
+print("UX13_CACHE_LEGACY_V1_REMOVED=true")
+print("UX13_CACHE_TRUE_CORRUPTION_WARN=true")
+print("UX13_CACHE_TRUE_CORRUPTION_WARN_RETAINED=true")
+print("UX13_CACHE_MIGRATION_ALL_PASS=true")
 
 vim.fn.delete(root, "rf")
 vim.cmd("qa!")
