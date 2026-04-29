@@ -74,6 +74,13 @@ local M = {
   _connection_invalidated_consumer_live = false,
 }
 
+---@param reason string
+local function cancel_active_async(reason)
+  if M._cache and type(M._cache.cancel_async) == "function" then
+    M._cache:cancel_async(reason, { conn_id = M._conn_id })
+  end
+end
+
 ---@param conn_id connection_id|nil
 local function clear_connection_tracking(conn_id)
   if conn_id and conn_id ~= "" then
@@ -236,6 +243,7 @@ function M._on_structure_loaded(handler, data)
   end
 
   if M._client_id and M._cache then
+    cancel_active_async("structure_loaded")
     M._cache:build_from_structure(data.structures)
     M._cache:save_to_disk()
   else
@@ -512,6 +520,7 @@ end
 function M.stop(conn_id, opts)
   opts = opts or {}
   clear_connection_tracking(conn_id)
+  cancel_active_async("stop")
   if state.is_core_loaded() then
     local handler = state.handler()
     local preserve_structure_waiter = false
@@ -601,6 +610,7 @@ function M._flush_connection_invalidations()
   end
 
   if should_rewarm then
+    cancel_active_async("connection_invalidated")
     M._request_structure_refresh(handler, current.id)
   end
 end
@@ -673,6 +683,20 @@ function M.register_events()
     end
   end)
 
+  handler:register_event_listener("structure_children_loaded", function(data)
+    if not data or data.kind ~= "columns" or not data.conn_id then
+      return
+    end
+    if not M._cache or M._conn_id ~= data.conn_id then
+      return
+    end
+    local payload_epoch = tonumber(data.root_epoch) or 0
+    if payload_epoch < handler:get_authoritative_root_epoch(data.conn_id) then
+      return
+    end
+    M._cache:on_columns_loaded(data)
+  end)
+
   handler:register_event_listener("current_connection_changed", function(data)
     if not data then
       return
@@ -694,6 +718,7 @@ function M.register_events()
       return
     end
     if M._conn_id == data.conn_id and M._cache then
+      cancel_active_async("database_selected")
       M._cache:invalidate()
       -- trigger fresh structure load
       M._request_structure_refresh(handler, data.conn_id)
