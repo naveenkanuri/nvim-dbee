@@ -818,6 +818,46 @@ assert_eq("ux13_mixed_zero_db_list", mixed_fixture.counters.list_databases, mixe
 mixed_session:close()
 mixed_fixture.cleanup()
 
+local expanded_mixed_fixture = new_fixture({
+  structure_cache = {
+    ["conn-ready"] = { structures = vim.deepcopy(default_structures) },
+  },
+  source_connections = {
+    source1 = {
+      { id = "conn-ready", name = "Ready Connection", type = "postgres" },
+      { id = "conn-alt", name = "Employees Archive", type = "postgres" },
+    },
+  },
+})
+if expanded_mixed_fixture.drawer.tree:get_node(source_id) then
+  set_current_node(expanded_mixed_fixture.winid, expanded_mixed_fixture.drawer.tree, source_id)
+  expanded_mixed_fixture.drawer:get_actions().expand()
+end
+set_current_node(expanded_mixed_fixture.winid, expanded_mixed_fixture.drawer.tree, conn_id)
+expanded_mixed_fixture.drawer:get_actions().expand()
+set_current_node(expanded_mixed_fixture.winid, expanded_mixed_fixture.drawer.tree, hr_schema_id)
+expanded_mixed_fixture.drawer:get_actions().expand()
+
+clear_notifications()
+local expanded_mixed_async_before = expanded_mixed_fixture.counters.async
+local expanded_mixed_columns_before = expanded_mixed_fixture.counters.columns
+local expanded_mixed_db_before = expanded_mixed_fixture.counters.list_databases
+expanded_mixed_fixture.drawer:get_actions().filter()
+local expanded_mixed_session = stub_filter_sessions[#stub_filter_sessions]
+assert_true("ux13_expanded_mixed_session_created", expanded_mixed_session ~= nil)
+expanded_mixed_session:change("employees")
+local expanded_mixed_names = get_visible_names(expanded_mixed_fixture.drawer.tree)
+assert_true("ux13_expanded_mixed_cached_structure_match", vim.tbl_contains(expanded_mixed_names, "employees"))
+assert_true(
+  "ux13_expanded_mixed_visible_connection_match",
+  vim.tbl_contains(expanded_mixed_names, "Employees Archive  [source1]")
+)
+assert_eq("ux13_expanded_mixed_zero_async", expanded_mixed_fixture.counters.async, expanded_mixed_async_before)
+assert_eq("ux13_expanded_mixed_zero_columns", expanded_mixed_fixture.counters.columns, expanded_mixed_columns_before)
+assert_eq("ux13_expanded_mixed_zero_db_list", expanded_mixed_fixture.counters.list_databases, expanded_mixed_db_before)
+expanded_mixed_session:close()
+expanded_mixed_fixture.cleanup()
+
 session:change("emp")
 local visible_after_emp = get_visible_names(drawer.tree)
 assert_true("a3_collapsed_cached_searchable", vim.tbl_contains(visible_after_emp, "employees"))
@@ -1293,6 +1333,7 @@ vim.notify = saved_notify
 print("UX13_DRAWER_FILTER_CONNECTION_ROOT=true")
 print("UX13_DRAWER_FILTER_SOURCE_BADGE=true")
 print("UX13_DRAWER_FILTER_MIXED_VISIBLE_CACHE=true")
+print("UX13_DRAWER_FILTER_EXPANDED_CACHED_VS_VISIBLE_OK=true")
 print("UX13_DRAWER_FILTER_ZERO_RPC=true")
 print("UX13_DRAWER_FILTER_RESTORE_OK=true")
 print("UX13_DRAWER_FILTER_ALL_PASS=true")
