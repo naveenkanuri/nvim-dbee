@@ -2293,11 +2293,6 @@ function DrawerUI:prepare_close()
   self.active_filter_session_id = nil
   self:cancel_pending_filter_apply()
 
-  if self._reconnect_listener_id then
-    reconnect.unregister_connection_rewritten_listener(self._reconnect_listener_id)
-    self._reconnect_listener_id = nil
-  end
-
   local input = self.filter_input
   if input and type(input.unmount) == "function" then
     input:unmount()
@@ -2307,6 +2302,16 @@ function DrawerUI:prepare_close()
 
   clear_filter_state(self)
   self.winid = nil
+end
+
+---@private
+function DrawerUI:dispose()
+  self:prepare_close()
+
+  if self._reconnect_listener_id then
+    reconnect.unregister_connection_rewritten_listener(self._reconnect_listener_id)
+    self._reconnect_listener_id = nil
+  end
 end
 
 ---@private

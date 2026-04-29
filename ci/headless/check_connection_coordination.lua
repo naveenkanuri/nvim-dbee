@@ -598,7 +598,9 @@ local function new_env(opts)
     if self.lsp and self.lsp.stop then
       pcall(self.lsp.stop)
     end
-    if self.drawer and self.drawer.prepare_close then
+    if self.drawer and self.drawer.dispose then
+      pcall(self.drawer.dispose, self.drawer)
+    elseif self.drawer and self.drawer.prepare_close then
       pcall(self.drawer.prepare_close, self.drawer)
     end
     if self.drawer and self.drawer.bufnr and vim.api.nvim_buf_is_valid(self.drawer.bufnr) then
@@ -1344,6 +1346,38 @@ local function run_database_switch_and_reconnect_contracts()
   print("DCFG01_DATABASE_SWITCH_STALE_DROP_OK=true")
 
   env_reconnect:cleanup()
+
+  local env_reopen_reconnect = new_db_env()
+  local reopen_winid = env_reopen_reconnect.winid
+  env_reopen_reconnect.drawer._manual_refresh_conns["conn-alpha"] = true
+  env_reopen_reconnect.drawer._replay_container_expansions["conn-alpha"] = {
+    ["conn-alpha"] = true,
+  }
+  env_reopen_reconnect.source._specs[1] = {
+    id = "conn-alpha-reopen",
+    name = "Alpha",
+    type = "postgres",
+    url = "postgres://alpha",
+  }
+  env_reopen_reconnect.drawer:prepare_close()
+  Harness.drain()
+  env_reopen_reconnect.drawer:show(reopen_winid)
+  Harness.drain()
+  local reopened_conn, reopened_err = env_reopen_reconnect.dbee.reconnect_current_connection({ notify = false })
+  Harness.drain()
+  assert_eq("reopen_reconnect_err", reopened_err, nil)
+  assert_true("reopen_reconnect_conn_present", reopened_conn ~= nil)
+  assert_eq("reopen_reconnect_conn_id", reopened_conn.id, "conn-alpha-reopen")
+  assert_true("reopen_reconnect_root_migrated", env_reopen_reconnect.drawer._struct_cache.root["conn-alpha-reopen"] ~= nil)
+  assert_eq("reopen_reconnect_root_old_cleared", env_reopen_reconnect.drawer._struct_cache.root["conn-alpha"], nil)
+  assert_eq("reopen_reconnect_root_epoch_same", env_reopen_reconnect.drawer._struct_cache.root_epoch["conn-alpha-reopen"], 2)
+  assert_true("reopen_reconnect_manual_refresh_migrated", env_reopen_reconnect.drawer._manual_refresh_conns["conn-alpha-reopen"] == true)
+  assert_eq("reopen_reconnect_manual_refresh_old_cleared", env_reopen_reconnect.drawer._manual_refresh_conns["conn-alpha"], nil)
+  local reopened_node = env_reopen_reconnect.drawer.tree:get_node("conn-alpha-reopen")
+  assert_true("reopen_reconnect_node_present", reopened_node ~= nil)
+  assert_true("reopen_reconnect_expansion_restored", reopened_node:is_expanded())
+  print("DCFG01_REOPEN_RECONNECT_LISTENER_OK=true")
+  env_reopen_reconnect:cleanup()
 
   local env_public_reconnect = new_db_env()
   seed_drawer_root(env_public_reconnect, "conn-alpha", 2)

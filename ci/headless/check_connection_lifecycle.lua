@@ -444,7 +444,9 @@ local function new_env(opts)
   }
 
   function env:cleanup()
-    if self.drawer and self.drawer.prepare_close then
+    if self.drawer and self.drawer.dispose then
+      pcall(self.drawer.dispose, self.drawer)
+    elseif self.drawer and self.drawer.prepare_close then
       pcall(self.drawer.prepare_close, self.drawer)
     end
     if self.drawer and self.drawer.bufnr and vim.api.nvim_buf_is_valid(self.drawer.bufnr) then

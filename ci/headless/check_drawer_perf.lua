@@ -537,7 +537,11 @@ local function new_drawer_fixture(opts)
 
   local function cleanup()
     if drawer and drawer.bufnr and vim.api.nvim_buf_is_valid(drawer.bufnr) then
-      pcall(drawer.prepare_close, drawer)
+      if drawer.dispose then
+        pcall(drawer.dispose, drawer)
+      else
+        pcall(drawer.prepare_close, drawer)
+      end
       pcall(vim.api.nvim_buf_delete, drawer.bufnr, { force = true })
     end
     close_window_and_buffer(host_buf, winid)

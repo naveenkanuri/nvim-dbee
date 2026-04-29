@@ -761,7 +761,9 @@ local function new_env(opts)
   end
 
   function env:cleanup()
-    if self.drawer and self.drawer.prepare_close then
+    if self.drawer and self.drawer.dispose then
+      pcall(self.drawer.dispose, self.drawer)
+    elseif self.drawer and self.drawer.prepare_close then
       pcall(self.drawer.prepare_close, self.drawer)
     end
     for _, popup in ipairs(self.runtime.active_popups or {}) do
