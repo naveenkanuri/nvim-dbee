@@ -220,3 +220,75 @@ Phase 6 -> Phase 7 -> Phase 8. Phase 9 depends on Phase 6 and can run before or 
 - DCFG-02: Should saved passwords be written literally into `connections.json` when entered in the wizard, or should the wizard default to/template environment placeholders?
 - DCFG-02: If Oracle Cloud Wallet service discovery cannot parse `tnsnames.ora`, should the wizard allow manual service entry or require fixing the wallet first?
 - DCFG-01: Should source-file editing remain reachable from a secondary action outside the drawer after notes/source utility rows are removed?
+
+## Milestone v1.2: LSP Optimization
+
+**Goal:** Optimize the built-in dbee LSP while preserving the in-process singleton-per-current-connection architecture and the v1.1 handler-owned lifecycle contracts.
+
+**Roadmap artifact:** `.planning/milestones/v1.2-roadmap.md`
+
+**Requirements:** LSP-PERF-01, LSP-OPT-01, LSP-CORR-01, LSP-FEAT-01 (conditional)
+
+**Phase ordering:** Phase 10 -> Phase 11 -> conditional Phase 12.
+
+### Phase 10: LSP Perf Harness
+
+**Goal**: Stand up a `benchmark.nvim`-driven headless LSP perf harness before changing behavior.
+**Depends on**: Phase 9
+**Requirements**: LSP-PERF-01
+**Success Criteria** (what must be TRUE):
+  1. `make perf-lsp` runs locally and uses the same pinned plugin bootstrap pattern as the Phase 9 `make perf` path.
+  2. CI has Linux and macOS advisory LSP perf lanes with grep-friendly markers, median/p95 reporting, and uploaded artifacts.
+  3. The harness measures cold LSP start, table completion with 100/1000/10000-table caches, cold `column_of_table` completion, diagnostics over 100/1000/10000-line buffers, and alias parsing scaling.
+  4. Interactive `bench.lua` remains available, but relevant steps are converted into deterministic headless benchmark scenarios.
+**Plans**: TBD by `$gsd-plan-phase 10`
+
+**Research bullets:**
+- Reuse `ci/headless/perf_bootstrap.mk`, pinned `benchmark.nvim`, pinned `profile.nvim`, and `ci/headless/perf_thresholds.lua` patterns from Phase 9.
+- Keep the initial lane advisory, with advisory-to-blocking promotion after four weeks at `>=95%` pass rate per platform.
+- Avoid live database dependencies; use synthetic caches and fake handler surfaces for blocking evidence.
+
+### Phase 11: LSP Perf Optimization And Correctness
+
+**Goal**: Remove completion/diagnostics/cache hot-path hazards and fix real diagnostics correctness bugs surfaced by research.
+**Depends on**: Phase 10
+**Requirements**: LSP-OPT-01, LSP-CORR-01
+**Success Criteria** (what must be TRUE):
+  1. Cold-cache alias/table dot completion returns immediately, warms columns asynchronously, dedupes in-flight work, and sets `isIncomplete = true` only for truthful in-flight misses.
+  2. `SchemaCache` precomputes sorted completion arrays and case-folded lookup indexes, caps in-memory columns with a 500-table LRU, and prunes disk column-cache files older than 30 days on startup.
+  3. `didChange` diagnostics are debounced by default at 250ms, with save-only/off config options.
+  4. Diagnostics support multi-line `FROM`/`JOIN`, fix multi-JOIN-per-line range placement, and validate schema-qualified table references by schema.
+  5. Disk cache writes are atomic temp-file-plus-rename writes and cache read/write failures are logged instead of silently swallowed.
+  6. `bench.lua` uses `vim.uv` instead of `vim.loop`.
+**Plans**: TBD by `$gsd-plan-phase 11`
+
+**Research bullets:**
+- Adopt `nvim-nio` as a peer dependency for future/coroutine orchestration, but use it over the existing `connection_get_columns_async` / `structure_children_loaded` event surface rather than wrapping synchronous `connection_get_columns()`.
+- Preserve singleton-per-current-connection LSP behavior for v1.2; multi-client/per-buffer connection models are deferred.
+- Keep the built-in dbee LSP as the canonical completion surface while preserving external `cmp-dbee` compatibility.
+
+### Phase 12: LSP Feature Gap Closure
+
+**Goal**: Add high-value LSP features that can be supported truthfully from schema/cache state.
+**Depends on**: Phase 11
+**Requirements**: LSP-FEAT-01
+**Status**: Conditional. Decide at Phase 11 ship.
+**Success Criteria** (what must be TRUE):
+  1. If Phase 10+11 finish with budget headroom and no major regressions, v1.2 may add completion resolve/details, hover, schema refresh/reload code actions, and schema object symbols.
+  2. Semantic tokens, inlay hints, `vim.lsp.config()` migration, and multi-client LSP architecture remain deferred unless explicitly re-scoped.
+**Plans**: TBD by `$gsd-plan-phase 12` if activated
+
+**Research bullets:**
+- Feature work must remain additive and must not reopen Phase 10/11 perf and correctness locks.
+- Prefer cache-backed, truthful features over parser-heavy SQL intelligence.
+
+## v1.2 Progress
+
+**Execution Order:**
+Phase 10 -> Phase 11. Phase 12 is conditional at Phase 11 ship.
+
+| Phase | Plans Complete | Status | Completed |
+|-------|----------------|--------|-----------|
+| 10. LSP Perf Harness | 0/TBD | Pending | - |
+| 11. LSP Perf Optimization And Correctness | 0/TBD | Pending | - |
+| 12. LSP Feature Gap Closure | 0/TBD | Conditional | - |

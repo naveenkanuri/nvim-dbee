@@ -67,6 +67,14 @@ Requirements for the Drawer Connection Config + Structure Perf + Notes UX milest
 
 - [ ] **PERF-01**: User can rely on DRAW-01 release readiness because headless performance tests load real `nui.nvim` from `RUNNER_TEMP/nui.nvim` and enforce realistic frame-budget metrics instead of stub-only smoke evidence
 
+## v1.2 Requirements
+
+Requirements for the built-in dbee LSP optimization milestone.
+
+### LSP Performance Harness
+
+- [ ] **LSP-PERF-01**: User can rely on built-in dbee LSP optimization work because Phase 10 provides deterministic headless macOS and Linux perf evidence for production LSP startup, completion, diagnostics, alias parsing, schema-cache build, and disk-cache load/save, using pinned Phase 9 perf infrastructure, `LSP01_*` markers, semantic sentinels, and advisory-to-blocking threshold persistence.
+
 ## v2 Requirements
 
 Deferred to future milestone. Tracked but not in current roadmap.
@@ -126,12 +134,14 @@ Which phases cover which requirements. Updated during roadmap creation.
 | STRUCT-01 | Phase 6 | Pending |
 | NOTES-01 | Phase 6 | Pending |
 | PERF-01 | Phase 9 | Pending |
+| LSP-PERF-01 | Phase 10 | Pending |
 
 **Coverage:**
 - v1.0 requirements: 18 total, 18 complete
 - v1.1 requirements: 5 total, 5 mapped
+- v1.2 requirements: 1 total, 1 mapped
 - Unmapped: 0
 
 ---
 *Requirements defined: 2026-03-05*
-*Last updated: 2026-04-27 after v1.1 milestone definition*
+*Last updated: 2026-04-29 after v1.2 milestone definition*
