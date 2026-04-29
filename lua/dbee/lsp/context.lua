@@ -93,6 +93,80 @@ local function get_buffer_text_before_cursor(bufnr, line, col)
   return table.concat(lines, "\n")
 end
 
+---Split SQL text into statement chunks while preserving absolute positions.
+---@param text string
+---@return { text: string, start: { line: integer, character: integer } }[]
+function M.extract_statements(text)
+  local statements = {}
+  local current = {}
+  local start_line, start_character = 0, 0
+  local line, character = 0, 0
+  local has_content = false
+
+  local function push_statement()
+    local statement_text = table.concat(current)
+    if statement_text:match("%S") then
+      statements[#statements + 1] = {
+        text = statement_text,
+        start = {
+          line = start_line,
+          character = start_character,
+        },
+      }
+    end
+    current = {}
+    has_content = false
+  end
+
+  for i = 1, #text do
+    local ch = text:sub(i, i)
+    if not has_content and not ch:match("%s") then
+      start_line = line
+      start_character = character
+      has_content = true
+    end
+
+    if ch == ";" then
+      push_statement()
+    else
+      current[#current + 1] = ch
+    end
+
+    if ch == "\n" then
+      line = line + 1
+      character = 0
+    else
+      character = character + 1
+    end
+  end
+
+  push_statement()
+  return statements
+end
+
+---Convert a 1-based byte offset inside a statement to an absolute position.
+---@param statement { text: string, start: { line: integer, character: integer } }
+---@param offset integer
+---@return { line: integer, character: integer }
+function M.statement_offset_to_position(statement, offset)
+  local line = statement.start.line
+  local character = statement.start.character
+  local text = statement.text:sub(1, math.max(0, offset - 1))
+  for i = 1, #text do
+    local ch = text:sub(i, i)
+    if ch == "\n" then
+      line = line + 1
+      character = 0
+    else
+      character = character + 1
+    end
+  end
+  return {
+    line = line,
+    character = character,
+  }
+end
+
 --- Parse alias map from the current statement up to the cursor.
 --- Scans FROM/JOIN/UPDATE/MERGE table aliases and prefers the latest binding.
 ---@param bufnr integer
