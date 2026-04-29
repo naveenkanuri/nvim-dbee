@@ -842,7 +842,7 @@ local function reset_column_fetch_tracking(handler)
 end
 
 local function register_column_miss_completion()
-  local measured_state = nil
+  local shared_state = nil
   local fetch_deltas = {}
   local expected_deltas = { 1, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
   local query = "SELECT * FROM SCHEMA_001.TABLE_000001 t WHERE t."
@@ -860,21 +860,18 @@ local function register_column_miss_completion()
     threshold_key = "completion_column_miss_sync",
     corpus = "tables:100,context:column-miss-sync,alias:t,fetch_deltas:1-then-0",
     after_warmup_before_measured = function()
-      if measured_state then
-        completion_after(measured_state)
+      if not shared_state then
+        shared_state = make_miss_state()
       end
-      measured_state = make_miss_state()
-      reset_column_fetch_tracking(measured_state.cache.handler)
+      shared_state.cache.columns = {}
+      reset_column_fetch_tracking(shared_state.cache.handler)
       fetch_deltas = {}
     end,
-    before = function(iteration)
-      if iteration <= WARMUP_COUNT then
-        return make_miss_state()
+    before = function()
+      if not shared_state then
+        shared_state = make_miss_state()
       end
-      if not measured_state then
-        measured_state = make_miss_state()
-      end
-      return measured_state
+      return shared_state
     end,
     run = function(state, finish, iteration)
       local handler = state.cache.handler
@@ -888,11 +885,9 @@ local function register_column_miss_completion()
       finish(elapsed_ns)
     end,
     after = function(state, iteration)
-      if iteration <= WARMUP_COUNT then
+      if iteration == WARMUP_COUNT + MEASURED_COUNT then
         completion_after(state)
-      elseif iteration == WARMUP_COUNT + MEASURED_COUNT then
-        completion_after(state)
-        measured_state = nil
+        shared_state = nil
       end
     end,
     on_complete = function()
