@@ -15,6 +15,10 @@
 ---@field private cache_dir string directory for disk cache
 local SchemaCache = {}
 
+local MAX_COLUMNS_IN_MEMORY = 500
+local SYNC_COLUMN_FILE_LOAD_LIMIT = 100
+local COLUMN_CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
+
 local CompletionItemKind = {
   Field = 5,
   Class = 7,
@@ -60,6 +64,13 @@ function SchemaCache:new(handler, conn_id)
     schema_lookup = {},
     table_lookup_by_schema = {},
     table_lookup_global = {},
+    column_lru = {},
+    column_touch_clock = 0,
+    column_evictions = 0,
+    disk_pruned = 0,
+    sync_column_files_loaded = 0,
+    deferred_column_files_scheduled = 0,
+    deferred_disk_work_scheduled = false,
     cache_dir = cache_dir,
   }
   setmetatable(o, self)
@@ -211,6 +222,56 @@ function SchemaCache:_drop_column_index(key)
 end
 
 ---@private
+---@return integer
+function SchemaCache:_column_entry_count()
+  return vim.tbl_count(self.columns)
+end
+
+---@private
+---@param key string
+function SchemaCache:_touch_column(key)
+  self.column_touch_clock = (self.column_touch_clock or 0) + 1
+  self.column_lru[key] = self.column_touch_clock
+end
+
+---@private
+function SchemaCache:_evict_columns_if_needed()
+  while self:_column_entry_count() > MAX_COLUMNS_IN_MEMORY do
+    local evict_key, evict_clock = nil, nil
+    for key, clock in pairs(self.column_lru) do
+      if self.columns[key] and (not evict_clock or clock < evict_clock) then
+        evict_key = key
+        evict_clock = clock
+      end
+    end
+
+    if not evict_key then
+      return
+    end
+
+    self.columns[evict_key] = nil
+    self.column_lru[evict_key] = nil
+    self:_drop_column_index(evict_key)
+    self.column_evictions = (self.column_evictions or 0) + 1
+  end
+end
+
+---@private
+---@param key string
+---@param cols Column[]
+function SchemaCache:_store_columns(key, cols)
+  self.columns[key] = cols
+  self:_touch_column(key)
+
+  local schema, name = key:match("^(.-)%.(.+)$")
+  if schema and name then
+    self:_update_column_index(schema, name)
+  end
+
+  self:_evict_columns_if_needed()
+end
+
+---@private
 ---@param schema string
 ---@param table_name string
 function SchemaCache:_update_column_index(schema, table_name)
@@ -246,6 +307,108 @@ function SchemaCache:_rebuild_column_indexes()
       self:_update_column_index(schema, name)
     end
   end
+end
+
+---@private
+---@param path string
+---@return table?
+function SchemaCache:_file_stat(path)
+  local uv = vim.uv or vim.loop
+  return uv and uv.fs_stat(path) or nil
+end
+
+---@private
+---@param path string
+---@param stat table?
+---@param now integer
+---@return boolean
+function SchemaCache:_prune_if_old(path, stat, now)
+  if not stat or not stat.mtime or not stat.mtime.sec then
+    return false
+  end
+  if now - stat.mtime.sec <= COLUMN_CACHE_TTL_SECONDS then
+    return false
+  end
+  if os.remove(path) then
+    self.disk_pruned = (self.disk_pruned or 0) + 1
+    return true
+  end
+  return false
+end
+
+---@private
+---@return table[]
+function SchemaCache:_column_cache_files()
+  local prefix = self.conn_id .. "_cols_"
+  local pattern = self.cache_dir .. "/" .. prefix .. "*.json"
+  local files = {}
+  for _, path in ipairs(vim.fn.glob(pattern, false, true)) do
+    local stat = self:_file_stat(path)
+    files[#files + 1] = {
+      path = path,
+      stat = stat,
+      mtime = stat and stat.mtime and stat.mtime.sec or 0,
+    }
+  end
+  table.sort(files, function(a, b)
+    return a.mtime > b.mtime
+  end)
+  return files
+end
+
+---@private
+---@param path string
+---@param prefix string
+---@return boolean
+function SchemaCache:_load_column_file(path, prefix)
+  local f = io.open(path, "r")
+  if not f then
+    return false
+  end
+
+  local content = f:read("*a")
+  f:close()
+  local ok, cols = pcall(vim.json.decode, content)
+  if not ok or not cols then
+    return false
+  end
+
+  local fname = vim.fn.fnamemodify(path, ":t:r")
+  local key = fname:sub(#prefix + 1)
+  self:_store_columns(key, cols)
+  return true
+end
+
+---@private
+---@param files table[]
+---@param start_index integer
+function SchemaCache:_schedule_deferred_column_work(files, start_index)
+  if start_index > #files then
+    return
+  end
+
+  self.deferred_column_files_scheduled = #files - start_index + 1
+  self.deferred_disk_work_scheduled = true
+  local prefix = self.conn_id .. "_cols_"
+  local index = start_index
+  local now = os.time()
+  local chunk_size = SYNC_COLUMN_FILE_LOAD_LIMIT
+
+  local function step()
+    local last = math.min(index + chunk_size - 1, #files)
+    for i = index, last do
+      local entry = files[i]
+      if not self:_prune_if_old(entry.path, entry.stat, now) then
+        self:_load_column_file(entry.path, prefix)
+      end
+    end
+    index = last + 1
+    if index <= #files then
+      vim.schedule(step)
+    end
+  end
+
+  vim.schedule(step)
 end
 
 ---@private
@@ -402,27 +565,44 @@ end
 --- Load all cached column files for this connection from disk.
 ---@private
 function SchemaCache:_load_columns_from_disk()
+  self.sync_column_files_loaded = 0
+  self.deferred_column_files_scheduled = 0
+  self.deferred_disk_work_scheduled = false
+
   local prefix = self.conn_id .. "_cols_"
-  local pattern = self.cache_dir .. "/" .. prefix .. "*.json"
-  local files = vim.fn.glob(pattern, false, true)
-  for _, path in ipairs(files) do
-    local f = io.open(path, "r")
-    if f then
-      local content = f:read("*a")
-      f:close()
-      local ok, cols = pcall(vim.json.decode, content)
-      if ok and cols then
-        -- extract key from filename
-        local fname = vim.fn.fnamemodify(path, ":t:r") -- remove dir and .json
-        local key = fname:sub(#prefix + 1)
-        self.columns[key] = cols
-        local schema, name = key:match("^(.-)%.(.+)$")
-        if schema and name then
-          self:_update_column_index(schema, name)
-        end
+  local files = self:_column_cache_files()
+  local now = os.time()
+  local sync_limit = math.min(#files, SYNC_COLUMN_FILE_LOAD_LIMIT)
+  for i = 1, sync_limit do
+    local entry = files[i]
+    if not self:_prune_if_old(entry.path, entry.stat, now) then
+      if self:_load_column_file(entry.path, prefix) then
+        self.sync_column_files_loaded = self.sync_column_files_loaded + 1
       end
     end
   end
+
+  self:_schedule_deferred_column_work(files, sync_limit + 1)
+end
+
+--- Schedule column disk pruning without running from completion handlers.
+function SchemaCache:schedule_disk_prune()
+  local files = self:_column_cache_files()
+  self:_schedule_deferred_column_work(files, 1)
+end
+
+--- Get test-visible cache stats.
+---@return table
+function SchemaCache:get_stats()
+  return {
+    column_entry_count = self:_column_entry_count(),
+    column_evictions = self.column_evictions or 0,
+    disk_pruned = self.disk_pruned or 0,
+    sync_column_files_loaded = self.sync_column_files_loaded or 0,
+    deferred_column_files_scheduled = self.deferred_column_files_scheduled or 0,
+    max_columns_in_memory = MAX_COLUMNS_IN_MEMORY,
+    sync_column_file_load_limit = SYNC_COLUMN_FILE_LOAD_LIMIT,
+  }
 end
 
 -- ── Public API ──────────────────────────────────────────────
@@ -503,6 +683,7 @@ function SchemaCache:get_columns(schema, table_name, opts)
 
   local key = table_key(schema, table_name)
   if self.columns[key] then
+    self:_touch_column(key)
     return self.columns[key]
   end
 
@@ -511,6 +692,7 @@ function SchemaCache:get_columns(schema, table_name, opts)
     table_name = actual_table
     key = table_key(schema, table_name)
     if self.columns[key] then
+      self:_touch_column(key)
       return self.columns[key]
     end
   end
@@ -524,6 +706,7 @@ function SchemaCache:get_columns(schema, table_name, opts)
       table_name = default_table
       key = table_key(schema, table_name)
       if self.columns[key] then
+        self:_touch_column(key)
         return self.columns[key]
       end
     end
@@ -535,6 +718,7 @@ function SchemaCache:get_columns(schema, table_name, opts)
     tbl_info = (self.tables[schema] or {})[table_name]
     key = table_key(schema, table_name)
     if tbl_info and self.columns[key] then
+      self:_touch_column(key)
       return self.columns[key]
     end
   end
@@ -640,8 +824,7 @@ function SchemaCache:get_columns(schema, table_name, opts)
   self:_rebuild_structure_indexes()
 
   key = table_key(resolved_schema, resolved_table)
-  self.columns[key] = cols
-  self:_update_column_index(resolved_schema, resolved_table)
+  self:_store_columns(key, cols)
   self:_save_columns_to_disk(key, cols)
   return cols
 end
@@ -685,6 +868,8 @@ function SchemaCache:invalidate()
   self.schemas = {}
   self.tables = {}
   self.columns = {}
+  self.column_lru = {}
+  self.column_touch_clock = 0
   self:_reset_indexes()
 end
 
