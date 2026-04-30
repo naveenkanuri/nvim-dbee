@@ -85,7 +85,7 @@ config.default = {
       { key = "e", mode = "n", action = "edit_connection" },
       { key = "dd", mode = "n", action = "delete_connection" },
       { key = "t", mode = "n", action = "test_connection" },
-      { key = "<C-CR>", mode = "n", action = "activate_connection" },
+      { key = "A", mode = "n", action = "activate_connection" },
       { key = "R", mode = "n", action = "refresh" },
       { key = "<CR>", mode = "n", action = "toggle" },
       -- generate call template for procedure/function
@@ -227,6 +227,15 @@ config.default = {
         icon = "",
         icon_highlight = "NonText",
         text_highlight = "",
+      },
+    },
+
+    -- connection wizard defaults: pre-fill values per mode for new connections.
+    -- Path-style fields are passed through `vim.fn.expand` so `~` works.
+    wizard = {
+      defaults = {
+        -- per-mode defaults; example:
+        -- oracle_cloud_wallet = { wallet_path = "~/Downloads/Wallet_X.zip", service_alias = "DB_low" },
       },
     },
   },

@@ -244,8 +244,12 @@ end
 
 ---@param conn ConnectionParams
 ---@param source_meta { name?: string, id: string }
+---@param show_source_badge boolean
 ---@return string
-local function connection_display_name(conn, source_meta)
+local function connection_display_name(conn, source_meta, show_source_badge)
+  if not show_source_badge then
+    return tostring(conn.name or conn.id)
+  end
   local source_name = source_meta.name or source_meta.id
   return string.format("%s  [%s]", tostring(conn.name or conn.id), tostring(source_name or ""))
 end
@@ -349,7 +353,10 @@ local function handler_real_nodes(handler, result, structure_cache, opts)
   ---@type DrawerUINode[]
   local nodes = {}
 
-  for _, source in ipairs(handler:get_sources()) do
+  local sources = handler:get_sources()
+  local show_source_badge = #sources > 1
+
+  for _, source in ipairs(sources) do
     local source_id = source:name()
     local source_meta = build_source_meta(source, source_id)
 
@@ -357,7 +364,7 @@ local function handler_real_nodes(handler, result, structure_cache, opts)
     for _, conn in ipairs(handler:source_get_connections(source_id)) do
       local node = NuiTree.Node {
         id = conn.id,
-        name = connection_display_name(conn, source_meta),
+        name = connection_display_name(conn, source_meta, show_source_badge),
         raw_name = conn.name,
         type = "connection",
         lazy_children = function()
@@ -420,6 +427,16 @@ function M.separator_node()
     id = "__separator_node__" .. tostring(math.random()),
     name = "",
     type = "separator",
+  } --[[@as DrawerUINode]]
+end
+
+---@param text string
+---@return DrawerUINode
+function M.header_node(text)
+  return NuiTree.Node {
+    id = "__header_node__" .. tostring(math.random()),
+    name = text,
+    type = "header",
   } --[[@as DrawerUINode]]
 end
 

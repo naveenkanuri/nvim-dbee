@@ -7,7 +7,7 @@ local M = {}
 ---@alias menu_input fun(opts?: { title: string, default: string, on_confirm: fun(value: string) })
 
 -- Pick items from a list.
----@param opts { relative_winid: integer, items: string[], on_confirm: fun(item: string), on_yank: fun(item:string), title: string, mappings: key_mapping[], winhighlight?: string }
+---@param opts { relative_winid: integer, items: string[], on_confirm: fun(item: string), on_yank: fun(item:string), title: string, mappings: key_mapping[], winhighlight?: string, zindex?: integer }
 function M.select(opts)
   opts = opts or {}
   if not opts.relative_winid or not vim.api.nvim_win_is_valid(opts.relative_winid) then
@@ -29,7 +29,7 @@ function M.select(opts)
     size = {
       width = width,
     },
-    zindex = 160,
+    zindex = opts.zindex or 160,
     border = {
       style = { "─", "─", "─", "", "─", "─", "─", "" },
       text = {
@@ -87,7 +87,7 @@ function M.select(opts)
 end
 
 -- Ask for input.
----@param opts { relative_winid: integer, default_value: string, on_confirm: fun(item: string), title: string, mappings: key_mapping[], winhighlight?: string }
+---@param opts { relative_winid: integer, default_value: string, on_confirm: fun(item: string), title: string, mappings: key_mapping[], winhighlight?: string, zindex?: integer }
 function M.input(opts)
   if not opts.relative_winid or not vim.api.nvim_win_is_valid(opts.relative_winid) then
     error("no window id provided")
@@ -108,7 +108,7 @@ function M.input(opts)
     size = {
       width = width,
     },
-    zindex = 160,
+    zindex = opts.zindex or 160,
     border = {
       style = { "─", "─", "─", "", "─", "─", "─", "" },
       text = {
@@ -157,7 +157,9 @@ function M.filter(opts)
     error("no window id provided")
   end
 
-  local width = vim.api.nvim_win_get_width(opts.relative_winid)
+  local drawer_width = vim.api.nvim_win_get_width(opts.relative_winid)
+  -- Narrow filter popup so the connection list behind it remains visible.
+  local input_width = math.max(12, math.min(drawer_width - 4, 24))
   local input
   local manual_submit_value = nil
 
@@ -171,16 +173,14 @@ function M.filter(opts)
       col = 0,
     },
     size = {
-      width = width,
+      width = input_width,
     },
     zindex = 160,
     border = {
-      style = { "─", "─", "─", "", "─", "─", "─", "" },
+      style = "rounded",
       text = {
-        top = " Filter ",
+        top = " / ",
         top_align = "left",
-        bottom = opts.coverage_label,
-        bottom_align = "right",
       },
     },
     win_options = {

@@ -1476,6 +1476,7 @@ function DrawerUI:new(handler, editor, result, opts)
     mappings = opts.mappings or {},
     candies = candies,
     disable_help = opts.disable_help or false,
+    wizard_defaults = (opts.wizard and opts.wizard.defaults) or {},
     current_conn_id = current_conn.id,
     current_note_id = current_note.id,
     pending_generated_calls = {},
@@ -2363,6 +2364,11 @@ function DrawerUI:create_tree(bufnr)
         return line
       end
 
+      if node.type == "header" then
+        line:append(node.name, "Title")
+        return line
+      end
+
       line:append(string.rep("  ", node:get_depth() - 1))
 
       if node:has_children() or node.lazy_children then
@@ -2500,7 +2506,13 @@ function DrawerUI:schedule_filter_apply(session_id, filter_text)
   end
 
   if self.filter_debounce_ms <= 0 then
-    self:apply_filter(filter_text)
+    -- Always schedule to escape any textlock context (e.g. nui.input mount → prompt_setprompt → on_change).
+    vim.schedule(function()
+      if session_id ~= self.active_filter_session_id then
+        return
+      end
+      self:apply_filter(filter_text)
+    end)
     return
   end
 
@@ -2636,6 +2648,7 @@ function DrawerUI:_build_connection_wizard_seed(source_meta, conn_id, conn, defa
       name = params_source.name or "",
       type = params_source.type or defaults.type or "",
       url = params_source.url or defaults.url or "",
+      schema_filter = params_source.schema_filter and vim.deepcopy(params_source.schema_filter) or nil,
     },
     wizard = record and type(record.wizard) == "table" and vim.deepcopy(record.wizard) or nil,
   }
@@ -2655,6 +2668,7 @@ function DrawerUI:_open_connection_wizard(source_meta, opts)
     seed = opts.seed,
     handler = self.handler,
     conn_id = opts.conn_id,
+    defaults = self.wizard_defaults,
     on_submit = function(submission)
       local err = self.handler:submit_connection_wizard({
         source_id = source_meta.id,
@@ -3395,34 +3409,19 @@ function DrawerUI:get_actions()
             return
           end
 
-          local snapshot = self.filter_restore_snapshot
-          local expansion_state = self.pre_filter_expansion
-          local restore_cursor = self.pre_filter_cursor
           self.active_filter_session_id = nil
           self:cancel_pending_filter_apply()
 
+          -- Keep filtered tree as committed view. Land cursor on currently-selected match.
           local selected_node = self.tree:get_node()
           local selected_id = selected_node and selected_node:get_id()
-          local selected_path = selected_path_ids(self.tree, selected_node)
 
           clear_filter_state(self)
-          self:render_restore_snapshot(snapshot, expansion_state, restore_cursor)
 
-          if selected_id then
-            self.cached_render_snapshot = nil
-            local exact, resolved_id = materialize_selected_path(self, self.tree, selected_path)
-            self.tree:render()
-
-            local target_id = exact and selected_id or resolved_id
-            if target_id and self.winid and vim.api.nvim_win_is_valid(self.winid) then
-              local row = visible_node_row(self.tree, target_id)
-              if row then
-                pcall(vim.api.nvim_win_set_cursor, self.winid, { row, 0 })
-              end
-            end
-
-            if selected_id and not exact then
-              utils.log("warn", "Drawer filter submit fell back to the nearest restored ancestor")
+          if selected_id and self.winid and vim.api.nvim_win_is_valid(self.winid) then
+            local row = visible_node_row(self.tree, selected_id)
+            if row then
+              pcall(vim.api.nvim_win_set_cursor, self.winid, { row, 0 })
             end
           end
         end,
@@ -3523,6 +3522,14 @@ function DrawerUI:refresh()
 
   local nodes = hydrate(render_model)
 
+  -- Prepend header for visual orientation.
+  local header_offset = 0
+  if #nodes > 0 then
+    table.insert(nodes, 1, convert.separator_node())
+    table.insert(nodes, 1, convert.header_node(" Connections"))
+    header_offset = 2
+  end
+
   if not self.disable_help then
     if #nodes > 0 then
       table.insert(nodes, convert.separator_node())
@@ -3533,6 +3540,11 @@ function DrawerUI:refresh()
   self.tree:set_nodes(nodes)
   restore_expansion_state(self, exp)
   self.tree:render()
+
+  -- Land cursor on first connection (after header + separator).
+  if header_offset > 0 and self.winid and vim.api.nvim_win_is_valid(self.winid) then
+    pcall(vim.api.nvim_win_set_cursor, self.winid, { header_offset + 1, 0 })
+  end
 end
 
 ---@param winid integer

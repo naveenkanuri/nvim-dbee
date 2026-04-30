@@ -114,6 +114,7 @@ perf-lsp: perf-bootstrap
 	  check_notes_picker.lua \
 	  check_connection_lifecycle.lua \
 	  check_connection_coordination.lua \
+	  check_wizard_input_visible.lua \
 	  check_connection_wizard.lua \
 	  check_filesource_persistence.lua; \
 	do \

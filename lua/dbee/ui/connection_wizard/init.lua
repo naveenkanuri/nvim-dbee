@@ -10,6 +10,16 @@ local M = {}
 
 local WIZARD_WINHIGHLIGHT =
   "Normal:NormalFloat,NormalNC:NormalFloat,EndOfBuffer:NormalFloat,FloatBorder:FloatBorder,FloatTitle:FloatTitle,CursorLine:Visual,Search:IncSearch"
+local WIZARD_INPUT_WINHIGHLIGHT =
+  "Normal:DbeeWizardInput,NormalNC:DbeeWizardInput,EndOfBuffer:DbeeWizardInput,FloatBorder:FloatBorder,FloatTitle:FloatTitle,CursorLine:Visual,Search:IncSearch"
+
+local WIZARD_MENU_MAPPINGS = {
+  { key = "<CR>", mode = "n", action = "menu_confirm" },
+  { key = "<CR>", mode = "i", action = "menu_confirm" },
+  { key = "<Esc>", mode = "n", action = "menu_close" },
+  { key = "<Esc>", mode = "i", action = "menu_close" },
+  { key = "q", mode = "n", action = "menu_close" },
+}
 
 local TYPE_OPTIONS = {
   { label = "Oracle", value = "oracle" },
@@ -107,6 +117,58 @@ end
 
 local function deepcopy(value)
   return vim.deepcopy(value)
+end
+
+local function contrast_fg(bg)
+  if type(bg) ~= "number" then
+    return vim.o.background == "light" and 0x202020 or 0xeeeeee
+  end
+
+  local red = math.floor(bg / 0x10000) % 0x100
+  local green = math.floor(bg / 0x100) % 0x100
+  local blue = bg % 0x100
+  local luminance = (0.299 * red) + (0.587 * green) + (0.114 * blue)
+  return luminance > 128 and 0x202020 or 0xeeeeee
+end
+
+local function contrast_cterm_fg(bg)
+  if type(bg) ~= "number" then
+    return vim.o.background == "light" and 0 or 15
+  end
+
+  local red = math.floor(bg / 0x10000) % 0x100
+  local green = math.floor(bg / 0x100) % 0x100
+  local blue = bg % 0x100
+  local luminance = (0.299 * red) + (0.587 * green) + (0.114 * blue)
+  return luminance > 128 and 0 or 15
+end
+
+local function visible_fg(preferred, bg, fallback)
+  if type(preferred) == "number" and preferred ~= bg then
+    return preferred
+  end
+  if type(fallback) == "number" and fallback ~= bg then
+    return fallback
+  end
+  return contrast_fg(bg)
+end
+
+local function ensure_wizard_input_highlights()
+  local normal = vim.api.nvim_get_hl(0, { name = "Normal", link = false })
+  local normal_float = vim.api.nvim_get_hl(0, { name = "NormalFloat", link = false })
+  local pmenu = vim.api.nvim_get_hl(0, { name = "Pmenu", link = false })
+  local bg = normal_float.bg or pmenu.bg or normal.bg
+  local fg = visible_fg(normal.fg, bg, pmenu.fg)
+  local spec = {
+    fg = fg,
+    ctermfg = contrast_cterm_fg(bg),
+  }
+
+  if type(bg) == "number" then
+    spec.bg = bg
+  end
+
+  vim.api.nvim_set_hl(0, "DbeeWizardInput", spec)
 end
 
 local function option_by_value(options, value)
@@ -510,6 +572,7 @@ local function parse_oracle_url(raw_url)
   end
 
   local userinfo = authority:match("^(.*)@")
+  local hostport = userinfo and authority:sub(#userinfo + 2) or authority
   if not userinfo then
     return nil
   end
@@ -520,12 +583,26 @@ local function parse_oracle_url(raw_url)
     password = ""
   end
 
-  local _, raw_query = tostring(path_and_query or ""):match("^([^?]*)%??(.*)$")
+  -- host:port from authority after @ (may be empty for connStr-only URLs).
+  local host, port = nil, nil
+  if hostport and hostport ~= "" then
+    host, port = hostport:match("^([^:]+):(%d+)$")
+  end
+
+  -- path (before ?) holds service_name when direct URL format is used.
+  local raw_path, raw_query = tostring(path_and_query or ""):match("^([^?]*)%??(.*)$")
+  local service_name = raw_path and raw_path ~= "" and raw_path or nil
+
   local query_pairs, ordered_keys = parse_query_pairs(raw_query or "")
   local unsupported_query = {}
   for _, key in ipairs(ordered_keys) do
     local upper = key:upper()
-    if upper ~= "CONNSTR" and upper ~= "WALLET" then
+    -- Recognize wallet/SSL params as supported (Oracle Instant Client / go-ora style).
+    if upper ~= "CONNSTR"
+      and upper ~= "WALLET"
+      and upper ~= "SSL"
+      and upper ~= "SSL VERIFY"
+    then
       unsupported_query[#unsupported_query + 1] = key
     end
   end
@@ -535,14 +612,85 @@ local function parse_oracle_url(raw_url)
     password = percent_decode(password, false),
     descriptor = query_pairs.connStr or query_pairs.CONNSTR,
     wallet_path = query_pairs.WALLET or query_pairs.wallet or query_pairs.Wallet,
+    host = host,
+    port = port,
+    service_name = service_name,
     unsupported_query = unsupported_query,
   }
+end
+
+-- Extract host, port, and service_name from a SIMPLE TNS connect descriptor.
+-- Returns nil for compound descriptors (SOURCE_ROUTE, multiple ADDRESS blocks, ADDRESS_LIST)
+-- so the caller falls back to passing the full descriptor through `connStr=`.
+---@param descriptor string
+---@return { host: string?, port: string?, service_name: string?, is_tcps: boolean }?
+local function parse_tns_descriptor(descriptor)
+  if type(descriptor) ~= "string" or descriptor == "" then
+    return nil
+  end
+  local lower = descriptor:lower()
+  -- Bail on compound descriptors — go-ora handles those via connStr=, not direct URL.
+  if lower:find("source_route", 1, true)
+    or lower:find("address_list", 1, true)
+    or lower:find("load_balance", 1, true)
+    or lower:find("failover", 1, true)
+  then
+    return nil
+  end
+  -- Bail if more than one ADDRESS block is present.
+  local _, address_count = lower:gsub("%(address%s*=", "")
+  if address_count > 1 then
+    return nil
+  end
+  local host = lower:match("host%s*=%s*([^)%s]+)")
+  local port = lower:match("port%s*=%s*([^)%s]+)")
+  local service_name = lower:match("service_name%s*=%s*([^)%s]+)")
+  local is_tcps = lower:find("protocol%s*=%s*tcps", 1, false) ~= nil
+  if not host or not port or not service_name then
+    return nil
+  end
+  return { host = host, port = port, service_name = service_name, is_tcps = is_tcps }
 end
 
 local function render_oracle_connection_url(fields, descriptor)
   local resolved_descriptor = descriptor or fields.service_alias or ""
   if resolved_descriptor == "" then
     return nil, "Oracle descriptor data is required."
+  end
+
+  local parts = parse_tns_descriptor(resolved_descriptor)
+  if parts then
+    -- Build direct host:port/service_name URL (matches Oracle Instant Client / sqlplus shape).
+    -- TCPS aliases get SSL params + wallet path; plain TCP just gets host/port/service.
+    local query = {}
+    if fields.wallet_path and fields.wallet_path ~= "" then
+      query[#query + 1] = "wallet=" .. percent_encode(fields.wallet_path)
+    end
+    if parts.is_tcps then
+      query[#query + 1] = "SSL=enable"
+      query[#query + 1] = "SSL Verify=false"
+    end
+    return string.format(
+      "oracle://%s:%s@%s:%s/%s%s",
+      percent_encode(fields.username or ""),
+      percent_encode(fields.password or ""),
+      parts.host,
+      parts.port,
+      parts.service_name,
+      #query > 0 and ("?" .. table.concat(query, "&")) or ""
+    )
+  end
+
+  -- Fallback: pass raw descriptor through connStr=. Use first host:port from the
+  -- descriptor as the URL authority (go-ora parses authority before falling through
+  -- to connStr for routing). This matches existing connections.json shapes.
+  local first_host = resolved_descriptor:lower():match("host%s*=%s*([^)%s]+)")
+  local first_port = resolved_descriptor:lower():match("port%s*=%s*([^)%s]+)")
+  local authority
+  if first_host and first_port then
+    authority = first_host .. ":" .. first_port
+  else
+    authority = ":0"
   end
 
   local query = {
@@ -553,9 +701,10 @@ local function render_oracle_connection_url(fields, descriptor)
   end
 
   return string.format(
-    "oracle://%s:%s@:0/?%s",
+    "oracle://%s:%s@%s?%s",
     percent_encode(fields.username or ""),
     percent_encode(fields.password or ""),
+    authority,
     table.concat(query, "&")
   )
 end
@@ -719,8 +868,9 @@ end
 
 -- normalize_seed prefers persisted metadata first, then lossless parse fallback,
 -- then raw compatibility when normalization would be lossy.
-local function normalize_seed(seed)
+local function normalize_seed(seed, defaults)
   seed = seed or {}
+  defaults = defaults or {}
   local params = deepcopy(seed.params or {})
   local wizard = deepcopy(seed.wizard or {})
   local state = {
@@ -736,10 +886,33 @@ local function normalize_seed(seed)
     preserve_existing_wizard = false,
     preserved_wizard = nil,
     schema_filter = schema_filter_to_state(params.schema_filter),
+    test_status = "untested",
+    test_error = nil,
   }
 
   for known_mode in pairs(FIELD_DEFS) do
     ensure_mode_fields(state, known_mode)
+  end
+
+  -- Apply per-mode defaults (only into still-empty fields).
+  -- Path-style values are expanded for `~` shorthand.
+  local function expand_if_path(key, value)
+    if type(value) ~= "string" or value == "" then
+      return value
+    end
+    if key:match("path") or key:match("file") then
+      return vim.fn.expand(value)
+    end
+    return value
+  end
+  for mode_key, mode_defaults in pairs(defaults) do
+    if state.fields[mode_key] and type(mode_defaults) == "table" then
+      for field_key, field_default in pairs(mode_defaults) do
+        if (state.fields[mode_key][field_key] == nil or state.fields[mode_key][field_key] == "") then
+          state.fields[mode_key][field_key] = expand_if_path(field_key, field_default)
+        end
+      end
+    end
   end
 
   local function seed_other_raw()
@@ -815,7 +988,18 @@ local function normalize_seed(seed)
         name = params.name or "",
       })
     elseif parsed and #parsed.unsupported_query == 0 and parsed.wallet_path and parsed.wallet_path ~= "" then
-      local service_alias = find_wallet_alias_for_descriptor(parsed.wallet_path, parsed.descriptor)
+      -- Synthesize a TNS-like descriptor when URL uses direct host:port/service format
+      -- so wallet alias matching can find the corresponding tnsnames entry.
+      local descriptor_for_match = parsed.descriptor
+      if (not descriptor_for_match or descriptor_for_match == "")
+        and parsed.host and parsed.port and parsed.service_name
+      then
+        descriptor_for_match = string.format(
+          "(description=(address=(protocol=tcps)(host=%s)(port=%s))(connect_data=(service_name=%s)))",
+          parsed.host, parsed.port, parsed.service_name
+        )
+      end
+      local service_alias = find_wallet_alias_for_descriptor(parsed.wallet_path, descriptor_for_match)
       if service_alias then
         state.db_kind = "oracle"
         state.mode = "oracle_cloud_wallet"
@@ -823,6 +1007,18 @@ local function normalize_seed(seed)
           name = params.name or "",
           wallet_path = parsed.wallet_path,
           service_alias = service_alias,
+          username = parsed.username,
+          password = parsed.password,
+        })
+      elseif parsed.host and parsed.port and parsed.service_name then
+        -- Wallet present + direct URL but alias not found in wallet's tnsnames.
+        -- Render in cloud-wallet mode with synthetic alias so the user can edit.
+        state.db_kind = "oracle"
+        state.mode = "oracle_cloud_wallet"
+        state.fields.oracle_cloud_wallet = vim.tbl_extend("force", state.fields.oracle_cloud_wallet, {
+          name = params.name or "",
+          wallet_path = parsed.wallet_path,
+          service_alias = parsed.service_name,
           username = parsed.username,
           password = parsed.password,
         })
@@ -933,9 +1129,15 @@ local function serialize_submission(state)
     if not url then
       return nil, err
     end
+    -- Append `(alias)` suffix to display name if user didn't already include it.
+    local display_name = fields.name or ""
+    local alias = fields.service_alias or ""
+    if alias ~= "" and not display_name:find("(" .. alias .. ")", 1, true) then
+      display_name = display_name .. " (" .. alias .. ")"
+    end
     return apply_schema_filter_to_submission(state, {
       params = {
-        name = fields.name,
+        name = display_name,
         type = "oracle",
         url = url,
       },
@@ -996,7 +1198,7 @@ Wizard.__index = Wizard
 
 local function popup_options(opts)
   local width = 72
-  local height = 18
+  local height = 24
   if opts.relative_winid and vim.api.nvim_win_is_valid(opts.relative_winid) then
     local parent_width = vim.api.nvim_win_get_width(opts.relative_winid)
     width = math.min(math.max(parent_width - 4, 56), 88)
@@ -1055,7 +1257,7 @@ end
 
 function Wizard:new(opts)
   local popup = Popup(popup_options(opts))
-  local state = normalize_seed(opts.seed)
+  local state = normalize_seed(opts.seed, opts.defaults)
   state.schema_filter.discovery_default = opts.mode == "edit" and "yes" or "no"
   local instance = setmetatable({
     opts = opts,
@@ -1083,6 +1285,8 @@ function Wizard:set_mode(mode)
   copy_shared_fields(previous_fields, target_fields)
   refresh_derived_state(self.state)
   refresh_wallet_alias_state(self.state)
+  self.state.test_status = "untested"
+  self.state.test_error = nil
   self.state.selection = 1
   self:render()
 end
@@ -1100,6 +1304,8 @@ function Wizard:set_db_kind(db_kind)
   copy_shared_fields(previous_fields, target_fields)
   refresh_derived_state(self.state)
   refresh_wallet_alias_state(self.state)
+  self.state.test_status = "untested"
+  self.state.test_error = nil
   self.state.selection = 1
   self:render()
 end
@@ -1111,6 +1317,54 @@ function Wizard:set_field(field_key, value)
   if self.state.mode == "oracle_cloud_wallet" and field_key == "wallet_path" then
     refresh_wallet_alias_state(self.state)
   end
+  self.state.test_status = "untested"
+  self.state.test_error = nil
+  self:render()
+end
+
+function Wizard:test_connection()
+  -- Validate locally first.
+  local errors = validate_submission(self.state)
+  if #errors > 0 then
+    self.state.last_error = errors[1]
+    self.state.test_status = "untested"
+    self:render()
+    return
+  end
+
+  local submission, serialize_err = serialize_submission(self.state)
+  if not submission then
+    self.state.last_error = serialize_err
+    self.state.test_status = "untested"
+    self:render()
+    return
+  end
+
+  self.state.last_error = nil
+  self.state.test_status = "testing"
+  self.state.test_error = nil
+  self:render()
+  -- Force a redraw before the blocking ping so the spinner is visible.
+  pcall(vim.cmd, "redraw")
+
+  local handler = self.opts.handler
+  if not handler then
+    self.state.test_status = "failed"
+    self.state.test_error = "No handler available to run the test."
+    self:render()
+    return
+  end
+
+  local ping_failure = handler:connection_test_spec(submission.params)
+  if ping_failure then
+    self.state.test_status = "failed"
+    self.state.test_error = (type(ping_failure) == "table"
+      and (ping_failure.message or ping_failure.error or vim.inspect(ping_failure)))
+      or tostring(ping_failure)
+  else
+    self.state.test_status = "ok"
+    self.state.test_error = nil
+  end
   self:render()
 end
 
@@ -1121,6 +1375,18 @@ function Wizard:move(delta)
   end
   self.state.selection = ((self.state.selection - 1 + delta) % count) + 1
   self:render()
+  self:_sync_cursor()
+end
+
+function Wizard:_sync_cursor()
+  if not self.popup or not self.popup.winid or not vim.api.nvim_win_is_valid(self.popup.winid) then
+    return
+  end
+  local entry = self.entries[self.state.selection]
+  if not entry or not entry.buffer_line then
+    return
+  end
+  pcall(vim.api.nvim_win_set_cursor, self.popup.winid, { entry.buffer_line, 0 })
 end
 
 function Wizard:format_field_value(field)
@@ -1153,6 +1419,7 @@ function Wizard:render()
     self.entries[#self.entries + 1] = entry
     local prefix = (#self.entries == self.state.selection) and "› " or "  "
     lines[#lines + 1] = prefix .. text
+    entry.buffer_line = #lines
   end
 
   add_entry({ kind = "type" }, string.format("Type: %s", display_type_label(self.state.db_kind)))
@@ -1186,7 +1453,27 @@ function Wizard:render()
   end
 
   lines[#lines + 1] = ""
-  add_entry({ kind = "submit" }, "Submit")
+  local test_label
+  if self.state.test_status == "testing" then
+    test_label = "Test Connection (running...)"
+  elseif self.state.test_status == "ok" then
+    test_label = "Test Connection (✓ OK)"
+  elseif self.state.test_status == "failed" then
+    test_label = "Test Connection (✗ failed)"
+  else
+    test_label = "Test Connection"
+  end
+  add_entry({ kind = "test" }, test_label)
+  if self.state.test_status == "failed" and self.state.test_error then
+    -- Show error right under the Test row (truncate long lines per visual width).
+    local err = tostring(self.state.test_error)
+    for line_chunk in err:gmatch("[^\n]+") do
+      lines[#lines + 1] = "    " .. line_chunk
+    end
+  end
+
+  local submit_label = self.state.test_status == "ok" and "Submit" or "Submit (test connection first)"
+  add_entry({ kind = "submit" }, submit_label)
   add_entry({ kind = "cancel" }, "Cancel")
 
   if self.state.wallet_alias_warning then
@@ -1208,6 +1495,8 @@ function Wizard:render()
   vim.bo[self.popup.bufnr].modifiable = true
   vim.api.nvim_buf_set_lines(self.popup.bufnr, 0, -1, false, lines)
   vim.bo[self.popup.bufnr].modifiable = false
+
+  self:_sync_cursor()
 end
 
 function Wizard:close()
@@ -1225,6 +1514,12 @@ function Wizard:cancel()
 end
 
 function Wizard:submit()
+  if self.state.test_status ~= "ok" then
+    self.state.last_error = "Test the connection before submitting."
+    self:render()
+    return nil, self.state.last_error
+  end
+
   local errors = validate_submission(self.state)
   if #errors > 0 then
     self.state.last_error = errors[1]
@@ -1271,8 +1566,9 @@ function Wizard:edit_type()
     relative_winid = self.popup.winid,
     title = "Connection Type",
     items = labels,
-    mappings = {},
+    mappings = WIZARD_MENU_MAPPINGS,
     winhighlight = WIZARD_WINHIGHLIGHT,
+    zindex = 200,
     on_confirm = function(selection)
       local db_kind = by_label[selection]
       if db_kind then
@@ -1295,8 +1591,9 @@ function Wizard:edit_mode()
     relative_winid = self.popup.winid,
     title = "Connection Mode",
     items = labels,
-    mappings = {},
+    mappings = WIZARD_MENU_MAPPINGS,
     winhighlight = WIZARD_WINHIGHLIGHT,
+    zindex = 200,
     on_confirm = function(selection)
       local mode = by_label[selection]
       if mode then
@@ -1315,8 +1612,9 @@ function Wizard:edit_field(field)
       relative_winid = self.popup.winid,
       title = "Service Alias",
       items = items,
-      mappings = {},
+      mappings = WIZARD_MENU_MAPPINGS,
       winhighlight = WIZARD_WINHIGHLIGHT,
+      zindex = 200,
       on_confirm = function(selection)
         if selection == "Manual entry..." then
           self:edit_field(vim.tbl_extend("force", field, { key = field.key .. "_manual" }))
@@ -1338,8 +1636,9 @@ function Wizard:edit_field(field)
       relative_winid = self.popup.winid,
       title = title,
       items = field.options,
-      mappings = {},
+      mappings = WIZARD_MENU_MAPPINGS,
       winhighlight = WIZARD_WINHIGHLIGHT,
+      zindex = 200,
       on_confirm = function(selection)
         self:set_field(target_key, selection)
       end,
@@ -1407,12 +1706,14 @@ function Wizard:edit_field(field)
     return
   end
 
+  ensure_wizard_input_highlights()
   menu.input({
     relative_winid = self.popup.winid,
     title = title,
     default_value = current_value,
-    mappings = {},
-    winhighlight = WIZARD_WINHIGHLIGHT,
+    mappings = WIZARD_MENU_MAPPINGS,
+    winhighlight = WIZARD_INPUT_WINHIGHLIGHT,
+    zindex = 200,
     on_confirm = function(value)
       self:set_field(target_key, value)
     end,
@@ -1429,12 +1730,14 @@ end
 
 function Wizard:edit_schema_patterns(key, title)
   local filter_state = self.state.schema_filter or schema_filter_to_state(nil)
+  ensure_wizard_input_highlights()
   menu.input({
     relative_winid = self.popup.winid,
     title = title,
     default_value = filter_state[key] or "",
-    mappings = {},
-    winhighlight = WIZARD_WINHIGHLIGHT,
+    mappings = WIZARD_MENU_MAPPINGS,
+    winhighlight = WIZARD_INPUT_WINHIGHLIGHT,
+    zindex = 200,
     on_confirm = function(value)
       self:set_schema_filter_field(key, value)
     end,
@@ -1563,6 +1866,8 @@ function Wizard:activate_selected()
     self:discover_schemas()
   elseif entry.kind == "schema_clear" then
     self:clear_schema_filter()
+  elseif entry.kind == "test" then
+    self:test_connection()
   elseif entry.kind == "submit" then
     self:submit()
   elseif entry.kind == "cancel" then
@@ -1593,6 +1898,12 @@ function Wizard:mount()
   self.popup:map("n", "<S-Tab>", function()
     self:move(-1)
   end, map_opts)
+  self.popup:map("n", "<Down>", function()
+    self:move(1)
+  end, map_opts)
+  self.popup:map("n", "<Up>", function()
+    self:move(-1)
+  end, map_opts)
   self.popup:map("n", "<CR>", function()
     self:activate_selected()
   end, map_opts)
@@ -1604,6 +1915,7 @@ function Wizard:mount()
   end, map_opts)
 
   self:render()
+  self:_sync_cursor()
   return self
 end
 

@@ -409,8 +409,6 @@ function layouts.Minimal:toggle_drawer()
       api_ui.drawer_show(self.drawer_win)
       self:configure_window_on_switch(self.on_switch, self.drawer_win, api_ui.drawer_show)
       self:configure_drawer_window_cleanup(self.drawer_win)
-      -- Return focus to editor
-      vim.api.nvim_set_current_win(editor_win)
     end
   end
 end

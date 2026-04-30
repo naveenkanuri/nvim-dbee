@@ -1121,6 +1121,8 @@ github.com/shopspring/decimal v1.3.1 h1:2Usl1nmF/WZucqkFZhnfFYxxxu8LG21F6nPQBE5g
 github.com/shopspring/decimal v1.3.1/go.mod h1:DKyhrW/HYNuLGql+MJL6WCR6knT2jwCFRcu2hWCYk4o=
 github.com/sijms/go-ora/v2 v2.7.6 h1:QyR1CKFxG+VVk2+LdHoHF4NxDSvcQ3deBXtZCrahSq4=
 github.com/sijms/go-ora/v2 v2.7.6/go.mod h1:EHxlY6x7y9HAsdfumurRfTd+v8NrEOTR3Xl4FWlH6xk=
+github.com/sijms/go-ora/v2 v2.9.0 h1:+iQbUeTeCOFMb5BsOMgUhV8KWyrv9yjKpcK4x7+MFrg=
+github.com/sijms/go-ora/v2 v2.9.0/go.mod h1:QgFInVi3ZWyqAiJwzBQA+nbKYKH77tdp1PYoCqhR2dU=
 github.com/sirupsen/logrus v1.9.3 h1:dueUQJ1C2q9oE3F7wvmSGAaVtTmUizReu6fjN8uqzbQ=
 github.com/sirupsen/logrus v1.9.3/go.mod h1:naHLuLoDiP4jHNo9R0sCBMtWGeIprob74mVsIT4qYEQ=
 github.com/spaolacci/murmur3 v0.0.0-20180118202830-f09979ecbc72/go.mod h1:JwIasOWyU6f++ZhiEuf87xNszmSA2myDM2Kzu9HwQUA=
@@ -1151,10 +1153,10 @@ github.com/testcontainers/testcontainers-go/modules/clickhouse v0.35.0 h1:A4NESG
 github.com/testcontainers/testcontainers-go/modules/clickhouse v0.35.0/go.mod h1:nT0LQ4rqTljX5Ub0Q3GdFrVXRYSrjK6p7RuJPpUE4wg=
 github.com/testcontainers/testcontainers-go/modules/gcloud v0.35.0 h1:8tdSCu4ey2ye3pXjo4I0GPcnYZb66dJN3qN6Ebqpjcg=
 github.com/testcontainers/testcontainers-go/modules/gcloud v0.35.0/go.mod h1:jtvudSR4XxV/NTRHfhD5/wf2xlF5OPuiQmNSB0PM6XM=
-github.com/testcontainers/testcontainers-go/modules/mysql v0.35.0 h1:9voGAf+1KxC0ck/XtrC/AUrkr74SSGpQRBp0O851B3Y=
-github.com/testcontainers/testcontainers-go/modules/mysql v0.35.0/go.mod h1:rxKSkFpc5XZtG00prjqPfobuMgt5EpFEOrzZgYdOX0c=
 github.com/testcontainers/testcontainers-go/modules/mssql v0.35.0 h1:TNyqxHauRH1p15HSD8G2clhkJXnsRFHX3jcCyS6omd4=
 github.com/testcontainers/testcontainers-go/modules/mssql v0.35.0/go.mod h1:nlWjcJ0Jw4XuuDd95v1qbAFnwpeaYRloF0BPS6AW1RQ=
+github.com/testcontainers/testcontainers-go/modules/mysql v0.35.0 h1:9voGAf+1KxC0ck/XtrC/AUrkr74SSGpQRBp0O851B3Y=
+github.com/testcontainers/testcontainers-go/modules/mysql v0.35.0/go.mod h1:rxKSkFpc5XZtG00prjqPfobuMgt5EpFEOrzZgYdOX0c=
 github.com/testcontainers/testcontainers-go/modules/postgres v0.35.0 h1:eEGx9kYzZb2cNhRbBrNOCL/YPOM7+RMJiy3bB+ie0/I=
 github.com/testcontainers/testcontainers-go/modules/postgres v0.35.0/go.mod h1:hfH71Mia/WWLBgMD2YctYcMlfsbnT0hflweL1dy8Q4s=
 github.com/tidwall/pretty v1.0.0/go.mod h1:XNkn88O1ChpSDQmQeStsy+sBenx6DDtFZJxhVysOjyk=

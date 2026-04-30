@@ -172,6 +172,8 @@ local DEFAULT_MAPPINGS = {
 
 local UX13_WIZARD_WINHIGHLIGHT =
   "Normal:NormalFloat,NormalNC:NormalFloat,EndOfBuffer:NormalFloat,FloatBorder:FloatBorder,FloatTitle:FloatTitle,CursorLine:Visual,Search:IncSearch"
+local UX13_WIZARD_INPUT_WINHIGHLIGHT =
+  "Normal:DbeeWizardInput,NormalNC:DbeeWizardInput,EndOfBuffer:DbeeWizardInput,FloatBorder:FloatBorder,FloatTitle:FloatTitle,CursorLine:Visual,Search:IncSearch"
 
 local saved_notify = vim.notify
 local notifications = {}
@@ -1930,7 +1932,7 @@ local function run_wizard_highlight_contract()
   wizard:set_field("name", "Visible Wizard Text")
   wizard:edit_field({ key = "name", label = "Name", kind = "text" })
   local input_call = last(env.runtime.input_calls)
-  assert_eq("text input winhighlight", input_call.winhighlight, UX13_WIZARD_WINHIGHLIGHT)
+  assert_eq("text input winhighlight", input_call.winhighlight, UX13_WIZARD_INPUT_WINHIGHLIGHT)
   assert_eq("text input default preserved", input_call.default_value, "Visible Wizard Text")
 
   wizard:set_field("password", "secret-value")

@@ -31,9 +31,7 @@
 
 ### v1.1 Phase 7 drawer UX polish (surfaced 2026-04-29 during v1.1 live test)
 
-- **Connection source badge always shown even when single-source (visual noise)** (`lua/dbee/ui/drawer/convert.lua` per Phase 7 D-65):
-  D-65 wording: "may display a lightweight source badge or suffix **for disambiguation**". Implementation emits `[<source_id>]` suffix on every connection row unconditionally. With a single-source setup (only `connections.json`), every row shows the same `[connections.json]` (truncated to `[connecti...]` in narrow drawer width) — pure noise, no disambiguation value.
-  v1.3 fix: make badge conditional on `count(distinct source_id) > 1`. Single-source = clean flat list. Multi-source keeps the badge where it actually disambiguates. Threshold rule itself is a small discuss-phase decision (only-if-multi vs always-on toggle vs config option).
+- ~~Connection source badge always shown even when single-source~~ — **FIXED 2026-04-30** in `convert.lua`: badge now conditional on `#sources > 1`. Single-source setups render clean `conn_name` only.
 
 - **Drawer cold start lacks visual orientation** (cosmetic, related):
   Connection list starts flat from line 1. Old v1.0 had `connections.json` parent header providing instant context for "what am I looking at". v1.3 candidate: optional section header `Connections` line OR active-connection highlight at top. Lower priority than badge fix.
@@ -51,13 +49,22 @@
 
 - **Wizard input field text STILL invisible** despite Phase 13 commit `1436bdc` (`fix(13-01-03): wizard highlights`):
   Phase 13 r1 fix added `winhighlight = "Normal:NormalFloat,FloatBorder:FloatBorder,..."` per Input/Select/Border component. r2 added `UX13_WIZARD_NUI_WIN_OPTIONS_THREADED=true` test stubbing nui constructors and asserting threaded `win_options.winhighlight`. Test gate PASSED. **But real-world rendering on Naveen's daily colorscheme STILL shows invisible text.**
-  Test was too shallow: validated `win_options.winhighlight` is THREADED to nui constructor, but didn't validate the resulting rendered text is actually visible. Root cause likely:
-  1. `Normal:NormalFloat` mapping inherits the same fg=bg problem (user's colorscheme has NormalFloat with collision OR `nui.nvim` overrides winhighlight further down its component tree)
-  2. Highlight applied to wrong child window (border vs prompt vs popup buffer)
-  3. `nui.input` / `nui.menu` ignoring `win_options` for the prompt buffer where the input cursor lives
-  4. User's colorscheme renders `NormalFloat` with poor contrast for input fields
-  v1.3 next-attempt fix: rather than blind `Normal:NormalFloat` mapping, define an explicit `DbeeWizardInput` highlight group with hardcoded contrast colors (e.g., fg=#cdd6f4, bg=#1e1e2e or use `cterm` 15-on-0). Apply via `winhighlight = "Normal:DbeeWizardInput,..."`. Headless test must use `nvim --headless` with a real screenshot capture (or `vim.api.nvim_get_hl()` inspection of the rendered buffer) to verify text fg ≠ bg, NOT just verify the winhighlight string was passed in.
-  Severity: **HIGH** — confirmed still broken via live testing 2026-04-30. Phase 13 fix was NOT effective. Workaround unchanged: edit `connections.json` directly.
+  Test was too shallow: validated `win_options.winhighlight` is THREADED to nui constructor, but didn't validate the resulting rendered text is actually visible.
+
+  **CRITICAL DIAGNOSTIC (live test 2026-04-30 follow-up)**: bug is **colorscheme-INDEPENDENT** (broken on BOTH light AND dark themes) AND **only-while-typing** (text becomes visible after pressing Enter). User reports: cursor moves correctly, text invisible during typing, displayed value visible after Enter submits the prompt line.
+  This rules out `Normal:NormalFloat` colorscheme contrast issues. The ACTUAL root cause is in `nui.input` prompt-buffer mode-specific rendering:
+  1. `nui.input` may set `conceallevel`/`concealcursor` on prompt buffer → typed text concealed during edit; revealed after submit
+  2. nui prompt may use a hardcoded fg=bg hl group (e.g. nui-specific `NuiInput*` group) for the in-progress text region
+  3. Buffer-line `cursorline` hl with fg=bg masking only the cursor line where typing happens
+  4. Treesitter/highlighter applied to prompt buffer with bad sql-grammar match
+  Repro: open Add Conn → type "test" → cursor advances 4 chars; nothing visible; press Enter → "test" appears as the saved Name value. Reproduces on light + dark colorschemes both.
+
+  v1.3 next-attempt fix: investigate `nui.input` prompt-buffer rendering before patching. Likely fix path:
+  - Inspect `nui.input` source (or pinned commit) for `conceallevel`/`concealcursor`/special hl on prompt buffer
+  - Override via `buf_options` (not just `win_options`) — `vim.b[bufnr].conceallevel = 0`, `vim.b[bufnr].concealcursor = ""`
+  - OR define explicit `DbeeWizardInput` hl group with hardcoded contrast and apply to prompt-buffer text via `nvim_buf_add_highlight` on every `TextChangedI` event
+  - Headless test must SIMULATE typing via `feedkeys` mode "i" + screenshot OR `vim.api.nvim_buf_get_extmarks` to inspect actual rendered hl on prompt-buffer text — NOT just verify constructor args
+  Severity: **HIGH** — confirmed still broken via live testing 2026-04-30 across multiple colorschemes. Phase 13 fix was NOT effective. Workaround unchanged: edit `connections.json` directly.
 
 ### v1.2 Phase 11 LSP cache migration UX (surfaced 2026-04-29 during v1.1 live test) — POLISH
 
@@ -88,6 +95,44 @@
 - **Diagnostic gap: "loading..." has no timeout / error escape** (related):
   If structure RPC genuinely hangs (network failure, adapter crash mid-fetch), drawer shows "loading..." forever with no progress indicator, no timeout, no manual cancel. Should at minimum: (a) show elapsed time on the loading row after 10s, (b) offer manual cancel via key (`q` or `<Esc>`), (c) auto-fail with clear error after configurable timeout (default 5min).
   Severity: **MED** — degrades trust in the connection-only-drawer flow. v1.3 candidate alongside lazy-loading deepening.
+
+### v1.3 rich table metadata (indexes, sequences, FKs, column annotations) — FEATURE
+
+- **Drawer should expose schema/table internals like dbeaver** (`dbee/core/types.go`, `dbee/adapters/*.go`, `lua/dbee/ui/drawer/convert.lua`):
+  Today's drawer renders only Name + Type per column under a table. No nullable indicator, no PK marker, no FK relation, no indexes, no sequences. Naveen wants:
+  1. **Indexes** as a child folder under each table — list index names, types, columns covered.
+  2. **Sequences** as a child folder under schema (sequences are schema-level, not table-level).
+  3. **Columns folder** — already exists, but each column row should annotate: `[type] [NOT NULL] [PK] [FK→other_table.col]`.
+  4. **FK navigation** — clicking on `FK→target` jumps drawer cursor to the referenced table+column.
+  Required scope:
+  - Go core: extend `Column` struct with `Nullable bool`, `IsPK bool`, `FKTarget *FKRef` fields. Extend `StructureType` enum with `StructureTypeSequence`, `StructureTypeIndex`.
+  - Adapter SQL: each adapter needs new queries to populate these (Oracle: `all_constraints`/`all_indexes`/`all_sequences`, Postgres: `pg_constraint`/`pg_indexes`/`pg_sequences`, MySQL: `information_schema.*`, etc.).
+  - New RPC endpoints: `DbeeListIndexes(connID, schema, table)`, `DbeeListSequences(connID, schema)`, `DbeeGetFKTargets(connID, schema, table)` (could fold into structure response).
+  - Lua drawer rendering: new node types for index/sequence/fk-link; column row formatter to show annotations inline.
+  - Click-to-navigate: drawer keymap dispatches FK target → expand referenced table → set cursor.
+  - Backwards compat: adapters that don't implement metadata SQL return empty lists; UI gracefully omits annotations.
+  Severity: **FEATURE** — full v1.3+ phase. Discuss + plan + multi-adapter execute. Pairs with #connection folder grouping for DBeaver-parity polish.
+
+### v1.3 Oracle wallet auto-extract — FEATURE
+
+- **dbee should accept `.zip` wallet path and transparently extract on connect** (`dbee/adapters/oracle*.go`):
+  Oracle driver expects the EXTRACTED wallet directory (with `cwallet.sso`, `tnsnames.ora`, `sqlnet.ora`, etc.). Currently if user provides a `.zip` path, connect fails with `"open <path>.zip/cwallet.sso: not a directory"`. Workaround: user unzips manually before configuring.
+  v1.3 fix: detect `.zip` extension on connect path, extract to a cache dir (`~/.local/share/dbee/wallets/<sha256(zip)>/`) lazily on first use, hand extracted dir to driver. Cache by content-hash so re-extracting unchanged wallets is skipped. Honor zip mtime invalidation.
+  Severity: **FEATURE** — quality-of-life. Pairs with #connection folder grouping for dbeaver-parity polish.
+
+### v1.3 connection folder grouping (dbeaver-style) — FEATURE
+
+- **User can group connections into named folders** in the drawer, collapse/expand, move connections between folders.
+  Surfaced 2026-04-30 during v1.3 live test. With many connections (~16 in test setup, growing) a flat list is awkward to navigate and find specific environments.
+  Naveen's request: dbeaver-style. Examples — folder names like `dev`, `staging`, `prod`, `personal`, etc.
+  Design considerations:
+  - Persistence: where do folder definitions live? Options: (a) extend `connections.json` schema with optional `folder` field per conn (Phase 8 D-99 atomic-write contract preserved), (b) sidecar `folders.json` mapping `folder_name -> [conn_id, ...]`, (c) per-source override. Pick simplest — (a) `folder` string field on each connection row.
+  - Drawer UI: folder nodes appear above ungrouped conns (or sorted alphabetically with conns). Collapsible like schema/table tree nodes. Persist expand/collapse state.
+  - CRUD: keymaps to create folder, rename, delete (with reassignment of contained conns), move conn into/out of folder. Plus on-add wizard step "folder (optional)".
+  - Filter integration: `/` filter should match conn name regardless of folder; matching results auto-expand parent folders.
+  - Backwards compat: connections without `folder` field group under "Ungrouped" or just appear flat alongside folders.
+  - Multi-source: each source can have its own folders, OR folders are global. Likely per-source.
+  Severity: **FEATURE** — high user-value v1.3 candidate. Discuss + plan cycle. Pairs naturally with #2 schema allowlist for enterprise-DB UX polish.
 
 ### v1.3 schema allowlist (per-connection schema filter, dbeaver-style) — FEATURE
 
