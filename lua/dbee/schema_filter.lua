@@ -73,6 +73,18 @@ local function normalize_list(values, fold, reject_empty)
   return out, nil
 end
 
+local function list_has_nonempty(values)
+  if type(values) ~= "table" then
+    return false
+  end
+  for _, value in ipairs(values) do
+    if trim(value) ~= "" then
+      return true
+    end
+  end
+  return false
+end
+
 local function encode_list(values, implicit_all)
   if implicit_all then
     return "*"
@@ -151,7 +163,11 @@ function M.normalize(raw_filter, conn_type)
 
   include = include or {}
   exclude = exclude or {}
-  local lazy = type(filter) == "table" and filter.lazy_per_schema == true or false
+  local lazy = type(filter) == "table"
+    and filter.lazy_per_schema == true
+    and include_present
+    and #include > 0
+    or false
   local implicit_all = not include_present
   local signature = table.concat({
     "schema-filter-v1",
@@ -192,6 +208,30 @@ function M.to_structure_options(raw_filter, conn_type)
   }, nil
 end
 
+function M.validate_persisted_filter(raw_filter, conn_type)
+  if raw_filter == nil or raw_filter == vim.NIL then
+    return true
+  end
+  if type(raw_filter) ~= "table" then
+    return false, "schema_filter must be a table"
+  end
+
+  local include_present = raw_filter.include ~= nil and raw_filter.include ~= vim.NIL
+  local include_nonempty = list_has_nonempty(raw_filter.include)
+  if include_present and not include_nonempty then
+    return false, "schema_filter.include cannot be empty; remove schema_filter to include all schemas"
+  end
+  if raw_filter.lazy_per_schema == true and not include_nonempty then
+    return false, "schema_filter.lazy_per_schema requires a non-empty schema_filter.include"
+  end
+
+  local _, err = M.normalize(raw_filter, conn_type)
+  if err then
+    return false, err
+  end
+  return true
+end
+
 function M.matches(schema, normalized)
   if not normalized then
     return true
@@ -215,8 +255,44 @@ function M.matches(schema, normalized)
   return true
 end
 
+function M.filter_structures(structs, normalized)
+  if not normalized or normalized.active ~= true then
+    return vim.deepcopy(structs or {})
+  end
+
+  local function node_schema(node, parent_schema)
+    local schema = node.schema or parent_schema or ""
+    if (node.type or "") == "schema" then
+      schema = schema ~= "" and schema or node.name or ""
+    end
+    return schema
+  end
+
+  local function walk(nodes, parent_schema)
+    local out = {}
+    for _, node in ipairs(nodes or {}) do
+      if type(node) == "table" then
+        local current_schema = node_schema(node, parent_schema)
+        local schema_scoped = current_schema ~= ""
+        if not schema_scoped or M.matches(current_schema, normalized) then
+          local copy = vim.deepcopy(node)
+          if copy.children then
+            copy.children = walk(copy.children, current_schema ~= "" and current_schema or parent_schema)
+          end
+          out[#out + 1] = copy
+        end
+      end
+    end
+    return out
+  end
+
+  return walk(structs or {}, nil)
+end
+
 function M.is_lazy_enabled(raw_filter)
-  return type(raw_filter) == "table" and raw_filter.lazy_per_schema == true
+  return type(raw_filter) == "table"
+    and raw_filter.lazy_per_schema == true
+    and list_has_nonempty(raw_filter.include)
 end
 
 function M.capabilities(conn_type)

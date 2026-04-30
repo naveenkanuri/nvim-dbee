@@ -57,16 +57,21 @@ func (c *postgresDriver) Structure() ([]*core.Structure, error) {
 }
 
 func (c *postgresDriver) StructureWithOptions(opts *core.StructureOptions) ([]*core.Structure, error) {
-	where, args, _ := schemaPredicate("schema_name", opts, schemaDialectPostgres, 1)
-	if where != "" {
-		where = "WHERE " + where
+	tableWhere, tableArgs, next := schemaPredicate("table_schema", opts, schemaDialectPostgres, 1)
+	matviewWhere, matviewArgs, _ := schemaPredicate("schemaname", opts, schemaDialectPostgres, next)
+	if tableWhere != "" {
+		tableWhere = " WHERE " + tableWhere
 	}
+	if matviewWhere != "" {
+		matviewWhere = " WHERE " + matviewWhere
+	}
+	args := append(tableArgs, matviewArgs...)
 	query := `
 		SELECT schema_name, object_name, object_type FROM (
-			SELECT table_schema AS schema_name, table_name AS object_name, table_type AS object_type FROM information_schema.tables
+			SELECT table_schema AS schema_name, table_name AS object_name, table_type AS object_type FROM information_schema.tables` + tableWhere + `
 			UNION ALL
-			SELECT schemaname AS schema_name, matviewname AS object_name, 'VIEW' AS object_type FROM pg_matviews
-		) dbee_objects ` + where + ` ORDER BY schema_name, object_name
+			SELECT schemaname AS schema_name, matviewname AS object_name, 'VIEW' AS object_type FROM pg_matviews` + matviewWhere + `
+		) dbee_objects ORDER BY schema_name, object_name
 	`
 
 	rows, err := c.c.QueryWithArgs(context.TODO(), query, args...)
@@ -96,12 +101,13 @@ func (c *postgresDriver) StructureForSchema(schema string, opts *core.StructureO
 	query := `
 		SELECT schema_name, object_name, object_type FROM (
 			SELECT table_schema AS schema_name, table_name AS object_name, table_type AS object_type FROM information_schema.tables
+			WHERE table_schema = $1
 			UNION ALL
 			SELECT schemaname AS schema_name, matviewname AS object_name, 'VIEW' AS object_type FROM pg_matviews
+			WHERE schemaname = $2
 		) dbee_objects
-		WHERE schema_name = $1
 		ORDER BY schema_name, object_name`
-	rows, err := c.c.QueryWithArgs(context.TODO(), query, schema)
+	rows, err := c.c.QueryWithArgs(context.TODO(), query, schema, schema)
 	if err != nil {
 		return nil, err
 	}

@@ -1984,8 +1984,10 @@ function DrawerUI:on_structure_loaded(data)
     end
   end
 
+  local ok_params, conn_params = pcall(self.handler.connection_get_params, self.handler, data.conn_id)
+  local scope = normalized_schema_scope(ok_params and conn_params or nil)
   self._struct_cache.root[data.conn_id] = {
-    structures = data.structures or {},
+    structures = schema_filter.filter_structures(data.structures or {}, scope),
     error = data.error,
   }
   self._struct_cache.root_mode[data.conn_id] = "full"

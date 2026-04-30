@@ -297,6 +297,9 @@ local function compute_diagnostics(text, cache)
       end
       local actual = cache:find_table(tbl)
       missing = actual == nil
+      if missing and type(cache.has_unloaded_active_schemas) == "function" and cache:has_unloaded_active_schemas() then
+        return
+      end
       message = string.format("Unknown table: %s", tbl)
     end
 

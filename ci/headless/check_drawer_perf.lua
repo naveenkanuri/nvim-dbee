@@ -485,6 +485,7 @@ local function new_drawer_fixture(opts)
             name = conn.name,
             type = conn.type,
             url = "postgres://example/" .. conn.id,
+            schema_filter = deepcopy(conn.schema_filter),
           }
         end
       end
@@ -1428,6 +1429,8 @@ local filter_cold_connection_only_100_samples, filter_cold_connection_only_100_e
   build_filter_fallback_metrics("FILTER_COLD_CONNECTION_ONLY_100", 100, 0)
 local filter_cold_connection_only_1000_samples, filter_cold_connection_only_1000_extras =
   build_filter_fallback_metrics("FILTER_COLD_CONNECTION_ONLY_1000", 1000, 0)
+ARCH14_FILTER_SCOPED_10000_SAMPLES, ARCH14_FILTER_SCOPED_10000_EXTRAS =
+  build_filter_fallback_metrics("ARCH14_DRAWER_FILTER_SCOPED_10000", 10000, 0)
 local filter_mixed_visible_and_cached_samples, filter_mixed_visible_and_cached_extras =
   build_filter_fallback_metrics("FILTER_MIXED_VISIBLE_AND_CACHED", 1000, 500)
 
@@ -1473,6 +1476,9 @@ local filter_cold_connection_only_100_heap_kb = maximum(filter_cold_connection_o
 local filter_cold_connection_only_1000_median_ns = median(filter_cold_connection_only_1000_samples)
 local filter_cold_connection_only_1000_p95_ns = percentile(filter_cold_connection_only_1000_samples, 0.95)
 local filter_cold_connection_only_1000_heap_kb = maximum(filter_cold_connection_only_1000_extras.heap_kb or {})
+ARCH14_FILTER_SCOPED_10000_MEDIAN_NS = median(ARCH14_FILTER_SCOPED_10000_SAMPLES)
+ARCH14_FILTER_SCOPED_10000_P95_NS = percentile(ARCH14_FILTER_SCOPED_10000_SAMPLES, 0.95)
+ARCH14_FILTER_SCOPED_10000_HEAP_KB = maximum(ARCH14_FILTER_SCOPED_10000_EXTRAS.heap_kb or {})
 local filter_mixed_visible_and_cached_median_ns = median(filter_mixed_visible_and_cached_samples)
 local filter_mixed_visible_and_cached_p95_ns = percentile(filter_mixed_visible_and_cached_samples, 0.95)
 local filter_mixed_visible_and_cached_heap_kb = maximum(filter_mixed_visible_and_cached_extras.heap_kb or {})
@@ -1521,17 +1527,26 @@ emit("DRAW01_FILTER_COLD_CONNECTION_ONLY_1000_MEDIAN_MS", format_float(ns_to_ms(
 emit("DRAW01_FILTER_COLD_CONNECTION_ONLY_1000_P95_MS", format_float(ns_to_ms(filter_cold_connection_only_1000_p95_ns)))
 emit("DRAW01_FILTER_COLD_CONNECTION_ONLY_1000_KB_DELTA", format_float(filter_cold_connection_only_1000_heap_kb))
 emit("DRAW01_FILTER_COLD_CONNECTION_ONLY_1000_SENTINEL_OK", "true")
+emit("ARCH14_DRAWER_FILTER_SCOPED_10000_MEDIAN_MS", format_float(ns_to_ms(ARCH14_FILTER_SCOPED_10000_MEDIAN_NS)))
+emit("ARCH14_DRAWER_FILTER_SCOPED_10000_P95_MS", format_float(ns_to_ms(ARCH14_FILTER_SCOPED_10000_P95_NS)))
+emit("ARCH14_DRAWER_FILTER_SCOPED_10000_KB_DELTA", format_float(ARCH14_FILTER_SCOPED_10000_HEAP_KB))
 emit("DRAW01_FILTER_MIXED_VISIBLE_AND_CACHED_MEDIAN_MS", format_float(ns_to_ms(filter_mixed_visible_and_cached_median_ns)))
 emit("DRAW01_FILTER_MIXED_VISIBLE_AND_CACHED_P95_MS", format_float(ns_to_ms(filter_mixed_visible_and_cached_p95_ns)))
 emit("DRAW01_FILTER_MIXED_VISIBLE_AND_CACHED_KB_DELTA", format_float(filter_mixed_visible_and_cached_heap_kb))
 emit("DRAW01_FILTER_MIXED_VISIBLE_AND_CACHED_SENTINEL_OK", "true")
 emit("UX13_DRAWER_FILTER_PERF_COLD_CONNECTION_ONLY", "true")
 emit("UX13_DRAWER_FILTER_PERF_MIXED_VISIBLE_CACHE", "true")
-emit("ARCH14_DRAWER_FILTER_SCOPED_10_SENTINEL_OK", "true")
-emit("ARCH14_DRAWER_FILTER_SCOPED_100_SENTINEL_OK", "true")
-emit("ARCH14_DRAWER_FILTER_SCOPED_1000_SENTINEL_OK", "true")
-emit("ARCH14_DRAWER_FILTER_SCOPED_10000_SENTINEL_OK", "true")
-emit("ARCH14_DRAWER_FILTER_MIXED_VISIBLE_AND_LAZY_SENTINEL_OK", "true")
+local arch14_perf_real_measurements = #filter_cold_connection_only_10_samples >= MEASURED_COUNT
+  and #filter_cold_connection_only_100_samples >= MEASURED_COUNT
+  and #filter_cold_connection_only_1000_samples >= MEASURED_COUNT
+  and #ARCH14_FILTER_SCOPED_10000_SAMPLES >= MEASURED_COUNT
+  and #filter_mixed_visible_and_cached_samples >= MEASURED_COUNT
+emit("ARCH14_DRAWER_FILTER_SCOPED_10_SENTINEL_OK", arch14_perf_real_measurements and "true" or "false")
+emit("ARCH14_DRAWER_FILTER_SCOPED_100_SENTINEL_OK", arch14_perf_real_measurements and "true" or "false")
+emit("ARCH14_DRAWER_FILTER_SCOPED_1000_SENTINEL_OK", arch14_perf_real_measurements and "true" or "false")
+emit("ARCH14_DRAWER_FILTER_SCOPED_10000_SENTINEL_OK", arch14_perf_real_measurements and "true" or "false")
+emit("ARCH14_DRAWER_FILTER_MIXED_VISIBLE_AND_LAZY_SENTINEL_OK", arch14_perf_real_measurements and "true" or "false")
+emit("ARCH14_PERF_REAL_MEASUREMENTS_OK", arch14_perf_real_measurements and "true" or "false")
 emit("ARCH14_PERF_DRAWER_FILTER_SCOPED_OK", "unfrozen")
 
 emit_median_max("DRAW01_APPLY_MAX_HIT_MS", apply_max_hit_samples)
@@ -1611,6 +1626,10 @@ local additive_measurements = {
     median_ms = ns_to_ms(filter_cold_connection_only_1000_median_ns),
     p95_ms = ns_to_ms(filter_cold_connection_only_1000_p95_ns),
   },
+  arch14_drawer_filter_scoped_10000 = {
+    median_ms = ns_to_ms(ARCH14_FILTER_SCOPED_10000_MEDIAN_NS),
+    p95_ms = ns_to_ms(ARCH14_FILTER_SCOPED_10000_P95_NS),
+  },
   filter_mixed_visible_and_cached = {
     median_ms = ns_to_ms(filter_mixed_visible_and_cached_median_ns),
     p95_ms = ns_to_ms(filter_mixed_visible_and_cached_p95_ns),
@@ -1627,6 +1646,7 @@ local additive_scenarios = {
   "filter_cold_connection_only_10",
   "filter_cold_connection_only_100",
   "filter_cold_connection_only_1000",
+  "arch14_drawer_filter_scoped_10000",
   "filter_mixed_visible_and_cached",
 }
 

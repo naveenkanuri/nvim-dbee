@@ -693,6 +693,19 @@ end
 
 ---@private
 ---@param conn_id connection_id
+---@param structures DBStructure[]?
+---@return DBStructure[]
+function Handler:_filter_structures_for_connection(conn_id, structures)
+  local params = self:connection_get_params(conn_id)
+  local normalized, err = schema_filter.normalize(params and params.schema_filter or nil, params and params.type or nil)
+  if not normalized then
+    error(err or "invalid schema_filter")
+  end
+  return schema_filter.filter_structures(structures or {}, normalized)
+end
+
+---@private
+---@param conn_id connection_id
 ---@param new_epoch integer
 ---@param error_kind string
 function Handler:_supersede_schema_flights(conn_id, new_epoch, error_kind)
@@ -789,6 +802,32 @@ function Handler:_schema_object_active_decrement(conn_id)
   end
 end
 
+local function upsert_schema_waiter(waiters, waiter)
+  for _, existing in ipairs(waiters or {}) do
+    if existing.consumer == waiter.consumer then
+      existing.request_id = waiter.request_id
+      existing.caller_token = waiter.caller_token
+      existing.callback = waiter.callback
+      return
+    end
+  end
+  waiters[#waiters + 1] = waiter
+end
+
+local function schema_queue_insert(queue, entry)
+  if entry.priority == "drawer" then
+    for index, queued in ipairs(queue.queue or {}) do
+      if queued.priority ~= "drawer" then
+        table.insert(queue.queue, index, entry)
+        queue.queued_keys[entry.key] = entry
+        return
+      end
+    end
+  end
+  queue.queue[#queue.queue + 1] = entry
+  queue.queued_keys[entry.key] = entry
+end
+
 function Handler:_start_schema_object_entry(entry)
   local queue = self:_schema_object_queue(entry.conn_id)
   queue.active = (queue.active or 0) + 1
@@ -819,7 +858,14 @@ end
 function Handler:_drain_schema_object_queue(conn_id)
   local queue = self:_schema_object_queue(conn_id)
   while (queue.active or 0) < (queue.max_active or 4) and #(queue.queue or {}) > 0 do
-    local entry = table.remove(queue.queue, 1)
+    local next_index = 1
+    for index, candidate in ipairs(queue.queue) do
+      if candidate.priority == "drawer" then
+        next_index = index
+        break
+      end
+    end
+    local entry = table.remove(queue.queue, next_index)
     queue.queued_keys[entry.key] = nil
     self:_start_schema_object_entry(entry)
   end
@@ -832,8 +878,7 @@ end
 function Handler:_enqueue_schema_object_entry(conn_id, newest)
   local queue = self:_schema_object_queue(conn_id)
   if #queue.queue < queue.max_queue then
-    queue.queue[#queue.queue + 1] = newest
-    queue.queued_keys[newest.key] = newest
+    schema_queue_insert(queue, newest)
     return true
   end
 
@@ -858,8 +903,7 @@ function Handler:_enqueue_schema_object_entry(conn_id, newest)
         error_kind = "queue_full",
       })
     end
-    queue.queue[#queue.queue + 1] = newest
-    queue.queued_keys[newest.key] = newest
+    schema_queue_insert(queue, newest)
     return true
   end
 
@@ -1025,14 +1069,14 @@ function Handler:connection_get_schema_objects_singleflight(opts)
 
   local active = self._schema_object_flights[key]
   if active then
-    active.waiters[#active.waiters + 1] = waiter
+    upsert_schema_waiter(active.waiters, waiter)
     return { epoch = epoch, request_id = waiter.request_id, joined = true }
   end
 
   local queue = self:_schema_object_queue(opts.conn_id)
   local queued = queue.queued_keys[key]
   if queued then
-    queued.waiters[#queued.waiters + 1] = waiter
+    upsert_schema_waiter(queued.waiters, waiter)
     return { epoch = epoch, request_id = waiter.request_id, joined = true, queued = true }
   end
 
@@ -1056,13 +1100,16 @@ function Handler:connection_get_schema_objects_singleflight(opts)
   end
 
   local enqueued = self:_enqueue_schema_object_entry(opts.conn_id, entry)
-  return {
+  local result = {
     epoch = epoch,
     request_id = waiter.request_id,
     joined = false,
     queued = enqueued,
-    error_kind = enqueued and nil or "queue_full",
   }
+  if not enqueued then
+    result.error_kind = "queue_full"
+  end
+  return result
 end
 
 ---@param consumer string
@@ -1197,6 +1244,8 @@ function Handler:migrate_structure_flights(old_conn_id, new_conn_id, rewrite)
     if flight.conn_id == old_conn_id then
       self._schema_list_flights[key] = nil
       local new_key = schema_list_key(new_conn_id, flight.epoch, flight.purpose)
+      flight.alias_conn_ids = flight.alias_conn_ids or {}
+      flight.alias_conn_ids[old_conn_id] = true
       flight.conn_id = new_conn_id
       self._schema_list_request_lookup[flight.request_id] = new_key
       list_migrated[new_key] = flight
@@ -1211,6 +1260,8 @@ function Handler:migrate_structure_flights(old_conn_id, new_conn_id, rewrite)
     if flight.conn_id == old_conn_id then
       self._schema_object_flights[key] = nil
       local new_key = schema_object_key(new_conn_id, flight.folded_schema, flight.epoch)
+      flight.alias_conn_ids = flight.alias_conn_ids or {}
+      flight.alias_conn_ids[old_conn_id] = true
       flight.conn_id = new_conn_id
       flight.key = new_key
       self._schema_object_request_lookup[flight.request_id] = new_key
@@ -1219,6 +1270,27 @@ function Handler:migrate_structure_flights(old_conn_id, new_conn_id, rewrite)
   end
   for key, flight in pairs(object_migrated) do
     self._schema_object_flights[key] = flight
+  end
+
+  local old_queue = self._schema_object_queues and self._schema_object_queues[old_conn_id]
+  if old_queue then
+    local new_queue = self:_schema_object_queue(new_conn_id)
+    new_queue.active = (new_queue.active or 0) + (old_queue.active or 0)
+    for _, entry in ipairs(old_queue.queue or {}) do
+      old_queue.queued_keys[entry.key] = nil
+      entry.conn_id = new_conn_id
+      entry.key = schema_object_key(new_conn_id, entry.folded_schema, entry.epoch)
+      entry.opts = self:get_schema_filter(new_conn_id)
+      local existing = new_queue.queued_keys[entry.key]
+      if existing then
+        for _, waiter in ipairs(entry.waiters or {}) do
+          upsert_schema_waiter(existing.waiters, waiter)
+        end
+      else
+        schema_queue_insert(new_queue, entry)
+      end
+    end
+    self._schema_object_queues[old_conn_id] = nil
   end
 end
 
@@ -1256,7 +1328,7 @@ function Handler:_on_singleflight_structure_loaded(data)
       request_id = waiter.request_id,
       root_epoch = payload_root_epoch,
       caller_token = waiter.caller_token,
-      structures = data.error and nil or copy_payload(data.structures),
+      structures = data.error and nil or self:_filter_structures_for_connection(flight.conn_id, data.structures),
       error = data.error,
     })
   end
@@ -1300,7 +1372,11 @@ function Handler:_on_schema_list_loaded(data)
   end
 
   local payload_epoch = tonumber(data.root_epoch) or 0
-  if flight.conn_id ~= data.conn_id or flight.epoch ~= payload_epoch then
+  local conn_id_matches = flight.conn_id == data.conn_id
+  if not conn_id_matches and flight.alias_conn_ids then
+    conn_id_matches = flight.alias_conn_ids[data.conn_id] == true
+  end
+  if not conn_id_matches or flight.epoch ~= payload_epoch then
     return
   end
 
@@ -1338,7 +1414,11 @@ function Handler:_on_schema_objects_loaded(data)
   self:_drain_schema_object_queue(flight.conn_id)
 
   local payload_epoch = tonumber(data.root_epoch) or 0
-  if flight.conn_id ~= data.conn_id or flight.epoch ~= payload_epoch then
+  local conn_id_matches = flight.conn_id == data.conn_id
+  if not conn_id_matches and flight.alias_conn_ids then
+    conn_id_matches = flight.alias_conn_ids[data.conn_id] == true
+  end
+  if not conn_id_matches or flight.epoch ~= payload_epoch then
     return
   end
 
@@ -2032,7 +2112,7 @@ function Handler:connection_get_structure(id, opts)
   if not ret or ret == vim.NIL then
     return {}
   end
-  return ret
+  return self:_filter_structures_for_connection(id, ret)
 end
 
 ---@param id connection_id

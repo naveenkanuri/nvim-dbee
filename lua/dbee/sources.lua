@@ -1,3 +1,4 @@
+local schema_filter = require("dbee.schema_filter")
 local utils = require("dbee.utils")
 
 local uv = vim.loop
@@ -137,12 +138,42 @@ local function strip_control_fields(record)
   return clean
 end
 
-local function delete_top_level_keys(record, remove_keys)
+local function delete_key_path(record, key_path)
+  local current = record
+  local parts = {}
+  for part in tostring(key_path or ""):gmatch("[^%.]+") do
+    parts[#parts + 1] = part
+  end
+  if #parts == 0 then
+    return
+  end
+  for index = 1, #parts - 1 do
+    if type(current) ~= "table" then
+      return
+    end
+    current = current[parts[index]]
+  end
+  if type(current) == "table" then
+    current[parts[#parts]] = nil
+  end
+end
+
+local function delete_keys(record, remove_keys)
   local next_record = vim.deepcopy(record or {})
   for _, key in ipairs(remove_keys or {}) do
-    next_record[key] = nil
+    delete_key_path(next_record, key)
   end
   return next_record
+end
+
+local function validate_record_schema_filter(record)
+  if type(record) ~= "table" or record.schema_filter == nil or record.schema_filter == vim.NIL then
+    return
+  end
+  local ok, err = schema_filter.validate_persisted_filter(record.schema_filter, record.type)
+  if not ok then
+    error(err)
+  end
 end
 
 local function recursive_merge(existing, details)
@@ -222,6 +253,7 @@ function sources.FileSource:create(conn)
   local existing = read_json_records(self.path)
   local record = strip_control_fields(conn)
   record.id = record.id or ("file_source_/" .. utils.random_string())
+  validate_record_schema_filter(record)
   existing[#existing + 1] = record
 
   write_records_atomically(self.path, existing)
@@ -267,8 +299,10 @@ function sources.FileSource:update(id, details)
   for index, ex in ipairs(existing) do
     if ex.id == id then
       matched = true
-      local stripped = delete_top_level_keys(ex, remove_keys)
-      existing[index] = recursive_merge(stripped, clean_details)
+      local stripped = delete_keys(ex, remove_keys)
+      local merged = recursive_merge(stripped, clean_details)
+      validate_record_schema_filter(merged)
+      existing[index] = merged
     end
   end
 

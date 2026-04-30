@@ -84,10 +84,13 @@ end
 
 local function schema_filter_to_state(raw_filter)
   raw_filter = type(raw_filter) == "table" and raw_filter or {}
+  local original_active = raw_filter.include ~= nil or raw_filter.exclude ~= nil or raw_filter.lazy_per_schema == true
   return {
     include_text = table.concat(raw_filter.include or {}, ", "),
     exclude_text = table.concat(raw_filter.exclude or {}, ", "),
     lazy_per_schema = raw_filter.lazy_per_schema == true,
+    original_active = original_active,
+    cleared = false,
     discovered_schemas = {},
     discovery_error = nil,
     discovery_status = nil,
@@ -649,6 +652,9 @@ local function build_schema_filter_from_state(state, conn_type)
   local filter_state = state.schema_filter or {}
   local include = split_schema_patterns(filter_state.include_text)
   local exclude = split_schema_patterns(filter_state.exclude_text)
+  if filter_state.lazy_per_schema == true and #include == 0 then
+    return nil, "schema_filter.lazy_per_schema requires a non-empty schema_filter.include"
+  end
   local filter = {}
   if #include > 0 then
     filter.include = include
@@ -663,11 +669,25 @@ local function build_schema_filter_from_state(state, conn_type)
     return nil, nil
   end
 
+  local ok_validate, validate_err = schema_filter.validate_persisted_filter(filter, conn_type)
+  if not ok_validate then
+    return nil, validate_err
+  end
   local _, err = schema_filter.to_structure_options(filter, conn_type)
   if err then
     return nil, err
   end
   return filter, nil
+end
+
+local function append_remove_key(record, key)
+  record.__remove_keys = record.__remove_keys or {}
+  for _, existing in ipairs(record.__remove_keys) do
+    if existing == key then
+      return
+    end
+  end
+  record.__remove_keys[#record.__remove_keys + 1] = key
 end
 
 local function apply_schema_filter_to_submission(state, submission)
@@ -680,8 +700,19 @@ local function apply_schema_filter_to_submission(state, submission)
     if type(submission.wizard) == "table" then
       submission.wizard.schema_filter = deepcopy(filter)
     end
-  elseif type(submission.wizard) == "table" then
-    submission.wizard.schema_filter = nil
+  else
+    local filter_state = state.schema_filter or {}
+    local should_delete = filter_state.cleared == true or filter_state.original_active == true
+    submission.params.schema_filter = nil
+    if should_delete then
+      append_remove_key(submission.params, "schema_filter")
+    end
+    if type(submission.wizard) == "table" then
+      submission.wizard.schema_filter = nil
+      if should_delete then
+        append_remove_key(submission.params, "wizard.schema_filter")
+      end
+    end
   end
   return submission, nil
 end
@@ -1419,7 +1450,10 @@ function Wizard:toggle_lazy_schema()
 end
 
 function Wizard:clear_schema_filter()
+  local original_active = self.state.schema_filter and self.state.schema_filter.original_active == true
   self.state.schema_filter = schema_filter_to_state(nil)
+  self.state.schema_filter.original_active = original_active
+  self.state.schema_filter.cleared = true
   self.state.schema_filter.discovery_default = self.opts.mode == "edit" and "yes" or "no"
   self:render()
 end

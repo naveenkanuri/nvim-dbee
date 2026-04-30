@@ -26,8 +26,8 @@ func TestPostgresStructureWithOptionsPushesSchemaFilterIntoSQL(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	driver := &postgresDriver{c: builders.NewClient(db)}
-	mock.ExpectQuery(`(?s)WHERE \(\(schema_name = \$1 OR schema_name LIKE \$2\) AND NOT \(schema_name LIKE \$3\)\)`).
-		WithArgs("hr", "fin%", "hr_tmp%").
+	mock.ExpectQuery(`(?s)FROM information_schema\.tables\s+WHERE \(\(table_schema = \$1 OR table_schema LIKE \$2\) AND NOT \(table_schema LIKE \$3\)\).*UNION ALL.*FROM pg_matviews\s+WHERE \(\(schemaname = \$4 OR schemaname LIKE \$5\) AND NOT \(schemaname LIKE \$6\)\)`).
+		WithArgs("hr", "fin%", "hr_tmp%", "hr", "fin%", "hr_tmp%").
 		WillReturnRows(sqlmock.NewRows([]string{"schema_name", "object_name", "object_type"}).
 			AddRow("hr", "employees", "BASE TABLE"))
 
@@ -77,8 +77,14 @@ func TestOracleStructureWithOptionsPushesSchemaFilterIntoSQL(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	driver := &oracleDriver{c: builders.NewClient(db), db: db}
-	mock.ExpectQuery(`(?s)WHERE owner IN \(SELECT username FROM all_users WHERE common = 'NO'\) AND \(\(owner = :1 OR owner LIKE :2\) AND NOT \(owner LIKE :3\)\)`).
-		WithArgs("HR", "FIN%", "HR_TEMP%").
+	mock.ExpectQuery(`(?s)FROM all_tables\s+WHERE owner IN \(SELECT username FROM all_users WHERE common = 'NO'\) AND \(\(owner = :1 OR owner LIKE :2\) AND NOT \(owner LIKE :3\)\).*FROM all_external_tables\s+WHERE owner IN \(SELECT username FROM all_users WHERE common = 'NO'\) AND \(\(owner = :4 OR owner LIKE :5\) AND NOT \(owner LIKE :6\)\).*FROM all_views\s+WHERE owner IN \(SELECT username FROM all_users WHERE common = 'NO'\) AND \(\(owner = :7 OR owner LIKE :8\) AND NOT \(owner LIKE :9\)\).*FROM all_mviews\s+WHERE owner IN \(SELECT username FROM all_users WHERE common = 'NO'\) AND \(\(owner = :10 OR owner LIKE :11\) AND NOT \(owner LIKE :12\)\).*FROM all_objects\s+WHERE owner IN \(SELECT username FROM all_users WHERE common = 'NO'\) AND object_type IN \('PROCEDURE', 'FUNCTION'\) AND \(\(owner = :13 OR owner LIKE :14\) AND NOT \(owner LIKE :15\)\)`).
+		WithArgs(
+			"HR", "FIN%", "HR_TEMP%",
+			"HR", "FIN%", "HR_TEMP%",
+			"HR", "FIN%", "HR_TEMP%",
+			"HR", "FIN%", "HR_TEMP%",
+			"HR", "FIN%", "HR_TEMP%",
+		).
 		WillReturnRows(sqlmock.NewRows([]string{"owner", "object_name", "object_type"}).
 			AddRow("HR", "EMPLOYEES", "TABLE"))
 

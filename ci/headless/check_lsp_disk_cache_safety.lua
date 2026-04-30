@@ -466,11 +466,14 @@ for i = 1, 10000 do
 end
 delete_cache:delete_column_cache_for_filter_change()
 local delete_initial = delete_cache:get_stats()
-assert_eq("filter delete total", delete_initial.pending_delete_total_files, 10000)
+assert_true("filter delete initial scan bounded", delete_initial.pending_delete_sync_scanned <= 200)
+assert_true("filter delete initial discovery bounded", delete_initial.pending_delete_total_files <= 200)
 assert_true("filter delete sync bounded", delete_initial.pending_delete_sync_deleted <= 100)
 vim.wait(5000, function()
   return #vim.fn.glob(delete_cache.cache_dir .. "/disk-filter-delete_cols_*.json", false, true) == 0
 end, 20)
+local delete_drained = delete_cache:get_stats()
+assert_eq("filter delete total", delete_drained.pending_delete_total_files, 10000)
 assert_eq("filter delete drained", #vim.fn.glob(delete_cache.cache_dir .. "/disk-filter-delete_cols_*.json", false, true), 0)
 
 vim.notify = saved_notify
@@ -496,6 +499,7 @@ print("UX13_CACHE_MIGRATION_ALL_PASS=true")
 print("ARCH14_CACHE_V3_MIGRATION_OK=true")
 print("ARCH14_FILTER_CHANGE_INVALIDATES=true")
 print("ARCH14_FILTER_CHANGE_CACHE_DELETION_BOUNDED=true")
+print("ARCH14_FILTER_DELETION_BOUNDED_SCAN=true")
 print("ARCH14_PENDING_DELETION_FENCE_OK=true")
 print("ARCH14_CACHE_TRUE_CORRUPTION_WARN_RETAINED=true")
 

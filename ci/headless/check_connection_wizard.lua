@@ -1741,6 +1741,19 @@ local function run_schema_filter_wizard_contract()
   print("ARCH14_SCHEMA_DISCOVERY_MANUAL_FALLBACK=true")
 
   clear_runtime_observations(env.runtime)
+  local before_clear_records = read_json(env.file_path)
+  local before_clear_record = find_record(before_clear_records, "conn-form")
+  before_clear_record.schema_filter = {
+    include = { "APP%" },
+    exclude = { "APP_TMP%" },
+    lazy_per_schema = true,
+  }
+  before_clear_record.wizard = before_clear_record.wizard or {}
+  before_clear_record.wizard.schema_filter = {
+    include = { "APP%" },
+    lazy_per_schema = true,
+  }
+  write_json(env.file_path, before_clear_records)
   local edit_wizard = expect_wizard(env, function()
     env.drawer:open_edit_connection_with_wizard(env:file_source_meta(), "conn-form")
   end)
@@ -1762,8 +1775,11 @@ local function run_schema_filter_wizard_contract()
   submit_and_assert_success(edit_wizard)
   local cleared_record = find_record(read_json(env.file_path), "conn-form")
   assert_eq("clear filter omitted", cleared_record.schema_filter, nil)
+  assert_eq("clear nested filter omitted", cleared_record.wizard and cleared_record.wizard.schema_filter, nil)
   print("ARCH14_WIZARD_EDIT_DISCOVERY_DEFAULT_YES=true")
   print("ARCH14_WIZARD_CLEAR_FILTER_OK=true")
+  print("ARCH14_FILTER_CLEAR_NO_STALE=true")
+  print("ARCH14_FILTER_VALIDATION_ENFORCED=true")
 
   env:cleanup()
   print("ARCH14_WIZARD_ALL_PASS=true")

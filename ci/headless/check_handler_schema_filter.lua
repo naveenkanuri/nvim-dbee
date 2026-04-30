@@ -114,17 +114,64 @@ local function run_schema_object_singleflight_and_backpressure()
   assert_eq("threaded include", captured_opts.schema_filter.include[1], "app%")
   assert_eq("threaded signature", captured_opts.schema_filter_signature, "schema-filter-v1|type=postgres|fold=lower|lazy=1|include=4:app%|exclude=8:app_tmp%")
 
+  local evicted_payloads = {}
   for index = 1, 100 do
     handler:connection_get_schema_objects_singleflight({
       conn_id = "conn-objects",
       schema = "schema_" .. tostring(index),
       consumer = "lsp_" .. tostring(index),
       priority = "lsp",
+      callback = function(payload)
+        evicted_payloads[#evicted_payloads + 1] = payload
+      end,
     })
   end
   local queue = handler._schema_object_queues["conn-objects"]
   assert_true("active cap", queue.active <= 4)
   assert_true("queue cap", #queue.queue <= 32)
+  local evictions_before_drawer = #evicted_payloads
+  local drawer_priority = handler:connection_get_schema_objects_singleflight({
+    conn_id = "conn-objects",
+    schema = "schema_drawer_priority",
+    consumer = "drawer-priority",
+    priority = "drawer",
+  })
+  assert_true("drawer priority accepted", drawer_priority.error_kind == nil)
+  assert_eq("queue cap after drawer priority", #queue.queue, 32)
+  assert_eq("drawer inserted before lsp", queue.queue[1].priority, "drawer")
+  assert_true("lsp evicted for drawer", #evicted_payloads > evictions_before_drawer)
+  assert_eq("lsp eviction reason", evicted_payloads[#evicted_payloads].error_kind, "queue_full")
+
+  local coalesce_handler = Handler:new({})
+  install_connection_params_stub()
+  vim.fn.DbeeStructureForSchemaAsync = function() end
+  for index = 1, 4 do
+    coalesce_handler:connection_get_schema_objects_singleflight({
+      conn_id = "conn-coalesce",
+      schema = "active_" .. tostring(index),
+      consumer = "active_" .. tostring(index),
+      priority = "drawer",
+    })
+  end
+  local first_queued = coalesce_handler:connection_get_schema_objects_singleflight({
+    conn_id = "conn-coalesce",
+    schema = "same_schema",
+    consumer = "lsp-schema-dot",
+    priority = "lsp",
+    request_id = 10,
+  })
+  local second_queued = coalesce_handler:connection_get_schema_objects_singleflight({
+    conn_id = "conn-coalesce",
+    schema = "SAME_SCHEMA",
+    consumer = "lsp-schema-dot",
+    priority = "lsp",
+    request_id = 11,
+  })
+  local coalesce_queue = coalesce_handler._schema_object_queues["conn-coalesce"]
+  assert_true("same key queued", first_queued.queued == true)
+  assert_true("same key joined", second_queued.joined == true)
+  assert_eq("same consumer coalesced", #coalesce_queue.queue[1].waiters, 1)
+  assert_eq("same consumer request updated", coalesce_queue.queue[1].waiters[1].request_id, 11)
 
   local drawer_full = Handler:new({})
   install_connection_params_stub()
@@ -148,6 +195,8 @@ local function run_schema_object_singleflight_and_backpressure()
   print("ARCH14_SCHEMA_OBJECT_SINGLEFLIGHT_OK=true")
   print("ARCH14_SCHEMA_OBJECT_BACKPRESSURE_OK=true")
   print("ARCH14_SCHEMA_OBJECT_QUEUE_BOUNDED=true")
+  print("ARCH14_QUEUE_PRIORITY_HONORED=true")
+  print("ARCH14_QUEUE_COALESCE_OK=true")
   print("ARCH14_OPTIONS_LUA_GO_ROUNDTRIP_OK=true")
 end
 
@@ -158,6 +207,91 @@ local function run_manifest_contract()
   assert_true("structure for schema manifest", text:find("DbeeStructureForSchema", 1, true) ~= nil)
   assert_true("spec schema manifest", text:find("DbeeConnectionListSchemasSpec", 1, true) ~= nil)
   print("ARCH14_RPC_MANIFEST_REGISTERED=true")
+end
+
+local function run_reconnect_schema_flight_migration()
+  install_connection_params_stub()
+  local handler = Handler:new({})
+  local list_calls = {}
+  local object_calls = {}
+  vim.fn.DbeeConnectionListSchemasAsync = function(conn_id, request_id, root_epoch, caller_token)
+    list_calls[#list_calls + 1] = {
+      conn_id = conn_id,
+      request_id = request_id,
+      root_epoch = root_epoch,
+      caller_token = caller_token,
+    }
+  end
+  vim.fn.DbeeStructureForSchemaAsync = function(conn_id, request_id, root_epoch, caller_token, schema, opts)
+    object_calls[#object_calls + 1] = {
+      conn_id = conn_id,
+      request_id = request_id,
+      root_epoch = root_epoch,
+      caller_token = caller_token,
+      schema = schema,
+      opts = opts,
+    }
+  end
+
+  local list_payload = nil
+  handler:connection_list_schemas_singleflight({
+    conn_id = "conn-old",
+    consumer = "drawer",
+    callback = function(payload)
+      list_payload = payload
+    end,
+  })
+
+  local object_payload = nil
+  handler:connection_get_schema_objects_singleflight({
+    conn_id = "conn-old",
+    schema = "app",
+    consumer = "drawer",
+    priority = "drawer",
+    callback = function(payload)
+      object_payload = payload
+    end,
+  })
+  for index = 1, 4 do
+    handler:connection_get_schema_objects_singleflight({
+      conn_id = "conn-old",
+      schema = "active_" .. tostring(index),
+      consumer = "active_migrate_" .. tostring(index),
+      priority = "drawer",
+    })
+  end
+  handler:connection_get_schema_objects_singleflight({
+    conn_id = "conn-old",
+    schema = "queued_schema",
+    consumer = "queued_migrate",
+    priority = "lsp",
+  })
+
+  handler:migrate_structure_flights("conn-old", "conn-new", { schema_scope_matches = true })
+  assert_true("queued migrated", handler._schema_object_queues["conn-new"] ~= nil)
+  assert_eq("old queue cleared", handler._schema_object_queues["conn-old"], nil)
+
+  handler:_on_schema_list_loaded({
+    conn_id = "conn-old",
+    request_id = list_calls[1].request_id,
+    root_epoch = list_calls[1].root_epoch,
+    caller_token = "__singleflight",
+    schemas = { { name = "app" } },
+  })
+  assert_true("list old completion accepted", list_payload ~= nil)
+  assert_eq("list migrated conn id", list_payload.conn_id, "conn-new")
+
+  handler:_on_schema_objects_loaded({
+    conn_id = "conn-old",
+    request_id = object_calls[1].request_id,
+    root_epoch = object_calls[1].root_epoch,
+    caller_token = "__singleflight",
+    schema = "app",
+    objects = { { type = "table", schema = "app", name = "accounts" } },
+  })
+  assert_true("object old completion accepted", object_payload ~= nil)
+  assert_eq("object migrated conn id", object_payload.conn_id, "conn-new")
+  print("ARCH14_RECONNECT_SCHEMA_FLIGHT_MIGRATION_OK=true")
 end
 
 local function run_schema_spec_non_mutating_contract()
@@ -197,6 +331,7 @@ end
 run_schema_list_singleflight()
 run_schema_object_singleflight_and_backpressure()
 run_manifest_contract()
+run_reconnect_schema_flight_migration()
 run_schema_spec_non_mutating_contract()
 
 print("ARCH14_SCHEMA_EVENTS_SHAPED=true")

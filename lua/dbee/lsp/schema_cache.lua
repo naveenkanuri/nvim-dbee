@@ -25,6 +25,8 @@ local schema_filter = require("dbee.schema_filter")
 local MAX_COLUMNS_IN_MEMORY = 500
 local SYNC_COLUMN_FILE_LOAD_LIMIT = 100
 local SYNC_COLUMN_FILE_SCAN_LIMIT = 200
+local FILTER_DELETE_SYNC_SCAN_LIMIT = 200
+local FILTER_DELETE_SYNC_DELETE_LIMIT = 100
 local COLUMN_CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
 local SCHEMA_CACHE_VERSION = 3
 local MATERIALIZATIONS = { "table", "view" }
@@ -193,6 +195,8 @@ function SchemaCache:new(handler, conn_id)
     loaded_schemas = {},
     pending_delete_total_files = 0,
     pending_delete_sync_deleted = 0,
+    pending_delete_sync_scanned = 0,
+    pending_delete_deferred_scanned = 0,
     pending_delete_deferred_drain_count = 0,
   }
   setmetatable(o, self)
@@ -248,7 +252,7 @@ function SchemaCache:build_from_metadata_rows(rows)
       end
     end
 
-    if schema and tname then
+    if schema and tname and schema_filter.matches(schema, self.schema_scope) then
       otype = otype or "table"
       self.schemas[schema] = true
       if not self.tables[schema] then
@@ -1206,6 +1210,9 @@ function SchemaCache:_flatten(structs, parent_schema)
       if schema_name == "" then
         schema_name = "_default"
       end
+      if not schema_filter.matches(schema_name, self.schema_scope) then
+        goto continue
+      end
       self.schemas[schema_name] = true
       if not self.tables[schema_name] then
         self.tables[schema_name] = {}
@@ -1216,6 +1223,9 @@ function SchemaCache:_flatten(structs, parent_schema)
     elseif stype == "table" or stype == "view" then
       if schema == "" then
         schema = "_default"
+      end
+      if not schema_filter.matches(schema, self.schema_scope) then
+        goto continue
       end
       self.schemas[schema] = true
       if not self.tables[schema] then
@@ -1229,6 +1239,9 @@ function SchemaCache:_flatten(structs, parent_schema)
         -- as empty-type nodes without explicit schema fields.
         next_schema = s.name or ""
         if next_schema ~= "" then
+          if not schema_filter.matches(next_schema, self.schema_scope) then
+            goto continue
+          end
           self.schemas[next_schema] = true
           if not self.tables[next_schema] then
             self.tables[next_schema] = {}
@@ -1237,6 +1250,7 @@ function SchemaCache:_flatten(structs, parent_schema)
       end
       self:_flatten(s.children, next_schema ~= "" and next_schema or parent_schema)
     end
+    ::continue::
   end
 end
 
@@ -1498,50 +1512,102 @@ end
 
 function SchemaCache:delete_column_cache_for_filter_change()
   local prefix = self.conn_id .. "_cols_"
-  local paths = {}
+  local iter = nil
   if vim.fs and type(vim.fs.dir) == "function" then
-    local ok, iter = pcall(vim.fs.dir, self.cache_dir)
-    if ok and iter then
-      for name, entry_type in iter do
-        if entry_type == "file" and name:sub(1, #prefix) == prefix and name:sub(-5) == ".json" then
-          paths[#paths + 1] = self.cache_dir .. "/" .. name
-        end
+    local ok, dir_iter = pcall(vim.fs.dir, self.cache_dir)
+    if ok then
+      iter = function()
+        return dir_iter()
       end
     end
-  else
-    paths = vim.fn.glob(self.cache_dir .. "/" .. prefix .. "*.json", false, true)
+  end
+  if not iter then
+    local uv = vim.uv or vim.loop
+    local handle = uv and uv.fs_scandir(self.cache_dir)
+    if handle then
+      iter = function()
+        return uv.fs_scandir_next(handle)
+      end
+    end
+  end
+  iter = iter or function()
+    return nil
   end
 
-  table.sort(paths)
-  self.pending_delete_total_files = #paths
+  self.pending_delete_total_files = 0
   self.pending_delete_sync_deleted = 0
+  self.pending_delete_sync_scanned = 0
+  self.pending_delete_deferred_scanned = 0
   self.pending_delete_deferred_drain_count = 0
   self:_bump_disk_work_generation()
   local generation = self.disk_work_generation
-  local sync_limit = math.min(100, #paths)
-  for index = 1, sync_limit do
-    if os.remove(paths[index]) then
+
+  local function next_delete_path(state)
+    while state.scanned < FILTER_DELETE_SYNC_SCAN_LIMIT do
+      local name, entry_type = iter()
+      if not name then
+        return nil, "done"
+      end
+      state.scanned = state.scanned + 1
+      if entry_type == "file" and name:sub(1, #prefix) == prefix and name:sub(-5) == ".json" then
+        self.pending_delete_total_files = (self.pending_delete_total_files or 0) + 1
+        return self.cache_dir .. "/" .. name
+      end
+    end
+    return nil, "budget"
+  end
+
+  local sync_state = { scanned = 0 }
+  local sync_deleted_attempts = 0
+  local status = nil
+  while sync_deleted_attempts < FILTER_DELETE_SYNC_DELETE_LIMIT do
+    local path, next_status = next_delete_path(sync_state)
+    status = next_status
+    if not path then
+      break
+    end
+    sync_deleted_attempts = sync_deleted_attempts + 1
+    if os.remove(path) then
       self.pending_delete_sync_deleted = self.pending_delete_sync_deleted + 1
     end
   end
+  self.pending_delete_sync_scanned = sync_state.scanned
 
-  local next_index = sync_limit + 1
   local function step()
     if self.disk_work_generation ~= generation then
+      self.deferred_disk_work_canceled = (self.deferred_disk_work_canceled or 0) + 1
+      self.deferred_disk_work_scheduled = false
       return
     end
-    local last = math.min(next_index + 99, #paths)
-    for index = next_index, last do
-      os.remove(paths[index])
+    local state = { scanned = 0 }
+    local deleted_attempts = 0
+    local step_status = nil
+    while deleted_attempts < FILTER_DELETE_SYNC_DELETE_LIMIT do
+      local path, next_status = next_delete_path(state)
+      step_status = next_status
+      if not path then
+        break
+      end
+      deleted_attempts = deleted_attempts + 1
+      os.remove(path)
     end
+    self.pending_delete_deferred_scanned = (self.pending_delete_deferred_scanned or 0) + state.scanned
     self.pending_delete_deferred_drain_count = self.pending_delete_deferred_drain_count + 1
-    next_index = last + 1
-    if next_index <= #paths then
+    if step_status == "done" then
+      self.deferred_disk_work_scheduled = false
+      self.deferred_disk_work_drained = true
+    else
       vim.schedule(step)
     end
   end
-  if next_index <= #paths then
+
+  if status ~= "done" then
+    self.deferred_disk_work_scheduled = true
+    self.deferred_disk_work_drained = false
     vim.schedule(step)
+  else
+    self.deferred_disk_work_scheduled = false
+    self.deferred_disk_work_drained = true
   end
 end
 
@@ -1568,6 +1634,8 @@ function SchemaCache:get_stats()
     sync_column_file_scan_limit = SYNC_COLUMN_FILE_SCAN_LIMIT,
     pending_delete_total_files = self.pending_delete_total_files or 0,
     pending_delete_sync_deleted = self.pending_delete_sync_deleted or 0,
+    pending_delete_sync_scanned = self.pending_delete_sync_scanned or 0,
+    pending_delete_deferred_scanned = self.pending_delete_deferred_scanned or 0,
     pending_delete_deferred_drain_count = self.pending_delete_deferred_drain_count or 0,
   }
 end
@@ -1623,6 +1691,18 @@ function SchemaCache:schema_status(schema)
   return "loaded", actual_schema
 end
 
+function SchemaCache:has_unloaded_active_schemas()
+  if self.root_mode ~= "schemas_only" then
+    return false
+  end
+  for schema in pairs(self.schemas or {}) do
+    if schema_filter.matches(schema, self.schema_scope) and not self.loaded_schemas[self:_fold(schema)] then
+      return true
+    end
+  end
+  return false
+end
+
 function SchemaCache:get_schema_table_completion_async(schema)
   local status, actual_schema = self:schema_status(schema)
   if status == "loaded" then
@@ -1649,7 +1729,7 @@ function SchemaCache:get_schema_table_completion_async(schema)
 
   local root_epoch = self:_root_epoch({})
   local request_id = self:_next_request_id()
-  self.handler:connection_get_schema_objects_singleflight({
+  local request = self.handler:connection_get_schema_objects_singleflight({
     conn_id = self.conn_id,
     schema = actual_schema,
     consumer = "lsp-schema-dot",
@@ -1660,6 +1740,13 @@ function SchemaCache:get_schema_table_completion_async(schema)
       self:on_schema_objects_loaded(data)
     end,
   })
+  if request and request.error_kind == "queue_full" then
+    return {
+      items = {},
+      is_incomplete = false,
+      reason = "queue_full",
+    }
+  end
 
   return {
     items = {},

@@ -57,7 +57,14 @@ local function run_invalid_pattern_contract()
 
   opts, err = schema_filter.to_structure_options({ include = {} }, "oracle")
   assert_true("empty include rejected", opts == nil and tostring(err):find("include", 1, true) ~= nil)
+
+  local normalized_lazy = assert(schema_filter.normalize({ lazy_per_schema = true }, "postgres"))
+  assert_true("lazy without include forced off", normalized_lazy.lazy_per_schema == false)
+  assert_true("lazy helper without include false", schema_filter.is_lazy_enabled({ lazy_per_schema = true }) == false)
+  local ok_validate, validate_err = schema_filter.validate_persisted_filter({ lazy_per_schema = true }, "postgres")
+  assert_true("persisted lazy without include rejected", ok_validate == false and tostring(validate_err):find("include", 1, true) ~= nil)
   print("ARCH14_SCHEMA_FILTER_INVALID_PATTERN_REJECTED=true")
+  print("ARCH14_LAZY_REQUIRES_INCLUDE=true")
 end
 
 local function run_sources_preserve_filter_contract()
@@ -75,6 +82,12 @@ local function run_sources_preserve_filter_contract()
         exclude = { "app_tmp%" },
         lazy_per_schema = true,
       },
+      wizard = {
+        schema_filter = {
+          include = { "app%" },
+          lazy_per_schema = true,
+        },
+      },
     },
   }
   local file = assert(io.open(path, "w"))
@@ -83,13 +96,38 @@ local function run_sources_preserve_filter_contract()
 
   local source = require("dbee.sources").FileSource:new(path)
   local loaded = source:load()
-  vim.fn.delete(dir, "rf")
 
   assert_eq("loaded count", #loaded, 1)
   assert_eq("schema_filter include", loaded[1].schema_filter.include[1], "app%")
   assert_eq("schema_filter exclude", loaded[1].schema_filter.exclude[1], "app_tmp%")
   assert_true("schema_filter lazy", loaded[1].schema_filter.lazy_per_schema == true)
+
+  local update_ok, update_err = pcall(source.update, source, "conn-schema-filter", {
+    name = "Filtered",
+    type = "postgres",
+    url = "postgres://example",
+    __remove_keys = { "schema_filter", "wizard.schema_filter" },
+    wizard = {
+      mode = "postgres_url",
+    },
+  })
+  assert_true("clear filter update succeeds", update_ok)
+  local cleared = vim.fn.json_decode(table.concat(vim.fn.readfile(path), "\n"))[1]
+  assert_eq("top filter cleared", cleared.schema_filter, nil)
+  assert_eq("nested wizard filter cleared", cleared.wizard and cleared.wizard.schema_filter, nil)
+
+  local invalid_ok, invalid_err = pcall(source.create, source, {
+    name = "Invalid Lazy",
+    type = "postgres",
+    url = "postgres://invalid",
+    schema_filter = { lazy_per_schema = true },
+  })
+  assert_true("source create validates lazy include", invalid_ok == false and tostring(invalid_err):find("include", 1, true) ~= nil)
+  vim.fn.delete(dir, "rf")
+
   print("ARCH14_SCHEMA_FILTER_PERSISTED=true")
+  print("ARCH14_FILTER_CLEAR_NO_STALE=true")
+  print("ARCH14_FILTER_VALIDATION_ENFORCED=true")
 end
 
 local function run_handler_authority_contract()

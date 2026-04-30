@@ -391,37 +391,57 @@ func (d *oracleDriver) Structure() ([]*core.Structure, error) {
 	return d.StructureWithOptions(nil)
 }
 
-func oracleStructureQuery(where string) string {
-	if where != "" {
-		where = " AND " + where
+func oracleArmWhere(extra string, predicate string) string {
+	parts := []string{"owner IN (SELECT username FROM all_users WHERE common = 'NO')"}
+	if extra != "" {
+		parts = append(parts, extra)
+	}
+	if predicate != "" {
+		parts = append(parts, predicate)
+	}
+	return " WHERE " + strings.Join(parts, " AND ")
+}
+
+func oracleStructureQuery(predicates []string) string {
+	armPredicate := func(index int) string {
+		if index < len(predicates) {
+			return predicates[index]
+		}
+		return ""
 	}
 	return `
-		SELECT owner, object_name, object_type
-		FROM (
-			SELECT owner, table_name as object_name, 'TABLE' as object_type
-			FROM all_tables
-			UNION ALL
-			SELECT owner, table_name as object_name, 'EXTERNAL TABLE' as object_type
-			FROM all_external_tables
-			UNION ALL
-			SELECT owner, view_name as object_name, 'VIEW' as object_type
-			FROM all_views
-			UNION ALL
-			SELECT owner, mview_name as object_name, 'MATERIALIZED VIEW' as object_type
-			FROM all_mviews
-			UNION ALL
 			SELECT owner, object_name, object_type
-			FROM all_objects
-			WHERE object_type IN ('PROCEDURE', 'FUNCTION')
-		)
-		WHERE owner IN (SELECT username FROM all_users WHERE common = 'NO')` + where + `
-		ORDER BY owner, object_name
-	`
+			FROM (
+				SELECT owner, table_name as object_name, 'TABLE' as object_type
+				FROM all_tables` + oracleArmWhere("", armPredicate(0)) + `
+				UNION ALL
+				SELECT owner, table_name as object_name, 'EXTERNAL TABLE' as object_type
+				FROM all_external_tables` + oracleArmWhere("", armPredicate(1)) + `
+				UNION ALL
+				SELECT owner, view_name as object_name, 'VIEW' as object_type
+				FROM all_views` + oracleArmWhere("", armPredicate(2)) + `
+				UNION ALL
+				SELECT owner, mview_name as object_name, 'MATERIALIZED VIEW' as object_type
+				FROM all_mviews` + oracleArmWhere("", armPredicate(3)) + `
+				UNION ALL
+				SELECT owner, object_name, object_type
+				FROM all_objects
+				` + oracleArmWhere("object_type IN ('PROCEDURE', 'FUNCTION')", armPredicate(4)) + `
+			)
+			ORDER BY owner, object_name
+		`
 }
 
 func (d *oracleDriver) StructureWithOptions(opts *core.StructureOptions) ([]*core.Structure, error) {
-	where, args, _ := schemaPredicate("owner", opts, schemaDialectOracle, 1)
-	query := oracleStructureQuery(where)
+	predicates := make([]string, 5)
+	args := []any{}
+	next := 1
+	for index := range predicates {
+		var armArgs []any
+		predicates[index], armArgs, next = schemaPredicate("owner", opts, schemaDialectOracle, next)
+		args = append(args, armArgs...)
+	}
+	query := oracleStructureQuery(predicates)
 
 	// Use pool connection, not session conn. Structure queries are fully
 	// schema-qualified and don't need session state. Using pool avoids
@@ -473,10 +493,16 @@ func (d *oracleDriver) StructureForSchema(schema string, opts *core.StructureOpt
 	if !schemaAllowedByOptions(schema, opts) {
 		return []*core.Structure{}, nil
 	}
-	query := oracleStructureQuery("owner = :1")
+	predicates := make([]string, 5)
+	args := make([]any, 0, len(predicates))
+	for index := range predicates {
+		predicates[index] = fmt.Sprintf("owner = :%d", index+1)
+		args = append(args, schema)
+	}
+	query := oracleStructureQuery(predicates)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	rows, err := d.c.QueryWithArgs(ctx, query, schema)
+	rows, err := d.c.QueryWithArgs(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
