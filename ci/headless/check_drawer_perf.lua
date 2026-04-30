@@ -741,7 +741,7 @@ local function count_visible_table_nodes(drawer)
   local line_count = vim.api.nvim_buf_line_count(drawer.bufnr)
   for row = 1, line_count do
     local node = drawer.tree:get_node(row)
-    if node and drawer_model.SEARCHABLE_TYPES[node.type] then
+    if node and (node.type == "table" or node.type == "view") then
       count = count + 1
     end
   end
