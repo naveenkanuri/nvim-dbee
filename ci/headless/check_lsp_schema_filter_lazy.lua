@@ -8,6 +8,7 @@ package.preload["nio"] = package.preload["nio"] or function()
 end
 
 local server = require("dbee.lsp.server")
+local lsp_init = require("dbee.lsp")
 local SchemaCache = require("dbee.lsp.schema_cache")
 local schema_filter = require("dbee.schema_filter")
 
@@ -76,6 +77,18 @@ local queue_full_handler = {
   end,
   connection_get_schema_objects_singleflight = function()
     return { error_kind = "queue_full" }
+  end,
+}
+
+local transport_fail_handler = {
+  get_schema_filter_normalized = function()
+    return normalized
+  end,
+  get_authoritative_root_epoch = function()
+    return 7
+  end,
+  connection_get_schema_objects_singleflight = function()
+    return { error_kind = "transport" }
   end,
 }
 
@@ -179,6 +192,33 @@ assert_eq("queue_full truthful complete", queue_full_result.isIncomplete, false)
 assert_eq("queue_full empty", #queue_full_result.items, 0)
 queue_full_client.terminate()
 
+local transport_fail_cache = SchemaCache:new(transport_fail_handler, "lazy-lsp-transport-fail")
+transport_fail_cache:build_from_schemas({ { name = "app" } })
+local transport_fail_client = server.create(transport_fail_cache)({}, {})
+local transport_fail_buf = vim.api.nvim_create_buf(false, true)
+vim.api.nvim_buf_set_name(transport_fail_buf, "/tmp/dbee-lsp-lazy-transport-fail.sql")
+local transport_fail_uri = vim.uri_from_bufnr(transport_fail_buf)
+vim.api.nvim_buf_set_lines(transport_fail_buf, 0, -1, false, { "select * from app." })
+local transport_fail_done = false
+local transport_fail_result = nil
+transport_fail_client.request("textDocument/completion", {
+  textDocument = { uri = transport_fail_uri },
+  position = { line = 0, character = #"select * from app." },
+}, function(err, result)
+  if err then
+    fail("transport fail completion error: " .. tostring(err))
+  end
+  transport_fail_result = result
+  transport_fail_done = true
+end)
+vim.wait(1000, function()
+  return transport_fail_done
+end, 20)
+assert_true("transport fail completion returned", transport_fail_done)
+assert_eq("transport fail truthful complete", transport_fail_result.isIncomplete, false)
+assert_eq("transport fail empty", #transport_fail_result.items, 0)
+transport_fail_client.terminate()
+
 assert_true("schema objects applied", cache:on_schema_objects_loaded({
   conn_id = "lazy-lsp",
   root_epoch = 7,
@@ -188,6 +228,20 @@ assert_true("schema objects applied", cache:on_schema_objects_loaded({
     { type = "view", schema = "app", name = "account_view" },
   },
 }))
+
+local object_defense_cache = SchemaCache:new(fake_handler, "lazy-lsp-object-defense")
+object_defense_cache:build_from_schemas({ { name = "app" } })
+assert_true("schema object defense applied", object_defense_cache:on_schema_objects_loaded({
+  conn_id = "lazy-lsp-object-defense",
+  root_epoch = 7,
+  schema = "app",
+  objects = {
+    { type = "table", schema = "app", name = "payload_kept" },
+    { type = "table", schema = "other", name = "payload_leaked" },
+  },
+}))
+assert_true("schema object defense kept", object_defense_cache:find_table("payload_kept") ~= nil)
+assert_true("schema object defense pruned", object_defense_cache:find_table("payload_leaked") == nil)
 
 local warm = request_completion("select * from app.")
 assert_eq("schema-dot warm complete", warm.isIncomplete, false)
@@ -249,6 +303,47 @@ assert_eq("loaded missing diagnostic count", #missing, 1)
 assert_eq("loaded missing severity", missing[1].severity, vim.diagnostic.severity.WARN)
 assert_eq("loaded missing message", missing[1].message, "Unknown table: app.missing_table")
 
+local saved_client_id = lsp_init._client_id
+local saved_cache = lsp_init._cache
+local saved_conn_id = lsp_init._conn_id
+local eager_delete_count = 0
+local eager_build_count = 0
+lsp_init._client_id = 14
+lsp_init._conn_id = "lazy-lsp"
+lsp_init._cache = {
+  cancel_async = function() end,
+  refresh_schema_scope = function()
+    return true
+  end,
+  delete_column_cache_for_filter_change = function()
+    eager_delete_count = eager_delete_count + 1
+  end,
+  build_from_structure = function(_, structs)
+    eager_build_count = #structs
+  end,
+  save_to_disk = function() end,
+}
+lsp_init._on_structure_loaded({
+  get_authoritative_root_epoch = function()
+    return 7
+  end,
+  get_current_connection = function()
+    return { id = "lazy-lsp" }
+  end,
+}, {
+  conn_id = "lazy-lsp",
+  caller_token = "lsp",
+  root_epoch = 7,
+  structures = {
+    { type = "schema", schema = "app", name = "app" },
+  },
+})
+assert_eq("eager path deletes stale columns", eager_delete_count, 1)
+assert_eq("eager path rebuilds structure", eager_build_count, 1)
+lsp_init._client_id = saved_client_id
+lsp_init._cache = saved_cache
+lsp_init._conn_id = saved_conn_id
+
 client.terminate()
 unloaded_client.terminate()
 
@@ -259,9 +354,11 @@ print("ARCH14_LSP_SCHEMA_DOT_INCOMPLETE_OK=true")
 print("ARCH14_LSP_SCHEMA_DOT_WARM_OK=true")
 print("ARCH14_LSP_SCHEMA_DOT_NO_SYNC_FETCH=true")
 print("ARCH14_QUEUE_FULL_TRUTHFUL_LSP=true")
+print("ARCH14_LSP_TRANSPORT_FAIL_TRUTHFUL=true")
 print("ARCH14_OUT_OF_SCOPE_HINT_OK=true")
 print("ARCH14_LSP_LAZY_UNLOADED_NO_FALSE_WARN=true")
 print("ARCH14_LSP_UNQUALIFIED_LAZY_NO_FALSE_WARN=true")
+print("ARCH14_FILTER_DELETION_EAGER_PATH_OK=true")
 print("ARCH14_LSP_ALL_PASS=true")
 
 vim.fn.delete(vim.env.XDG_STATE_HOME, "rf")

@@ -63,6 +63,23 @@ local function add_conn_id(conn_id, ids)
   end
 end
 
+local function merge_remove_keys(record, keys)
+  if type(record) ~= "table" then
+    return
+  end
+  record.__remove_keys = record.__remove_keys or {}
+  local seen = {}
+  for _, key in ipairs(record.__remove_keys) do
+    seen[key] = true
+  end
+  for _, key in ipairs(keys or {}) do
+    if type(key) == "string" and key ~= "" and not seen[key] then
+      record.__remove_keys[#record.__remove_keys + 1] = key
+      seen[key] = true
+    end
+  end
+end
+
 ---@param candidates ConnectionParams[]
 ---@param predicate fun(candidate: ConnectionParams): boolean
 ---@return ConnectionParams|nil
@@ -86,6 +103,14 @@ end
 local function schema_filter_signature(conn_type, filter)
   local normalized = schema_filter.normalize(filter, conn_type)
   return normalized and normalized.schema_filter_signature or ""
+end
+
+local function schema_scope(conn)
+  local normalized = schema_filter.normalize(conn and conn.schema_filter or nil, conn and conn.type or nil)
+  return {
+    signature = normalized and normalized.schema_filter_signature or "",
+    fold = normalized and normalized.fold or schema_filter.fold_id(conn and conn.type or nil),
+  }
 end
 
 ---@param previous ConnectionParams?
@@ -143,10 +168,15 @@ local function build_rewrites(previous, current)
     end
 
     if match and match.id ~= old.id then
+      local old_scope = schema_scope(old)
+      local new_scope = schema_scope(match)
       rewrites[#rewrites + 1] = {
         old_conn_id = old.id,
         new_conn_id = match.id,
         schema_scope_matches = same_schema_scope(old, match),
+        schema_filter_signature = old_scope.signature,
+        schema_filter_fold = old_scope.fold,
+        target_schema_filter_signature = new_scope.signature,
       }
     end
 
@@ -706,6 +736,24 @@ end
 
 ---@private
 ---@param conn_id connection_id
+---@return string
+function Handler:_current_schema_filter_signature(conn_id)
+  return tostring((self:get_schema_filter(conn_id) or {}).schema_filter_signature or "")
+end
+
+---@private
+---@param flight table
+---@return boolean
+function Handler:_flight_schema_scope_current(flight)
+  local stored = flight and flight.schema_filter_signature
+  if stored == nil then
+    return true
+  end
+  return tostring(stored) == self:_current_schema_filter_signature(flight.conn_id)
+end
+
+---@private
+---@param conn_id connection_id
 ---@param new_epoch integer
 ---@param error_kind string
 function Handler:_supersede_schema_flights(conn_id, new_epoch, error_kind)
@@ -836,6 +884,7 @@ function Handler:_start_schema_object_entry(entry)
 
   local ok, err = pcall(vim.fn.DbeeStructureForSchemaAsync, entry.conn_id, entry.request_id, entry.epoch, SINGLEFLIGHT_CALLER_TOKEN, entry.schema, entry.opts)
   if not ok then
+    local error_kind = is_invalid_channel_error(err) and "invalid_channel" or "transport"
     self._schema_object_request_lookup[entry.request_id] = nil
     self._schema_object_flights[entry.key] = nil
     self:_schema_object_active_decrement(entry.conn_id)
@@ -847,10 +896,10 @@ function Handler:_start_schema_object_entry(entry)
         schema = entry.schema,
         caller_token = waiter.caller_token,
         error = tostring(err),
-        error_kind = is_invalid_channel_error(err) and "invalid_channel" or "transport",
+        error_kind = error_kind,
       })
     end
-    return false
+    return false, error_kind
   end
   return true
 end
@@ -972,6 +1021,7 @@ function Handler:connection_get_structure_singleflight(opts)
     conn_id = opts.conn_id,
     epoch = epoch,
     request_id = internal_request_id,
+    schema_filter_signature = self:get_schema_filter(opts.conn_id).schema_filter_signature,
     waiters = { waiter },
     consumer_slots = {
       [opts.consumer] = true,
@@ -1036,6 +1086,7 @@ function Handler:connection_list_schemas_singleflight(opts)
     epoch = epoch,
     purpose = purpose,
     request_id = internal_request_id,
+    schema_filter_signature = self:get_schema_filter(opts.conn_id).schema_filter_signature,
     waiters = { waiter },
   }
   self._schema_list_flights[key] = flight
@@ -1082,6 +1133,7 @@ function Handler:connection_get_schema_objects_singleflight(opts)
 
   self._next_singleflight_request_id = self._next_singleflight_request_id + 1
   local internal_request_id = self._next_singleflight_request_id
+  local entry_opts = self:get_schema_filter(opts.conn_id)
   local entry = {
     key = key,
     conn_id = opts.conn_id,
@@ -1090,13 +1142,24 @@ function Handler:connection_get_schema_objects_singleflight(opts)
     epoch = epoch,
     request_id = internal_request_id,
     priority = opts.priority or "lsp",
-    opts = self:get_schema_filter(opts.conn_id),
+    opts = entry_opts,
+    schema_filter_signature = entry_opts.schema_filter_signature,
+    fold = entry_opts.fold,
     waiters = { waiter },
   }
 
   if (queue.active or 0) < (queue.max_active or 4) then
-    self:_start_schema_object_entry(entry)
-    return { epoch = epoch, request_id = waiter.request_id, joined = false, queued = false }
+    local started, error_kind = self:_start_schema_object_entry(entry)
+    if not started then
+      return {
+        epoch = epoch,
+        request_id = waiter.request_id,
+        joined = false,
+        queued = false,
+        error_kind = error_kind or "transport",
+      }
+    end
+    return { epoch = epoch, request_id = waiter.request_id, joined = false, queued = false, started = true }
   end
 
   local enqueued = self:_enqueue_schema_object_entry(opts.conn_id, entry)
@@ -1185,7 +1248,7 @@ end
 
 ---@param old_conn_id connection_id
 ---@param new_conn_id connection_id
----@param rewrite? { schema_scope_matches?: boolean }
+---@param rewrite? { schema_scope_matches?: boolean, schema_filter_signature?: string, schema_filter_fold?: string }
 function Handler:migrate_structure_flights(old_conn_id, new_conn_id, rewrite)
   if not old_conn_id or not new_conn_id or old_conn_id == new_conn_id then
     return
@@ -1216,6 +1279,8 @@ function Handler:migrate_structure_flights(old_conn_id, new_conn_id, rewrite)
       flight.alias_conn_ids = flight.alias_conn_ids or {}
       flight.alias_conn_ids[old_conn_id] = true
       flight.conn_id = new_conn_id
+      flight.schema_filter_signature = rewrite and rewrite.schema_filter_signature or flight.schema_filter_signature
+      flight.fold = rewrite and rewrite.schema_filter_fold or flight.fold
       self._structure_request_lookup[flight.request_id] = new_key
       if existing then
         existing.alias_conn_ids = existing.alias_conn_ids or {}
@@ -1247,6 +1312,8 @@ function Handler:migrate_structure_flights(old_conn_id, new_conn_id, rewrite)
       flight.alias_conn_ids = flight.alias_conn_ids or {}
       flight.alias_conn_ids[old_conn_id] = true
       flight.conn_id = new_conn_id
+      flight.schema_filter_signature = rewrite and rewrite.schema_filter_signature or flight.schema_filter_signature
+      flight.fold = rewrite and rewrite.schema_filter_fold or flight.fold
       self._schema_list_request_lookup[flight.request_id] = new_key
       list_migrated[new_key] = flight
     end
@@ -1264,6 +1331,8 @@ function Handler:migrate_structure_flights(old_conn_id, new_conn_id, rewrite)
       flight.alias_conn_ids[old_conn_id] = true
       flight.conn_id = new_conn_id
       flight.key = new_key
+      flight.schema_filter_signature = rewrite and rewrite.schema_filter_signature or flight.schema_filter_signature
+      flight.fold = rewrite and rewrite.schema_filter_fold or flight.fold
       self._schema_object_request_lookup[flight.request_id] = new_key
       object_migrated[new_key] = flight
     end
@@ -1281,6 +1350,8 @@ function Handler:migrate_structure_flights(old_conn_id, new_conn_id, rewrite)
       entry.conn_id = new_conn_id
       entry.key = schema_object_key(new_conn_id, entry.folded_schema, entry.epoch)
       entry.opts = self:get_schema_filter(new_conn_id)
+      entry.schema_filter_signature = rewrite and rewrite.schema_filter_signature or entry.schema_filter_signature
+      entry.fold = rewrite and rewrite.schema_filter_fold or entry.fold
       local existing = new_queue.queued_keys[entry.key]
       if existing then
         for _, waiter in ipairs(entry.waiters or {}) do
@@ -1319,6 +1390,19 @@ function Handler:_on_singleflight_structure_loaded(data)
     conn_id_matches = flight.alias_conn_ids[data.conn_id] == true
   end
   if not conn_id_matches or flight.epoch ~= payload_root_epoch then
+    return
+  end
+
+  if not self:_flight_schema_scope_current(flight) then
+    for _, waiter in ipairs(flight.waiters or {}) do
+      self:_notify_structure_waiter(waiter, {
+        conn_id = flight.conn_id,
+        request_id = waiter.request_id,
+        root_epoch = payload_root_epoch,
+        caller_token = waiter.caller_token,
+        error_kind = "filter_changed_during_reconnect",
+      })
+    end
     return
   end
 
@@ -1380,6 +1464,19 @@ function Handler:_on_schema_list_loaded(data)
     return
   end
 
+  if not self:_flight_schema_scope_current(flight) then
+    for _, waiter in ipairs(flight.waiters or {}) do
+      self:_notify_schema_waiter(waiter, {
+        conn_id = flight.conn_id,
+        request_id = waiter.request_id,
+        root_epoch = payload_epoch,
+        caller_token = waiter.caller_token,
+        error_kind = "filter_changed_during_reconnect",
+      })
+    end
+    return
+  end
+
   for _, waiter in ipairs(flight.waiters or {}) do
     self:_notify_schema_waiter(waiter, {
       conn_id = flight.conn_id,
@@ -1427,6 +1524,25 @@ function Handler:_on_schema_objects_loaded(data)
     return
   end
 
+  if not self:_flight_schema_scope_current(flight) then
+    for _, waiter in ipairs(flight.waiters or {}) do
+      self:_notify_schema_waiter(waiter, {
+        conn_id = flight.conn_id,
+        request_id = waiter.request_id,
+        root_epoch = payload_epoch,
+        caller_token = waiter.caller_token,
+        schema = flight.schema,
+        error_kind = "filter_changed_during_reconnect",
+      })
+    end
+    return
+  end
+
+  local filtered_objects = nil
+  if not data.error and not data.error_kind then
+    filtered_objects = self:_filter_structures_for_connection(flight.conn_id, data.objects)
+  end
+
   for _, waiter in ipairs(flight.waiters or {}) do
     self:_notify_schema_waiter(waiter, {
       conn_id = flight.conn_id,
@@ -1434,8 +1550,9 @@ function Handler:_on_schema_objects_loaded(data)
       root_epoch = payload_epoch,
       caller_token = waiter.caller_token,
       schema = flight.schema,
-      objects = data.error and nil or copy_payload(data.objects),
+      objects = (data.error or data.error_kind) and nil or copy_payload(filtered_objects),
       error = data.error,
+      error_kind = data.error_kind,
     })
   end
 end
@@ -1981,7 +2098,7 @@ function Handler:submit_connection_wizard(opts)
   if persist_metadata then
     persisted.wizard = vim.deepcopy(submission.wizard)
   elseif source_is_filesource(source) and metadata_action == "strip" and opts.conn_id then
-    persisted.__remove_keys = { "wizard" }
+    merge_remove_keys(persisted, { "wizard" })
   end
 
   local preserve_nil_current = self:get_current_connection() == nil and self:_total_connection_count() > 0

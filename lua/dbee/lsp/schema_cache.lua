@@ -1740,11 +1740,11 @@ function SchemaCache:get_schema_table_completion_async(schema)
       self:on_schema_objects_loaded(data)
     end,
   })
-  if request and request.error_kind == "queue_full" then
+  if request and request.error_kind then
     return {
       items = {},
       is_incomplete = false,
-      reason = "queue_full",
+      reason = request.error_kind,
     }
   end
 
@@ -1996,6 +1996,7 @@ function SchemaCache:on_schema_objects_loaded(data)
 
   self.schemas[schema] = true
   self.tables[schema] = self.tables[schema] or {}
+  local filtered_objects = schema_filter.filter_structures(data.objects or {}, self.schema_scope)
   local function apply_structs(structs, parent_schema)
     for _, struct in ipairs(structs or {}) do
       local stype = struct.type or ""
@@ -2013,7 +2014,7 @@ function SchemaCache:on_schema_objects_loaded(data)
       end
     end
   end
-  apply_structs(data.objects or {}, schema)
+  apply_structs(filtered_objects, schema)
   self.loaded_schemas[self:_fold(schema)] = true
   self:_rebuild_structure_indexes()
   self:save_to_disk()

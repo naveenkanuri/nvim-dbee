@@ -284,8 +284,12 @@ function M._on_structure_loaded(handler, data)
 
   if M._client_id and M._cache then
     cancel_active_async("structure_loaded")
+    local scope_changed = false
     if type(M._cache.refresh_schema_scope) == "function" then
-      M._cache:refresh_schema_scope()
+      scope_changed = M._cache:refresh_schema_scope()
+    end
+    if scope_changed and type(M._cache.delete_column_cache_for_filter_change) == "function" then
+      M._cache:delete_column_cache_for_filter_change()
     end
     M._cache:build_from_structure(data.structures)
     M._cache:save_to_disk()

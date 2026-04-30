@@ -37,6 +37,7 @@ local function install_connection_params_stub()
 end
 
 local function run_schema_list_singleflight()
+  install_connection_params_stub()
   local handler = Handler:new({})
   local calls = {}
   vim.fn.DbeeConnectionListSchemasAsync = function(conn_id, request_id, root_epoch, caller_token)
@@ -192,12 +193,77 @@ local function run_schema_object_singleflight_and_backpressure()
   })
   assert_eq("all drawer overflow", overflow.error_kind, "queue_full")
 
+  local transport_fail_handler = Handler:new({})
+  install_connection_params_stub()
+  vim.fn.DbeeStructureForSchemaAsync = function()
+    error("transport down")
+  end
+  local transport_payload = nil
+  local transport_result = transport_fail_handler:connection_get_schema_objects_singleflight({
+    conn_id = "conn-transport",
+    schema = "app",
+    consumer = "lsp-schema-dot",
+    priority = "lsp",
+    callback = function(payload)
+      transport_payload = payload
+    end,
+  })
+  assert_eq("transport start failure returned", transport_result.error_kind, "transport")
+  assert_true("transport waiter notified", transport_payload ~= nil)
+  assert_eq("transport waiter error kind", transport_payload.error_kind, "transport")
+
+  local payload_filter_handler = Handler:new({})
+  install_connection_params_stub()
+  local payload_filter_call = nil
+  vim.fn.DbeeStructureForSchemaAsync = function(conn_id, request_id, root_epoch, caller_token, schema)
+    payload_filter_call = {
+      conn_id = conn_id,
+      request_id = request_id,
+      root_epoch = root_epoch,
+      caller_token = caller_token,
+      schema = schema,
+    }
+  end
+  local filtered_payload = nil
+  payload_filter_handler:connection_get_schema_objects_singleflight({
+    conn_id = "conn-payload-filter",
+    schema = "app",
+    consumer = "drawer",
+    priority = "drawer",
+    callback = function(payload)
+      filtered_payload = payload
+    end,
+  })
+  payload_filter_handler:_on_schema_objects_loaded({
+    conn_id = "conn-payload-filter",
+    request_id = payload_filter_call.request_id,
+    root_epoch = payload_filter_call.root_epoch,
+    caller_token = "__singleflight",
+    schema = "app",
+    objects = {
+      { type = "table", schema = "app", name = "kept" },
+      { type = "table", schema = "other", name = "leaked" },
+      {
+        type = "schema",
+        schema = "other",
+        name = "other",
+        children = {
+          { type = "table", schema = "other", name = "nested_leak" },
+        },
+      },
+    },
+  })
+  assert_true("payload filtered delivered", filtered_payload ~= nil)
+  assert_eq("payload filtered count", #filtered_payload.objects, 1)
+  assert_eq("payload filtered schema", filtered_payload.objects[1].schema, "app")
+
   print("ARCH14_SCHEMA_OBJECT_SINGLEFLIGHT_OK=true")
   print("ARCH14_SCHEMA_OBJECT_BACKPRESSURE_OK=true")
   print("ARCH14_SCHEMA_OBJECT_QUEUE_BOUNDED=true")
   print("ARCH14_QUEUE_PRIORITY_HONORED=true")
   print("ARCH14_QUEUE_COALESCE_OK=true")
   print("ARCH14_OPTIONS_LUA_GO_ROUNDTRIP_OK=true")
+  print("ARCH14_SCHEMA_OBJECTS_PAYLOAD_FILTERED=true")
 end
 
 local function run_manifest_contract()
@@ -291,7 +357,58 @@ local function run_reconnect_schema_flight_migration()
   })
   assert_true("object old completion accepted", object_payload ~= nil)
   assert_eq("object migrated conn id", object_payload.conn_id, "conn-new")
+
+  local scoped_handler = Handler:new({})
+  local filters = {
+    ["scope-old"] = { include = { "app%" }, lazy_per_schema = true },
+    ["scope-new"] = { include = { "fin%" }, lazy_per_schema = true },
+  }
+  vim.fn.DbeeConnectionGetParams = function(conn_id)
+    return {
+      id = conn_id,
+      name = conn_id,
+      type = "postgres",
+      url = "postgres://example",
+      schema_filter = filters[conn_id],
+    }
+  end
+  local scoped_call = nil
+  vim.fn.DbeeStructureForSchemaAsync = function(conn_id, request_id, root_epoch, caller_token, schema)
+    scoped_call = {
+      conn_id = conn_id,
+      request_id = request_id,
+      root_epoch = root_epoch,
+      caller_token = caller_token,
+      schema = schema,
+    }
+  end
+  local scoped_payload = nil
+  scoped_handler:connection_get_schema_objects_singleflight({
+    conn_id = "scope-old",
+    schema = "app",
+    consumer = "drawer",
+    priority = "drawer",
+    callback = function(payload)
+      scoped_payload = payload
+    end,
+  })
+  scoped_handler:migrate_structure_flights("scope-old", "scope-new", {
+    schema_scope_matches = true,
+    schema_filter_signature = "schema-filter-v1|type=postgres|fold=lower|lazy=1|include=4:app%|exclude=0:",
+    schema_filter_fold = "lower",
+  })
+  scoped_handler:_on_schema_objects_loaded({
+    conn_id = "scope-old",
+    request_id = scoped_call.request_id,
+    root_epoch = scoped_call.root_epoch,
+    caller_token = "__singleflight",
+    schema = "app",
+    objects = { { type = "table", schema = "app", name = "stale" } },
+  })
+  assert_true("scope mismatch callback", scoped_payload ~= nil)
+  assert_eq("scope mismatch error", scoped_payload.error_kind, "filter_changed_during_reconnect")
   print("ARCH14_RECONNECT_SCHEMA_FLIGHT_MIGRATION_OK=true")
+  print("ARCH14_RECONNECT_SCHEMA_SCOPE_EQUALITY=true")
 end
 
 local function run_schema_spec_non_mutating_contract()

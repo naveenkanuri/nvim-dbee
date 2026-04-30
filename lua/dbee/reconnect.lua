@@ -10,6 +10,8 @@ end
 
 local M = {}
 
+local schema_filter = require("dbee.schema_filter")
+
 ---@class dbee_retry_meta
 ---@field conn_id connection_id
 ---@field conn_name string?
@@ -242,6 +244,26 @@ local function safe_get_current_connection(api)
   end
 
   return current_or_err
+end
+
+local function schema_scope(conn)
+  local normalized = schema_filter.normalize(conn and conn.schema_filter or nil, conn and conn.type or nil)
+  return {
+    signature = normalized and normalized.schema_filter_signature or "",
+    fold = normalized and normalized.fold or schema_filter.fold_id(conn and conn.type or nil),
+  }
+end
+
+local function reconnect_rewrite_scope(previous, current)
+  local previous_scope = schema_scope(previous)
+  local current_scope = schema_scope(current)
+  return {
+    schema_scope_matches = tostring(previous and previous.type or "") == tostring(current and current.type or "")
+      and previous_scope.signature == current_scope.signature,
+    schema_filter_signature = previous_scope.signature,
+    schema_filter_fold = previous_scope.fold,
+    target_schema_filter_signature = current_scope.signature,
+  }
 end
 
 ---@param api table
@@ -577,7 +599,7 @@ function M.reconnect_connection(conn_id, opts)
   end
 
   if reloaded_conn.id ~= conn_id and type(handler.migrate_structure_flights) == "function" then
-    handler:migrate_structure_flights(conn_id, reloaded_conn.id)
+    handler:migrate_structure_flights(conn_id, reloaded_conn.id, reconnect_rewrite_scope(target_conn, reloaded_conn))
   end
 
   M.reset_connection_episode(reloaded_conn.id)

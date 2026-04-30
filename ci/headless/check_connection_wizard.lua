@@ -1781,6 +1781,37 @@ local function run_schema_filter_wizard_contract()
   print("ARCH14_FILTER_CLEAR_NO_STALE=true")
   print("ARCH14_FILTER_VALIDATION_ENFORCED=true")
 
+  local strip_records = read_json(env.file_path)
+  local strip_record = find_record(strip_records, "conn-meta")
+  strip_record.schema_filter = {
+    include = { "APP%" },
+    lazy_per_schema = true,
+  }
+  strip_record.wizard = strip_record.wizard or {}
+  strip_record.wizard.schema_filter = {
+    include = { "APP%" },
+    lazy_per_schema = true,
+  }
+  write_json(env.file_path, strip_records)
+  clear_runtime_observations(env.runtime)
+  local strip_wizard = expect_wizard(env, function()
+    env.drawer:open_edit_connection_with_wizard(env:file_source_meta(), "conn-meta")
+  end)
+  strip_wizard:set_field("url", "postgres://meta_user:meta_pass@meta-host:5432/meta_db?sslmode=require&application_name=nvim-dbee")
+  strip_wizard:set_mode("postgres_form")
+  strip_wizard:set_mode("postgres_url")
+  strip_wizard:clear_schema_filter()
+  assert_true("strip path raw fallback", strip_wizard.state.raw_fallback == true)
+  submit_and_assert_success(strip_wizard)
+  local strip_cleared = find_record(read_json(env.file_path), "conn-meta")
+  assert_eq("strip clear top filter omitted", strip_cleared.schema_filter, nil)
+  assert_eq("strip clear wizard omitted", strip_cleared.wizard, nil)
+  local strip_remove_keys = env.file_source.update_calls[#env.file_source.update_calls].details.__remove_keys or {}
+  assert_true("strip remove wizard", contains(strip_remove_keys, "wizard"))
+  assert_true("strip remove schema_filter", contains(strip_remove_keys, "schema_filter"))
+  assert_true("strip remove wizard schema_filter", contains(strip_remove_keys, "wizard.schema_filter"))
+  print("ARCH14_FILTER_CLEAR_STRIP_META_OK=true")
+
   env:cleanup()
   print("ARCH14_WIZARD_ALL_PASS=true")
 end

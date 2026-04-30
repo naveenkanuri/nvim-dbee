@@ -2076,7 +2076,12 @@ function DrawerUI:on_schema_objects_loaded(data, branch_id)
   state.applied_gen = math.max(state.applied_gen or 0, request_id)
   state.loading = false
   state.error = data.error or data.error_kind
-  state.raw = data.error and nil or sorted_struct_children(data.objects or {})
+  local ok_params, conn_params = pcall(self.handler.connection_get_params, self.handler, data.conn_id)
+  local scope = normalized_schema_scope(ok_params and conn_params or nil)
+  local filtered_objects = (data.error or data.error_kind)
+    and nil
+    or schema_filter.filter_structures(data.objects or {}, scope)
+  state.raw = (data.error or data.error_kind) and nil or sorted_struct_children(filtered_objects or {})
   if not data.error and not data.error_kind then
     self._struct_cache.root_loaded_schemas[data.conn_id] = self._struct_cache.root_loaded_schemas[data.conn_id] or {}
     self._struct_cache.root_loaded_schemas[data.conn_id][schema_filter.fold(data.schema, "case_insensitive")] = true

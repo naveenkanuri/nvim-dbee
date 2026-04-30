@@ -204,6 +204,7 @@ end
 local DrawerUI = require("dbee.ui.drawer")
 local convert = require("dbee.ui.drawer.convert")
 local drawer_model = require("dbee.ui.drawer.model")
+schema_filter = require("dbee.schema_filter")
 
 local nvim_version = vim.version()
 local nvim_version_string = string.format("%d.%d.%d", nvim_version.major, nvim_version.minor, nvim_version.patch)
@@ -528,6 +529,9 @@ local function new_drawer_fixture(opts)
   drawer._struct_cache.root_gen = {}
   drawer._struct_cache.root_applied = {}
   drawer._struct_cache.root_epoch = {}
+  drawer._struct_cache.root_mode = deepcopy(opts.root_mode or {})
+  drawer._struct_cache.root_loaded_schemas = deepcopy(opts.root_loaded_schemas or {})
+  drawer._struct_cache.root_filter_signature = deepcopy(opts.root_filter_signature or {})
   drawer._struct_cache.loaded_lazy_ids = deepcopy(opts.loaded_lazy_ids or {})
   drawer._struct_cache.branches = deepcopy(opts.branches or {})
 
@@ -755,6 +759,18 @@ local function count_visible_connection_nodes(drawer)
   for row = 1, line_count do
     local node = drawer.tree:get_node(row)
     if node and node.type == "connection" then
+      count = count + 1
+    end
+  end
+  return count
+end
+
+function count_visible_schema_nodes(drawer)
+  local count = 0
+  local line_count = vim.api.nvim_buf_line_count(drawer.bufnr)
+  for row = 1, line_count do
+    local node = drawer.tree:get_node(row)
+    if node and node.type == "schema" then
       count = count + 1
     end
   end
@@ -1070,6 +1086,177 @@ local function build_filter_fallback_metrics(title, connection_count, cached_cou
 
       finish(total_ns, {
         heap_kb = heap_delta_kb,
+      })
+    end,
+  })
+end
+
+ARCH14_SCOPED_TABLES_PER_SCHEMA = 3
+
+function arch14_schema_name(prefix, index)
+  return string.format("%s_schema_%05d", prefix, index)
+end
+
+function arch14_schema_children(schema_name)
+  local children = {}
+  for index = 1, ARCH14_SCOPED_TABLES_PER_SCHEMA do
+    children[#children + 1] = {
+      type = "table",
+      name = string.format("scoped_table_%02d", index),
+      schema = schema_name,
+    }
+  end
+  return children
+end
+
+function build_arch14_scoped_spec(scoped_count, opts)
+  opts = opts or {}
+  local conn_id = "arch14-scoped-" .. tostring(scoped_count)
+  local loaded_count = opts.loaded_count or 0
+  local raw_structures = {}
+  local branches = {
+    [conn_id] = {},
+  }
+  local root_loaded_schemas = {
+    [conn_id] = {},
+  }
+  local loaded_lazy_ids = {}
+
+  local filter = {
+    include = { "app%" },
+    exclude = { "app_tmp%" },
+    lazy_per_schema = true,
+  }
+  local normalized = assert(schema_filter.normalize(filter, "postgres"))
+
+  for index = 1, scoped_count do
+    local schema_name = arch14_schema_name("app", index)
+    local children = index <= loaded_count and arch14_schema_children(schema_name) or {}
+    local schema_node = {
+      type = "schema",
+      name = schema_name,
+      schema = schema_name,
+      children = children,
+    }
+    raw_structures[#raw_structures + 1] = schema_node
+
+    if index <= loaded_count then
+      local schema_id = convert.structure_node_id(conn_id, schema_node)
+      branches[conn_id][branch_cache_key(schema_id, STRUCTURES_KIND)] = {
+        raw = deepcopy(children),
+        error = nil,
+        built_count = #children,
+        render_limit = #children,
+        request_gen = 0,
+        applied_gen = 0,
+        loading = false,
+      }
+      root_loaded_schemas[conn_id][schema_filter.fold(schema_name, "case_insensitive")] = true
+      loaded_lazy_ids[schema_id] = true
+    end
+  end
+
+  for index = 1, scoped_count do
+    raw_structures[#raw_structures + 1] = {
+      type = "schema",
+      name = arch14_schema_name("sys", index),
+      schema = arch14_schema_name("sys", index),
+      children = arch14_schema_children(arch14_schema_name("sys", index)),
+    }
+  end
+
+  return {
+    source_connections = {
+      source1 = {
+        {
+          id = conn_id,
+          name = "ARCH14 Scoped Fixture " .. tostring(scoped_count),
+          type = "postgres",
+          schema_filter = filter,
+        },
+      },
+    },
+    root_cache = {
+      [conn_id] = {
+        structures = schema_filter.filter_structures(raw_structures, normalized),
+        schemas_only = true,
+      },
+    },
+    root_mode = {
+      [conn_id] = "schemas_only",
+    },
+    root_loaded_schemas = root_loaded_schemas,
+    root_filter_signature = {
+      [conn_id] = normalized.schema_filter_signature,
+    },
+    loaded_lazy_ids = loaded_lazy_ids,
+    branches = branches,
+    metadata = {
+      fixture_kind = "arch14_scoped_lazy",
+      conn_id = conn_id,
+      scoped_schema_count = scoped_count,
+      raw_schema_count = scoped_count * 2,
+      loaded_schema_count = loaded_count,
+      lazy_per_schema = true,
+      tables_per_schema = ARCH14_SCOPED_TABLES_PER_SCHEMA,
+    },
+  }
+end
+
+function all_values_equal(values, expected)
+  if #values < MEASURED_COUNT then
+    return false
+  end
+  for _, value in ipairs(values) do
+    if value ~= expected then
+      return false
+    end
+  end
+  return true
+end
+
+function build_arch14_scoped_filter_metrics(title, scoped_count, opts)
+  opts = opts or {}
+  local query = opts.query or "app_schema"
+  local expected_schema_matches = opts.expected_schema_matches or scoped_count
+  local expected_table_matches = opts.expected_table_matches or 0
+  local spec = build_arch14_scoped_spec(scoped_count, opts)
+
+  return run_benchmark({
+    title = title,
+    before = function()
+      collectgarbage("collect")
+      local state = new_drawer_fixture({
+        source_connections = spec.source_connections,
+        root_cache = spec.root_cache,
+        root_mode = spec.root_mode,
+        root_loaded_schemas = spec.root_loaded_schemas,
+        root_filter_signature = spec.root_filter_signature,
+        loaded_lazy_ids = spec.loaded_lazy_ids,
+        branches = spec.branches,
+      })
+      state.drawer.filter_debounce_ms = 0
+      local ok_capture, err_capture = state.drawer:capture_filter_snapshot()
+      assert_true(title .. "_capture_filter_snapshot", ok_capture ~= false and err_capture == nil)
+      state.fixture_metadata = spec.metadata
+      return state
+    end,
+    run = function(state, finish)
+      local heap_before = collectgarbage("count")
+      local sample_ns = measure_sync_drawer_write(state.drawer.bufnr, function()
+        state.drawer:apply_filter(query)
+      end)
+      local schema_matches = count_visible_schema_nodes(state.drawer)
+      local table_matches = count_visible_table_nodes(state.drawer)
+      assert_true(title .. "_schema_count", schema_matches == expected_schema_matches)
+      assert_true(title .. "_table_count", table_matches == expected_table_matches)
+      finish(sample_ns, {
+        heap_kb = collectgarbage("count") - heap_before,
+        scoped_fixture = state.fixture_metadata.fixture_kind == "arch14_scoped_lazy" and 1 or 0,
+        scoped_schema_count = state.fixture_metadata.scoped_schema_count,
+        raw_schema_count = state.fixture_metadata.raw_schema_count,
+        loaded_schema_count = state.fixture_metadata.loaded_schema_count,
+        lazy_per_schema = state.fixture_metadata.lazy_per_schema and 1 or 0,
       })
     end,
   })
@@ -1429,8 +1616,22 @@ local filter_cold_connection_only_100_samples, filter_cold_connection_only_100_e
   build_filter_fallback_metrics("FILTER_COLD_CONNECTION_ONLY_100", 100, 0)
 local filter_cold_connection_only_1000_samples, filter_cold_connection_only_1000_extras =
   build_filter_fallback_metrics("FILTER_COLD_CONNECTION_ONLY_1000", 1000, 0)
-ARCH14_FILTER_SCOPED_10000_SAMPLES, ARCH14_FILTER_SCOPED_10000_EXTRAS =
-  build_filter_fallback_metrics("ARCH14_DRAWER_FILTER_SCOPED_10000", 10000, 0)
+ARCH14_DRAWER_SCOPED = {}
+ARCH14_DRAWER_SCOPED.s10_samples, ARCH14_DRAWER_SCOPED.s10_extras =
+  build_arch14_scoped_filter_metrics("ARCH14_DRAWER_FILTER_SCOPED_10", 10)
+ARCH14_DRAWER_SCOPED.s100_samples, ARCH14_DRAWER_SCOPED.s100_extras =
+  build_arch14_scoped_filter_metrics("ARCH14_DRAWER_FILTER_SCOPED_100", 100)
+ARCH14_DRAWER_SCOPED.s1000_samples, ARCH14_DRAWER_SCOPED.s1000_extras =
+  build_arch14_scoped_filter_metrics("ARCH14_DRAWER_FILTER_SCOPED_1000", 1000)
+ARCH14_DRAWER_SCOPED.s10000_samples, ARCH14_DRAWER_SCOPED.s10000_extras =
+  build_arch14_scoped_filter_metrics("ARCH14_DRAWER_FILTER_SCOPED_10000", 10000)
+ARCH14_DRAWER_SCOPED.mixed_samples, ARCH14_DRAWER_SCOPED.mixed_extras =
+  build_arch14_scoped_filter_metrics("ARCH14_DRAWER_FILTER_MIXED_VISIBLE_AND_LAZY", 1000, {
+    loaded_count = 100,
+    query = "scoped_table",
+    expected_schema_matches = 100,
+    expected_table_matches = 100 * ARCH14_SCOPED_TABLES_PER_SCHEMA,
+  })
 local filter_mixed_visible_and_cached_samples, filter_mixed_visible_and_cached_extras =
   build_filter_fallback_metrics("FILTER_MIXED_VISIBLE_AND_CACHED", 1000, 500)
 
@@ -1476,9 +1677,21 @@ local filter_cold_connection_only_100_heap_kb = maximum(filter_cold_connection_o
 local filter_cold_connection_only_1000_median_ns = median(filter_cold_connection_only_1000_samples)
 local filter_cold_connection_only_1000_p95_ns = percentile(filter_cold_connection_only_1000_samples, 0.95)
 local filter_cold_connection_only_1000_heap_kb = maximum(filter_cold_connection_only_1000_extras.heap_kb or {})
-ARCH14_FILTER_SCOPED_10000_MEDIAN_NS = median(ARCH14_FILTER_SCOPED_10000_SAMPLES)
-ARCH14_FILTER_SCOPED_10000_P95_NS = percentile(ARCH14_FILTER_SCOPED_10000_SAMPLES, 0.95)
-ARCH14_FILTER_SCOPED_10000_HEAP_KB = maximum(ARCH14_FILTER_SCOPED_10000_EXTRAS.heap_kb or {})
+ARCH14_DRAWER_SCOPED.s10_median_ns = median(ARCH14_DRAWER_SCOPED.s10_samples)
+ARCH14_DRAWER_SCOPED.s10_p95_ns = percentile(ARCH14_DRAWER_SCOPED.s10_samples, 0.95)
+ARCH14_DRAWER_SCOPED.s10_heap_kb = maximum(ARCH14_DRAWER_SCOPED.s10_extras.heap_kb or {})
+ARCH14_DRAWER_SCOPED.s100_median_ns = median(ARCH14_DRAWER_SCOPED.s100_samples)
+ARCH14_DRAWER_SCOPED.s100_p95_ns = percentile(ARCH14_DRAWER_SCOPED.s100_samples, 0.95)
+ARCH14_DRAWER_SCOPED.s100_heap_kb = maximum(ARCH14_DRAWER_SCOPED.s100_extras.heap_kb or {})
+ARCH14_DRAWER_SCOPED.s1000_median_ns = median(ARCH14_DRAWER_SCOPED.s1000_samples)
+ARCH14_DRAWER_SCOPED.s1000_p95_ns = percentile(ARCH14_DRAWER_SCOPED.s1000_samples, 0.95)
+ARCH14_DRAWER_SCOPED.s1000_heap_kb = maximum(ARCH14_DRAWER_SCOPED.s1000_extras.heap_kb or {})
+ARCH14_DRAWER_SCOPED.s10000_median_ns = median(ARCH14_DRAWER_SCOPED.s10000_samples)
+ARCH14_DRAWER_SCOPED.s10000_p95_ns = percentile(ARCH14_DRAWER_SCOPED.s10000_samples, 0.95)
+ARCH14_DRAWER_SCOPED.s10000_heap_kb = maximum(ARCH14_DRAWER_SCOPED.s10000_extras.heap_kb or {})
+ARCH14_DRAWER_SCOPED.mixed_median_ns = median(ARCH14_DRAWER_SCOPED.mixed_samples)
+ARCH14_DRAWER_SCOPED.mixed_p95_ns = percentile(ARCH14_DRAWER_SCOPED.mixed_samples, 0.95)
+ARCH14_DRAWER_SCOPED.mixed_heap_kb = maximum(ARCH14_DRAWER_SCOPED.mixed_extras.heap_kb or {})
 local filter_mixed_visible_and_cached_median_ns = median(filter_mixed_visible_and_cached_samples)
 local filter_mixed_visible_and_cached_p95_ns = percentile(filter_mixed_visible_and_cached_samples, 0.95)
 local filter_mixed_visible_and_cached_heap_kb = maximum(filter_mixed_visible_and_cached_extras.heap_kb or {})
@@ -1527,26 +1740,69 @@ emit("DRAW01_FILTER_COLD_CONNECTION_ONLY_1000_MEDIAN_MS", format_float(ns_to_ms(
 emit("DRAW01_FILTER_COLD_CONNECTION_ONLY_1000_P95_MS", format_float(ns_to_ms(filter_cold_connection_only_1000_p95_ns)))
 emit("DRAW01_FILTER_COLD_CONNECTION_ONLY_1000_KB_DELTA", format_float(filter_cold_connection_only_1000_heap_kb))
 emit("DRAW01_FILTER_COLD_CONNECTION_ONLY_1000_SENTINEL_OK", "true")
-emit("ARCH14_DRAWER_FILTER_SCOPED_10000_MEDIAN_MS", format_float(ns_to_ms(ARCH14_FILTER_SCOPED_10000_MEDIAN_NS)))
-emit("ARCH14_DRAWER_FILTER_SCOPED_10000_P95_MS", format_float(ns_to_ms(ARCH14_FILTER_SCOPED_10000_P95_NS)))
-emit("ARCH14_DRAWER_FILTER_SCOPED_10000_KB_DELTA", format_float(ARCH14_FILTER_SCOPED_10000_HEAP_KB))
+emit("ARCH14_DRAWER_FILTER_SCOPED_10_MEDIAN_MS", format_float(ns_to_ms(ARCH14_DRAWER_SCOPED.s10_median_ns)))
+emit("ARCH14_DRAWER_FILTER_SCOPED_10_P95_MS", format_float(ns_to_ms(ARCH14_DRAWER_SCOPED.s10_p95_ns)))
+emit("ARCH14_DRAWER_FILTER_SCOPED_10_KB_DELTA", format_float(ARCH14_DRAWER_SCOPED.s10_heap_kb))
+emit("ARCH14_DRAWER_FILTER_SCOPED_100_MEDIAN_MS", format_float(ns_to_ms(ARCH14_DRAWER_SCOPED.s100_median_ns)))
+emit("ARCH14_DRAWER_FILTER_SCOPED_100_P95_MS", format_float(ns_to_ms(ARCH14_DRAWER_SCOPED.s100_p95_ns)))
+emit("ARCH14_DRAWER_FILTER_SCOPED_100_KB_DELTA", format_float(ARCH14_DRAWER_SCOPED.s100_heap_kb))
+emit("ARCH14_DRAWER_FILTER_SCOPED_1000_MEDIAN_MS", format_float(ns_to_ms(ARCH14_DRAWER_SCOPED.s1000_median_ns)))
+emit("ARCH14_DRAWER_FILTER_SCOPED_1000_P95_MS", format_float(ns_to_ms(ARCH14_DRAWER_SCOPED.s1000_p95_ns)))
+emit("ARCH14_DRAWER_FILTER_SCOPED_1000_KB_DELTA", format_float(ARCH14_DRAWER_SCOPED.s1000_heap_kb))
+emit("ARCH14_DRAWER_FILTER_SCOPED_10000_MEDIAN_MS", format_float(ns_to_ms(ARCH14_DRAWER_SCOPED.s10000_median_ns)))
+emit("ARCH14_DRAWER_FILTER_SCOPED_10000_P95_MS", format_float(ns_to_ms(ARCH14_DRAWER_SCOPED.s10000_p95_ns)))
+emit("ARCH14_DRAWER_FILTER_SCOPED_10000_KB_DELTA", format_float(ARCH14_DRAWER_SCOPED.s10000_heap_kb))
+emit(
+  "ARCH14_DRAWER_FILTER_MIXED_VISIBLE_AND_LAZY_MEDIAN_MS",
+  format_float(ns_to_ms(ARCH14_DRAWER_SCOPED.mixed_median_ns))
+)
+emit(
+  "ARCH14_DRAWER_FILTER_MIXED_VISIBLE_AND_LAZY_P95_MS",
+  format_float(ns_to_ms(ARCH14_DRAWER_SCOPED.mixed_p95_ns))
+)
+emit(
+  "ARCH14_DRAWER_FILTER_MIXED_VISIBLE_AND_LAZY_KB_DELTA",
+  format_float(ARCH14_DRAWER_SCOPED.mixed_heap_kb)
+)
 emit("DRAW01_FILTER_MIXED_VISIBLE_AND_CACHED_MEDIAN_MS", format_float(ns_to_ms(filter_mixed_visible_and_cached_median_ns)))
 emit("DRAW01_FILTER_MIXED_VISIBLE_AND_CACHED_P95_MS", format_float(ns_to_ms(filter_mixed_visible_and_cached_p95_ns)))
 emit("DRAW01_FILTER_MIXED_VISIBLE_AND_CACHED_KB_DELTA", format_float(filter_mixed_visible_and_cached_heap_kb))
 emit("DRAW01_FILTER_MIXED_VISIBLE_AND_CACHED_SENTINEL_OK", "true")
 emit("UX13_DRAWER_FILTER_PERF_COLD_CONNECTION_ONLY", "true")
 emit("UX13_DRAWER_FILTER_PERF_MIXED_VISIBLE_CACHE", "true")
-local arch14_perf_real_measurements = #filter_cold_connection_only_10_samples >= MEASURED_COUNT
-  and #filter_cold_connection_only_100_samples >= MEASURED_COUNT
-  and #filter_cold_connection_only_1000_samples >= MEASURED_COUNT
-  and #ARCH14_FILTER_SCOPED_10000_SAMPLES >= MEASURED_COUNT
-  and #filter_mixed_visible_and_cached_samples >= MEASURED_COUNT
-emit("ARCH14_DRAWER_FILTER_SCOPED_10_SENTINEL_OK", arch14_perf_real_measurements and "true" or "false")
-emit("ARCH14_DRAWER_FILTER_SCOPED_100_SENTINEL_OK", arch14_perf_real_measurements and "true" or "false")
-emit("ARCH14_DRAWER_FILTER_SCOPED_1000_SENTINEL_OK", arch14_perf_real_measurements and "true" or "false")
-emit("ARCH14_DRAWER_FILTER_SCOPED_10000_SENTINEL_OK", arch14_perf_real_measurements and "true" or "false")
-emit("ARCH14_DRAWER_FILTER_MIXED_VISIBLE_AND_LAZY_SENTINEL_OK", arch14_perf_real_measurements and "true" or "false")
-emit("ARCH14_PERF_REAL_MEASUREMENTS_OK", arch14_perf_real_measurements and "true" or "false")
+ARCH14_DRAWER_SCOPED.fixture_ok = all_values_equal(ARCH14_DRAWER_SCOPED.s10_extras.scoped_fixture or {}, 1)
+  and all_values_equal(ARCH14_DRAWER_SCOPED.s10_extras.scoped_schema_count or {}, 10)
+  and all_values_equal(ARCH14_DRAWER_SCOPED.s10_extras.raw_schema_count or {}, 20)
+  and all_values_equal(ARCH14_DRAWER_SCOPED.s10_extras.lazy_per_schema or {}, 1)
+  and all_values_equal(ARCH14_DRAWER_SCOPED.s100_extras.scoped_fixture or {}, 1)
+  and all_values_equal(ARCH14_DRAWER_SCOPED.s100_extras.scoped_schema_count or {}, 100)
+  and all_values_equal(ARCH14_DRAWER_SCOPED.s100_extras.raw_schema_count or {}, 200)
+  and all_values_equal(ARCH14_DRAWER_SCOPED.s100_extras.lazy_per_schema or {}, 1)
+  and all_values_equal(ARCH14_DRAWER_SCOPED.s1000_extras.scoped_fixture or {}, 1)
+  and all_values_equal(ARCH14_DRAWER_SCOPED.s1000_extras.scoped_schema_count or {}, 1000)
+  and all_values_equal(ARCH14_DRAWER_SCOPED.s1000_extras.raw_schema_count or {}, 2000)
+  and all_values_equal(ARCH14_DRAWER_SCOPED.s1000_extras.lazy_per_schema or {}, 1)
+  and all_values_equal(ARCH14_DRAWER_SCOPED.s10000_extras.scoped_fixture or {}, 1)
+  and all_values_equal(ARCH14_DRAWER_SCOPED.s10000_extras.scoped_schema_count or {}, 10000)
+  and all_values_equal(ARCH14_DRAWER_SCOPED.s10000_extras.raw_schema_count or {}, 20000)
+  and all_values_equal(ARCH14_DRAWER_SCOPED.s10000_extras.lazy_per_schema or {}, 1)
+  and all_values_equal(ARCH14_DRAWER_SCOPED.mixed_extras.scoped_fixture or {}, 1)
+  and all_values_equal(ARCH14_DRAWER_SCOPED.mixed_extras.scoped_schema_count or {}, 1000)
+  and all_values_equal(ARCH14_DRAWER_SCOPED.mixed_extras.loaded_schema_count or {}, 100)
+  and all_values_equal(ARCH14_DRAWER_SCOPED.mixed_extras.lazy_per_schema or {}, 1)
+ARCH14_DRAWER_SCOPED.real_measurements = ARCH14_DRAWER_SCOPED.fixture_ok
+  and #ARCH14_DRAWER_SCOPED.s10_samples >= MEASURED_COUNT
+  and #ARCH14_DRAWER_SCOPED.s100_samples >= MEASURED_COUNT
+  and #ARCH14_DRAWER_SCOPED.s1000_samples >= MEASURED_COUNT
+  and #ARCH14_DRAWER_SCOPED.s10000_samples >= MEASURED_COUNT
+  and #ARCH14_DRAWER_SCOPED.mixed_samples >= MEASURED_COUNT
+emit("ARCH14_DRAWER_FILTER_SCOPED_10_SENTINEL_OK", ARCH14_DRAWER_SCOPED.real_measurements and "true" or "false")
+emit("ARCH14_DRAWER_FILTER_SCOPED_100_SENTINEL_OK", ARCH14_DRAWER_SCOPED.real_measurements and "true" or "false")
+emit("ARCH14_DRAWER_FILTER_SCOPED_1000_SENTINEL_OK", ARCH14_DRAWER_SCOPED.real_measurements and "true" or "false")
+emit("ARCH14_DRAWER_FILTER_SCOPED_10000_SENTINEL_OK", ARCH14_DRAWER_SCOPED.real_measurements and "true" or "false")
+emit("ARCH14_DRAWER_FILTER_MIXED_VISIBLE_AND_LAZY_SENTINEL_OK", ARCH14_DRAWER_SCOPED.real_measurements and "true" or "false")
+emit("ARCH14_PERF_DRAWER_SCOPED_FIXTURE_OK", ARCH14_DRAWER_SCOPED.fixture_ok and "true" or "false")
+emit("ARCH14_PERF_REAL_MEASUREMENTS_OK", ARCH14_DRAWER_SCOPED.real_measurements and "true" or "false")
 emit("ARCH14_PERF_DRAWER_FILTER_SCOPED_OK", "unfrozen")
 
 emit_median_max("DRAW01_APPLY_MAX_HIT_MS", apply_max_hit_samples)
@@ -1626,9 +1882,25 @@ local additive_measurements = {
     median_ms = ns_to_ms(filter_cold_connection_only_1000_median_ns),
     p95_ms = ns_to_ms(filter_cold_connection_only_1000_p95_ns),
   },
+  arch14_drawer_filter_scoped_10 = {
+    median_ms = ns_to_ms(ARCH14_DRAWER_SCOPED.s10_median_ns),
+    p95_ms = ns_to_ms(ARCH14_DRAWER_SCOPED.s10_p95_ns),
+  },
+  arch14_drawer_filter_scoped_100 = {
+    median_ms = ns_to_ms(ARCH14_DRAWER_SCOPED.s100_median_ns),
+    p95_ms = ns_to_ms(ARCH14_DRAWER_SCOPED.s100_p95_ns),
+  },
+  arch14_drawer_filter_scoped_1000 = {
+    median_ms = ns_to_ms(ARCH14_DRAWER_SCOPED.s1000_median_ns),
+    p95_ms = ns_to_ms(ARCH14_DRAWER_SCOPED.s1000_p95_ns),
+  },
   arch14_drawer_filter_scoped_10000 = {
-    median_ms = ns_to_ms(ARCH14_FILTER_SCOPED_10000_MEDIAN_NS),
-    p95_ms = ns_to_ms(ARCH14_FILTER_SCOPED_10000_P95_NS),
+    median_ms = ns_to_ms(ARCH14_DRAWER_SCOPED.s10000_median_ns),
+    p95_ms = ns_to_ms(ARCH14_DRAWER_SCOPED.s10000_p95_ns),
+  },
+  arch14_drawer_filter_mixed_visible_and_lazy = {
+    median_ms = ns_to_ms(ARCH14_DRAWER_SCOPED.mixed_median_ns),
+    p95_ms = ns_to_ms(ARCH14_DRAWER_SCOPED.mixed_p95_ns),
   },
   filter_mixed_visible_and_cached = {
     median_ms = ns_to_ms(filter_mixed_visible_and_cached_median_ns),
@@ -1646,7 +1918,11 @@ local additive_scenarios = {
   "filter_cold_connection_only_10",
   "filter_cold_connection_only_100",
   "filter_cold_connection_only_1000",
+  "arch14_drawer_filter_scoped_10",
+  "arch14_drawer_filter_scoped_100",
+  "arch14_drawer_filter_scoped_1000",
   "arch14_drawer_filter_scoped_10000",
+  "arch14_drawer_filter_mixed_visible_and_lazy",
   "filter_mixed_visible_and_cached",
 }
 

@@ -20,7 +20,7 @@ func scopedStructureOptions(fold string, include, exclude []string) *core.Struct
 	}
 }
 
-func TestPostgresStructureWithOptionsPushesSchemaFilterIntoSQL(t *testing.T) {
+func TestPostgresStructureWithOptionsShapesSchemaFilterSQL(t *testing.T) {
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
@@ -37,7 +37,7 @@ func TestPostgresStructureWithOptionsPushesSchemaFilterIntoSQL(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestMySQLStructureWithOptionsPushesSchemaFilterIntoSQL(t *testing.T) {
+func TestMySQLStructureWithOptionsShapesSchemaFilterSQL(t *testing.T) {
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
@@ -54,7 +54,7 @@ func TestMySQLStructureWithOptionsPushesSchemaFilterIntoSQL(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestSQLServerStructureWithOptionsPushesSchemaFilterIntoSQL(t *testing.T) {
+func TestSQLServerStructureWithOptionsShapesSchemaFilterSQL(t *testing.T) {
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
@@ -71,7 +71,7 @@ func TestSQLServerStructureWithOptionsPushesSchemaFilterIntoSQL(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestOracleStructureWithOptionsPushesSchemaFilterIntoSQL(t *testing.T) {
+func TestOracleStructureWithOptionsShapesSchemaFilterSQL(t *testing.T) {
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
