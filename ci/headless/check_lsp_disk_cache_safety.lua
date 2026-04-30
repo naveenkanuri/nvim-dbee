@@ -208,7 +208,7 @@ cache:save_to_disk()
 local corrupt_col = cache:_columns_cache_path("S.T")
 write_file(corrupt_col, "{not-json")
 assert_eq("valid schema loads", cache:load_from_disk(), true)
-assert_true("corrupt column warning", has_warning("loading columns"))
+assert_true("corrupt column warning", has_warning("loading column cache"))
 assert_true("corrupt column removed", vim.fn.filereadable(corrupt_col) == 0)
 
 local malformed_column_payloads = {
@@ -220,9 +220,21 @@ local malformed_column_payloads = {
 }
 for index, payload in ipairs(malformed_column_payloads) do
   write_file(corrupt_col, payload)
+  local warn_before_malformed_column = warning_count("loading column cache")
   assert_eq("malformed column load " .. index, cache:load_from_disk(), true)
+  assert_true(
+    "malformed column warning " .. index,
+    warning_count("loading column cache") > warn_before_malformed_column
+  )
   assert_true("malformed column removed " .. index, vim.fn.filereadable(corrupt_col) == 0)
 end
+
+write_file(corrupt_col, vim.json.encode({ { name = "ID", type = "NUMBER" } }))
+local warn_before_legacy_column = warning_count("loading column cache")
+assert_eq("legacy raw column load", cache:load_from_disk(), true)
+assert_eq("legacy raw column no warning", warning_count("loading column cache"), warn_before_legacy_column)
+assert_true("legacy raw column removed", vim.fn.filereadable(corrupt_col) == 0)
+assert_true("legacy raw column migration recorded", vim.g.dbee_lsp_column_cache_legacy_migrated ~= nil)
 
 local prune_cache = new_isolated_cache("disk-prune")
 local uv = vim.uv or vim.loop
@@ -502,6 +514,7 @@ print("ARCH14_FILTER_CHANGE_CACHE_DELETION_BOUNDED=true")
 print("ARCH14_FILTER_DELETION_BOUNDED_SCAN=true")
 print("ARCH14_PENDING_DELETION_FENCE_OK=true")
 print("ARCH14_CACHE_TRUE_CORRUPTION_WARN_RETAINED=true")
+print("ARCH14_COLUMN_CACHE_CORRUPTION_WARN_RETAINED=true")
 
 vim.fn.delete(root, "rf")
 vim.cmd("qa!")

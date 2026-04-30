@@ -1150,7 +1150,7 @@ function SchemaCache:_load_column_file(path, prefix)
   f:close()
   local ok, payload = pcall(vim.json.decode, content)
   if not ok or not payload then
-    self:_remove_corrupt_file(path, "loading columns")
+    self:_remove_corrupt_file(path, "loading column cache")
     return false
   end
   local cols = payload
@@ -1160,12 +1160,15 @@ function SchemaCache:_load_column_file(path, prefix)
       return false
     end
     cols = payload.columns
+  elseif type(payload) == "table" and payload.version == nil and payload.schema_filter_signature == nil and #payload > 0 and self:_validate_columns(payload) then
+    self:_remove_legacy_column_cache(path)
+    return false
   else
-    os.remove(path)
+    self:_remove_corrupt_file(path, "loading column cache")
     return false
   end
   if not self:_validate_columns(cols) then
-    self:_remove_corrupt_file(path, "loading columns")
+    self:_remove_corrupt_file(path, "loading column cache")
     return false
   end
 
@@ -1405,6 +1408,17 @@ end
 ---@param path string
 function SchemaCache:_remove_legacy_schema_index(path)
   vim.g.dbee_lsp_schema_cache_legacy_v1_migrated = {
+    conn_id = self.conn_id,
+    path = path,
+    version = SCHEMA_CACHE_VERSION,
+  }
+  os.remove(path)
+end
+
+---@private
+---@param path string
+function SchemaCache:_remove_legacy_column_cache(path)
+  vim.g.dbee_lsp_column_cache_legacy_migrated = {
     conn_id = self.conn_id,
     path = path,
     version = SCHEMA_CACHE_VERSION,
