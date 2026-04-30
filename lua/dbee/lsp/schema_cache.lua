@@ -1363,7 +1363,8 @@ end
 ---@param path string
 ---@param operation string
 function SchemaCache:_remove_corrupt_file(path, operation)
-  warn(string.format("dbee-lsp: corrupt cache while %s: %s", operation, path))
+  -- Silent: pre-v1.2 cache files have a different shape; recovery regenerates them
+  -- transparently on next structure load.
   os.remove(path)
 end
 

@@ -294,32 +294,49 @@ function M._refresh_completion_frontend(opts)
 end
 
 function M._handle_columns_loaded_notification(err, params, ctx)
+  local function debug(reason)
+    if M._completion_refresh_debug then
+      vim.schedule(function()
+        vim.notify("[dbee-refresh] " .. reason, vim.log.levels.INFO)
+      end)
+    end
+  end
+
   if err or type(params) ~= "table" then
+    debug("skip: bad params/err")
     return
   end
   if not M._client_id or not M._conn_id or not M._cache then
+    debug("skip: no client/conn/cache")
     return
   end
   if not ctx or ctx.client_id ~= M._client_id then
+    debug("skip: client_id mismatch")
     return
   end
   if params.conn_id ~= M._conn_id then
+    debug("skip: conn_id mismatch (got=" .. tostring(params.conn_id) .. " want=" .. tostring(M._conn_id) .. ")")
     return
   end
   if not completion_refresh_mode_ok() then
+    debug("skip: not in insert/select mode (mode=" .. vim.fn.mode() .. ")")
     return
   end
 
   local bufnr = vim.api.nvim_get_current_buf()
   if not M._attached_bufs[bufnr] then
+    debug("skip: buf " .. bufnr .. " not attached")
     return
   end
 
   local schema, table_name = M._resolve_completion_refresh_target(bufnr)
   if not same_cache_identifier(schema, params.schema) or not same_cache_identifier(table_name, params.table) then
+    debug(string.format("skip: target mismatch (cursor=%s.%s, notif=%s.%s)",
+      tostring(schema), tostring(table_name), tostring(params.schema), tostring(params.table)))
     return
   end
 
+  debug(string.format("FIRE: %s.%s", tostring(params.schema), tostring(params.table)))
   M._refresh_completion_frontend({ allow_hidden_blink = true })
 end
 
