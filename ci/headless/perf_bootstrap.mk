@@ -34,12 +34,14 @@ perf-bootstrap:
 	test -f ci/headless/perf_thresholds.lua || { echo "perf-bootstrap: missing DRAW01 threshold source" >&2; exit 1; }; \
 	test -f ci/headless/check_drawer_perf.lua || { echo "perf-bootstrap: missing DRAW01 perf harness" >&2; exit 1; }; \
 	test -f ci/headless/check_ux13_rollup.lua || { echo "perf-bootstrap: missing UX13 rollup harness" >&2; exit 1; }; \
+	test -f ci/headless/check_arch14_rollup.lua || { echo "perf-bootstrap: missing ARCH14 rollup harness" >&2; exit 1; }; \
 	grep -q "NUI_NVIM_COMMIT" ci/headless/perf_bootstrap.mk || { echo "perf-bootstrap: missing nui.nvim pin" >&2; exit 1; }; \
 	grep -q "BENCHMARK_NVIM_COMMIT" ci/headless/perf_bootstrap.mk || { echo "perf-bootstrap: missing benchmark.nvim pin" >&2; exit 1; }; \
 	grep -q "PROFILE_NVIM_COMMIT" ci/headless/perf_bootstrap.mk || { echo "perf-bootstrap: missing profile.nvim pin" >&2; exit 1; }; \
 	grep -q "NIO_NVIM_COMMIT" ci/headless/perf_bootstrap.mk || { echo "perf-bootstrap: missing nvim-nio pin" >&2; exit 1; }; \
 	grep -q "DRAW01_REAL_NUI_PERF_ALL_PASS" ci/headless/check_drawer_perf.lua || { echo "perf-bootstrap: DRAW01 harness missing rollup marker" >&2; exit 1; }; \
 	grep -q "UX13_ALL_PASS" ci/headless/check_ux13_rollup.lua || { echo "perf-bootstrap: UX13 harness missing rollup marker" >&2; exit 1; }; \
+	grep -q "ARCH14_ALL_PASS" ci/headless/check_arch14_rollup.lua || { echo "perf-bootstrap: ARCH14 harness missing rollup marker" >&2; exit 1; }; \
 	grep -q "include ci/headless/perf_bootstrap.mk" Makefile || { echo "perf-bootstrap: Makefile does not include shared bootstrap" >&2; exit 1; }; \
 	mkdir -p "$(PERF_PLUGIN_ROOT)"; \
 	checkout_repo() { \

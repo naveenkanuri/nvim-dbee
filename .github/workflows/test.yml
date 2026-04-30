@@ -57,6 +57,9 @@ jobs:
           - check_actions_recovery.lua
           - check_auto_reconnect.lua
           - check_adapter_diagnostics.lua
+          - check_schema_filter.lua
+          - check_handler_schema_filter.lua
+          - check_adapter_schema_filter.lua
           - check_result_progress_hints.lua
           - check_result_restore_elapsed.lua
           - check_result_error_kinds.lua
@@ -68,6 +71,7 @@ jobs:
           - check_lsp_async_completion.lua
           - check_lsp_diagnostics_correctness.lua
           - check_lsp_diagnostics_debounce.lua
+          - check_lsp_schema_filter_lazy.lua
           - check_run_note_queries_opts.lua
           - check_cancel_confirm_prompt.lua
           - check_notifications.lua
@@ -299,6 +303,8 @@ jobs:
           grep -q '^LSP11_ASYNC_DEDUPE_MATERIALIZATION_AWARE=true$' "${log}"
           grep -q '^LSP11_DIAGNOSTIC_NAMESPACE_OK=true$' "${log}"
           grep -q '^LSP11_DIAGNOSTICS_SINGLE_NAMESPACE_OWNED=true$' "${log}"
+          grep -Eq '^ARCH14_PERF_LSP_SCHEMA_DOT_OK=(true|unfrozen)$' "${log}"
+          grep -Eq '^ARCH14_PERF_DRAWER_FILTER_SCOPED_OK=(true|unfrozen)$' "${log}"
           grep -Eq '^LSP01_REAL_LSP_PERF_ALL_PASS=(true|unfrozen)$' "${log}"
       - name: LSP advisory promotion seam
         if: always()
@@ -335,6 +341,34 @@ jobs:
             UX13_ROLLUP_LOG="${log}" nvim --headless -u NONE -i NONE -n \
               --cmd "set rtp+=${GITHUB_WORKSPACE}" \
               -c "luafile ${GITHUB_WORKSPACE}/ci/headless/check_ux13_rollup.lua"
+          done
+
+  phase14-arch14-rollup-gate:
+    needs: lua-lsp-perf-advisory
+    if: always()
+    runs-on: ubuntu-22.04
+    name: Phase 14 ARCH14 Rollup Gate
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Neovim ${{ env.NVIM_PERF_VERSION }}
+        run: |
+          curl -fsSLO https://github.com/neovim/neovim/releases/download/${NVIM_PERF_VERSION}/nvim-linux-x86_64.tar.gz
+          tar xzf nvim-linux-x86_64.tar.gz
+          echo "${PWD}/nvim-linux-x86_64/bin" >> "${GITHUB_PATH}"
+      - name: Download LSP advisory evidence
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*-lsp-perf-threshold-summary"
+          path: ${{ runner.temp }}/lsp01-perf-threshold-summary
+      - name: Validate ARCH14 rollups
+        run: |
+          set -eu
+          for platform in linux macos; do
+            log="${RUNNER_TEMP}/lsp01-perf-threshold-summary/${platform}-lsp-perf-threshold-summary/lsp01-stdout.log"
+            test -s "${log}"
+            ARCH14_ROLLUP_LOG="${log}" nvim --headless -u NONE -i NONE -n \
+              --cmd "set rtp+=${GITHUB_WORKSPACE}" \
+              -c "luafile ${GITHUB_WORKSPACE}/ci/headless/check_arch14_rollup.lua"
           done
 
   bootstrap-testcontainers:

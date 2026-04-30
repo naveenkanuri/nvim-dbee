@@ -23,6 +23,8 @@ LSP01_PERF_STATE_HOME ?= $(LSP01_PERF_ARTIFACT_DIR)/state-home
 UX13_ROLLUP_SCRIPT ?= $(CURDIR)/ci/headless/check_ux13_rollup.lua
 UX13_ROLLUP_ARTIFACT_DIR ?= $(LSP01_PERF_ARTIFACT_DIR)
 UX13_ROLLUP_LOG ?= $(UX13_ROLLUP_ARTIFACT_DIR)/ux13-rollup-stdout.log
+ARCH14_ROLLUP_SCRIPT ?= $(CURDIR)/ci/headless/check_arch14_rollup.lua
+ARCH14_ROLLUP_LOG ?= $(UX13_ROLLUP_LOG)
 
 .PHONY: perf perf-lsp perf-all
 
@@ -95,6 +97,9 @@ perf-lsp: perf-bootstrap
 	  XDG_STATE_HOME="$(LSP01_PERF_STATE_HOME)" \
 	  $(PERF_NVIM_HEADLESS) -c "luafile $(LSP_PERF_SCRIPT)"; \
 	for script in \
+	  check_schema_filter.lua \
+	  check_handler_schema_filter.lua \
+	  check_adapter_schema_filter.lua \
 	  check_lsp_alias_completion.lua \
 	  check_lsp_schema_alias_completion.lua \
 	  check_lsp_alias_rebinding.lua \
@@ -103,6 +108,7 @@ perf-lsp: perf-bootstrap
 	  check_lsp_async_completion.lua \
 	  check_lsp_diagnostics_correctness.lua \
 	  check_lsp_diagnostics_debounce.lua \
+	  check_lsp_schema_filter_lazy.lua \
 	  check_drawer_filter.lua \
 	  check_structure_lazy.lua \
 	  check_notes_picker.lua \
@@ -114,6 +120,8 @@ perf-lsp: perf-bootstrap
 	  run_logged "$$script" env XDG_STATE_HOME="$(LSP01_PERF_STATE_HOME)" \
 	    $(PERF_NVIM_HEADLESS) -c "luafile $(CURDIR)/ci/headless/$$script"; \
 	done; \
+	run_logged "go-arch14" env GOCACHE="$(LSP01_PERF_ARTIFACT_DIR)/go-cache" \
+	  go -C dbee test ./core ./handler ./adapters; \
 	run_logged "perf" env XDG_STATE_HOME="$(LSP01_PERF_STATE_HOME)" $(MAKE) --no-print-directory perf \
 	  PERF_PLATFORM="$(PERF_PLATFORM)" \
 	  DRAW01_PERF_GATE_MODE="$(DRAW01_PERF_GATE_MODE)" \
@@ -124,6 +132,8 @@ perf-lsp: perf-bootstrap
 	  NVIM_BIN="$(NVIM_BIN)" \
 	  PERF_PLUGIN_ROOT="$(PERF_PLUGIN_ROOT)"; \
 	run_logged "ux13-rollup" env UX13_ROLLUP_LOG="$(UX13_ROLLUP_LOG)" \
-	  $(PERF_NVIM_HEADLESS) -c "luafile $(UX13_ROLLUP_SCRIPT)"
+	  $(PERF_NVIM_HEADLESS) -c "luafile $(UX13_ROLLUP_SCRIPT)"; \
+	run_logged "arch14-rollup" env ARCH14_ROLLUP_LOG="$(ARCH14_ROLLUP_LOG)" \
+	  $(PERF_NVIM_HEADLESS) -c "luafile $(ARCH14_ROLLUP_SCRIPT)"
 
 perf-all: perf perf-lsp

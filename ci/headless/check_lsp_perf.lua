@@ -1858,6 +1858,100 @@ local function run_flame_trace_subprocess()
   sanitize_trace_file(trace_path)
 end
 
+local function run_arch14_schema_dot_advisory()
+  local SchemaCache = require("dbee.lsp.schema_cache")
+  local server = require("dbee.lsp.server")
+  local schema_filter = require("dbee.schema_filter")
+  local calls = {}
+  local normalized = assert(schema_filter.normalize({
+    include = { "APP%" },
+    lazy_per_schema = true,
+  }, "postgres"))
+  local handler = {
+    get_schema_filter_normalized = function()
+      return normalized
+    end,
+    get_authoritative_root_epoch = function()
+      return 1
+    end,
+    connection_get_schema_objects_singleflight = function(_, opts)
+      calls[#calls + 1] = vim.deepcopy(opts)
+      return { epoch = 1, request_id = opts.request_id or 0, joined = false, queued = false }
+    end,
+  }
+  local cache = SchemaCache:new(handler, "arch14-lsp-perf")
+  cache:build_from_schemas({ { name = "APP" } })
+  local client = server.create(cache)({}, {})
+  local bufnr, uri = make_buffer({ "select * from APP." })
+
+  local function request(line)
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { line })
+    local done = false
+    local result = nil
+    client.request("textDocument/completion", {
+      textDocument = { uri = uri },
+      position = { line = 0, character = #line },
+    }, function(err, response)
+      if err then
+        result = { error = err }
+      else
+        result = response
+      end
+      done = true
+    end)
+    vim.wait(1000, function()
+      return done
+    end, 20)
+    if not done or result and result.error then
+      return nil
+    end
+    return result
+  end
+
+  local miss_samples = {}
+  for _ = 1, MEASURED_COUNT do
+    local start_ns = uv.hrtime()
+    local result = request("select * from APP.")
+    miss_samples[#miss_samples + 1] = uv.hrtime() - start_ns
+    if not result or result.isIncomplete ~= true then
+      emit("ARCH14_PERF_LSP_SCHEMA_DOT_OK", "false")
+      scenario_sentinels.ARCH14_SCHEMA_DOT = false
+      client.terminate()
+      return
+    end
+  end
+
+  cache:on_schema_objects_loaded({
+    conn_id = "arch14-lsp-perf",
+    schema = "APP",
+    objects = {
+      { type = "table", schema = "APP", name = "TABLE_A" },
+      { type = "view", schema = "APP", name = "VIEW_A" },
+    },
+  })
+
+  local hit_samples = {}
+  for _ = 1, MEASURED_COUNT do
+    local start_ns = uv.hrtime()
+    local result = request("select * from APP.")
+    hit_samples[#hit_samples + 1] = uv.hrtime() - start_ns
+    if not result or result.isIncomplete ~= false or #result.items < 2 then
+      emit("ARCH14_PERF_LSP_SCHEMA_DOT_OK", "false")
+      scenario_sentinels.ARCH14_SCHEMA_DOT = false
+      client.terminate()
+      return
+    end
+  end
+
+  if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
+    pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
+  end
+  client.terminate()
+  emit("ARCH14_LSP_SCHEMA_DOT_COMPLETION_MISS_ASYNC_MEDIAN_MS", format_float(ns_to_ms(median(miss_samples))))
+  emit("ARCH14_LSP_SCHEMA_DOT_COMPLETION_HIT_MEDIAN_MS", format_float(ns_to_ms(median(hit_samples))))
+  emit("ARCH14_PERF_LSP_SCHEMA_DOT_OK", "unfrozen")
+end
+
 local run_representative_trace_workload
 
 local function run_trace_only_mode()
@@ -2233,6 +2327,8 @@ end
 if #SCENARIOS == 0 then
   fail("no LSP01 scenarios registered")
 end
+
+run_arch14_schema_dot_advisory()
 
 emit("LSP01_SCENARIOS_COUNT", #SCENARIOS)
 
