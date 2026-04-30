@@ -275,6 +275,22 @@ local function run_schema_object_singleflight_and_backpressure()
   assert_eq("sync wrapper filtered count", #sync_filtered, 1)
   assert_eq("sync wrapper filtered schema", sync_filtered[1].schema, "app")
 
+  vim.fn.DbeeConnectionGetParams = function()
+    return vim.NIL
+  end
+  vim.fn.DbeeStructureForSchema = function()
+    return {
+      { type = "table", schema = "app", name = "nil_params_app" },
+      { type = "table", schema = "other", name = "nil_params_other" },
+    }
+  end
+  local nil_params_scope = payload_filter_handler:get_schema_filter_normalized("conn-missing-params")
+  assert_eq("nil params normalized scope fails closed", nil_params_scope, nil)
+  local nil_params_options = payload_filter_handler:get_schema_filter("conn-missing-params")
+  assert_eq("nil params options signature", nil_params_options.schema_filter_signature, "schema-filter-v1|fail-closed")
+  local nil_params_sync = payload_filter_handler:connection_get_schema_objects("conn-missing-params", "app")
+  assert_eq("nil params sync wrapper empty", #nil_params_sync, 0)
+
   print("ARCH14_SCHEMA_OBJECT_SINGLEFLIGHT_OK=true")
   print("ARCH14_SCHEMA_OBJECT_BACKPRESSURE_OK=true")
   print("ARCH14_SCHEMA_OBJECT_QUEUE_BOUNDED=true")
@@ -283,6 +299,7 @@ local function run_schema_object_singleflight_and_backpressure()
   print("ARCH14_OPTIONS_LUA_GO_ROUNDTRIP_OK=true")
   print("ARCH14_SCHEMA_OBJECTS_PAYLOAD_FILTERED=true")
   print("ARCH14_SYNC_SCHEMA_OBJECTS_FILTERED=true")
+  print("ARCH14_FILTER_AUTHORITY_FAIL_CLOSED_ON_NIL_PARAMS=true")
 end
 
 local function run_manifest_contract()

@@ -722,11 +722,29 @@ function Handler:_fold_schema_name(conn_id, schema)
 end
 
 ---@private
+---@return table
+function Handler:_fail_closed_schema_filter_options()
+  return {
+    schema_filter = {
+      include = { "__DBEE_FAIL_CLOSED_SCHEMA_SCOPE__" },
+      exclude = {},
+      lazy_per_schema = false,
+    },
+    schema_filter_signature = "schema-filter-v1|fail-closed",
+    fold = "case_insensitive",
+    connection_type = "",
+  }
+end
+
+---@private
 ---@param conn_id connection_id
 ---@param structures DBStructure[]?
 ---@return DBStructure[]
 function Handler:_filter_structures_for_connection(conn_id, structures)
   local params = self:connection_get_params(conn_id)
+  if not params then
+    return {}
+  end
   local normalized, err = schema_filter.normalize(params and params.schema_filter or nil, params and params.type or nil)
   if not normalized then
     error(err or "invalid schema_filter")
@@ -2203,6 +2221,9 @@ end
 ---@return table
 function Handler:get_schema_filter(id)
   local params = self:connection_get_params(id)
+  if not params then
+    return self:_fail_closed_schema_filter_options()
+  end
   local opts, err = schema_filter.to_structure_options(params and params.schema_filter or nil, params and params.type or nil)
   if not opts then
     error(err or "invalid schema_filter")
@@ -2214,6 +2235,9 @@ end
 ---@return table
 function Handler:get_schema_filter_normalized(id)
   local params = self:connection_get_params(id)
+  if not params then
+    return nil
+  end
   local normalized, err = schema_filter.normalize(params and params.schema_filter or nil, params and params.type or nil)
   if not normalized then
     error(err or "invalid schema_filter")
