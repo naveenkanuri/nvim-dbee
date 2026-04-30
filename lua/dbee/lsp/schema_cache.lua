@@ -20,12 +20,13 @@
 local SchemaCache = {}
 
 local nio = require("nio")
+local schema_filter = require("dbee.schema_filter")
 
 local MAX_COLUMNS_IN_MEMORY = 500
 local SYNC_COLUMN_FILE_LOAD_LIMIT = 100
 local SYNC_COLUMN_FILE_SCAN_LIMIT = 200
 local COLUMN_CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
-local SCHEMA_CACHE_VERSION = 2
+local SCHEMA_CACHE_VERSION = 3
 local MATERIALIZATIONS = { "table", "view" }
 
 local CompletionItemKind = {
@@ -44,8 +45,11 @@ end
 
 ---@param value string?
 ---@return string?
-local function fold(value)
-  return value and value:upper() or nil
+local function fold(value, fold_id)
+  if not value then
+    return nil
+  end
+  return schema_filter.fold(value, fold_id or "upper")
 end
 
 ---@param ... string?
@@ -139,6 +143,14 @@ end
 ---@return SchemaCache
 function SchemaCache:new(handler, conn_id)
   local cache_dir = vim.fn.stdpath("state") .. "/dbee/lsp_cache"
+  local normalized_scope = nil
+  if handler and type(handler.get_schema_filter_normalized) == "function" then
+    local ok, scope = pcall(handler.get_schema_filter_normalized, handler, conn_id)
+    if ok then
+      normalized_scope = scope
+    end
+  end
+  normalized_scope = normalized_scope or schema_filter.normalize(nil, nil)
   local o = {
     handler = handler,
     conn_id = conn_id,
@@ -174,10 +186,40 @@ function SchemaCache:new(handler, conn_id)
     async_failed = {},
     next_async_request_id = 0,
     cache_dir = cache_dir,
+    fold_id = normalized_scope.fold,
+    schema_scope = normalized_scope,
+    schema_filter_signature = normalized_scope.schema_filter_signature,
+    root_mode = normalized_scope.lazy_per_schema and "schemas_only" or "full",
+    loaded_schemas = {},
+    pending_delete_total_files = 0,
+    pending_delete_sync_deleted = 0,
+    pending_delete_deferred_drain_count = 0,
   }
   setmetatable(o, self)
   self.__index = self
   return o
+end
+
+---@private
+---@return table
+function SchemaCache:_read_normalized_scope()
+  if self.handler and type(self.handler.get_schema_filter_normalized) == "function" then
+    local ok, scope = pcall(self.handler.get_schema_filter_normalized, self.handler, self.conn_id)
+    if ok and scope then
+      return scope
+    end
+  end
+  return schema_filter.normalize(nil, nil)
+end
+
+---@return boolean changed
+function SchemaCache:refresh_schema_scope()
+  local previous_signature = self.schema_filter_signature
+  local normalized_scope = self:_read_normalized_scope()
+  self.fold_id = normalized_scope.fold
+  self.schema_scope = normalized_scope
+  self.schema_filter_signature = normalized_scope.schema_filter_signature
+  return previous_signature ~= nil and previous_signature ~= self.schema_filter_signature
 end
 
 --- Build the cache from metadata query result rows.
@@ -217,6 +259,11 @@ function SchemaCache:build_from_metadata_rows(rows)
   end
 
   self:_rebuild_structure_indexes()
+  self.root_mode = "full"
+  self.loaded_schemas = {}
+  for schema in pairs(self.schemas) do
+    self.loaded_schemas[self:_fold(schema)] = true
+  end
 end
 
 --- Build the cache from a pre-fetched structure tree.
@@ -234,6 +281,66 @@ function SchemaCache:build_from_structure(structs)
 
   self:_flatten(structs, nil)
   self:_rebuild_structure_indexes()
+  self.root_mode = "full"
+  self.loaded_schemas = {}
+  for schema in pairs(self.schemas) do
+    self.loaded_schemas[self:_fold(schema)] = true
+  end
+end
+
+---@param schemas table[] array of {name: string}
+---@param opts? { preserve_loaded?: boolean }
+function SchemaCache:build_from_schemas(schemas, opts)
+  opts = opts or {}
+  local preserve_loaded = opts.preserve_loaded ~= false
+  local previous_tables = self.tables or {}
+  local previous_columns = self.columns or {}
+  local previous_lru = self.column_lru or {}
+  local previous_loaded = self.loaded_schemas or {}
+  local previous_schema_lookup = self.schema_lookup or {}
+
+  self.schemas = {}
+  self.tables = {}
+  self.columns = {}
+  self.column_lru = {}
+  self.loaded_schemas = {}
+  self.root_mode = "schemas_only"
+  self:_reset_indexes()
+
+  for _, schema in ipairs(schemas or {}) do
+    local name = schema.name or schema.schema or schema
+    if type(name) == "string" and name ~= "" and schema_filter.matches(name, self.schema_scope) then
+      self.schemas[name] = true
+      local folded = self:_fold(name)
+      local previous_name = previous_schema_lookup[folded] or name
+      if preserve_loaded and previous_loaded[folded] and previous_tables[previous_name] then
+        self.tables[name] = vim.deepcopy(previous_tables[previous_name])
+        self.loaded_schemas[folded] = true
+      else
+        self.tables[name] = self.tables[name] or {}
+      end
+    end
+  end
+
+  if preserve_loaded then
+    for key, cols in pairs(previous_columns) do
+      local schema = key:match("^(.-)%.")
+      if schema and self.loaded_schemas[self:_fold(schema)] then
+        self.columns[key] = cols
+        self.column_lru[key] = previous_lru[key]
+      end
+    end
+  end
+
+  self:_rebuild_structure_indexes()
+  self:_rebuild_column_indexes()
+end
+
+---@private
+---@param value string?
+---@return string?
+function SchemaCache:_fold(value)
+  return fold(value, self.fold_id)
 end
 
 ---@private
@@ -267,7 +374,7 @@ function SchemaCache:_rebuild_structure_indexes()
   table.sort(schema_names)
 
   for _, schema in ipairs(schema_names) do
-    self.schema_lookup[fold(schema)] = self.schema_lookup[fold(schema)] or schema
+    self.schema_lookup[self:_fold(schema)] = self.schema_lookup[self:_fold(schema)] or schema
     if schema ~= "_default" then
       self.schema_items[#self.schema_items + 1] = {
         label = schema,
@@ -285,7 +392,7 @@ function SchemaCache:_rebuild_structure_indexes()
 
     for _, name in ipairs(table_names) do
       local info = self.tables[schema][name] or { type = "table" }
-      local folded = fold(name)
+      local folded = self:_fold(name)
       schema_lookup[folded] = schema_lookup[folded] or name
 
       schema_items[#schema_items + 1] = table_completion_item(schema, name, info.type)
@@ -310,7 +417,7 @@ function SchemaCache:_refresh_global_table_index()
   local seen = {}
   for _, schema in ipairs(schema_names) do
     for _, item in ipairs(self.table_items_by_schema[schema] or {}) do
-      local folded = fold(item.label)
+      local folded = self:_fold(item.label)
       self.table_lookup_global[folded] = self.table_lookup_global[folded]
         or { name = item.label, schema = schema }
       if not seen[item.label] then
@@ -331,7 +438,7 @@ end
 ---@private
 ---@param label string
 function SchemaCache:_update_global_table_index_for_label(label)
-  local folded = fold(label)
+  local folded = self:_fold(label)
   self.table_lookup_global[folded] = nil
 
   local schema_names = vim.tbl_keys(self.schemas)
@@ -371,7 +478,7 @@ function SchemaCache:_upsert_table_index(schema, name, table_type)
   table_type = table_type or "table"
   local new_schema = not self.schemas[schema]
   self.schemas[schema] = true
-  self.schema_lookup[fold(schema)] = self.schema_lookup[fold(schema)] or schema
+  self.schema_lookup[self:_fold(schema)] = self.schema_lookup[self:_fold(schema)] or schema
 
   if not self.tables[schema] then
     self.tables[schema] = {}
@@ -389,7 +496,7 @@ function SchemaCache:_upsert_table_index(schema, name, table_type)
   end
 
   local schema_lookup = self.table_lookup_by_schema[schema] or {}
-  local folded_name = fold(name)
+  local folded_name = self:_fold(name)
   if not schema_lookup[folded_name] or name < schema_lookup[folded_name] then
     schema_lookup[folded_name] = name
   end
@@ -906,9 +1013,20 @@ function SchemaCache:_load_column_file(path, prefix)
 
   local content = f:read("*a")
   f:close()
-  local ok, cols = pcall(vim.json.decode, content)
-  if not ok or not cols then
+  local ok, payload = pcall(vim.json.decode, content)
+  if not ok or not payload then
     self:_remove_corrupt_file(path, "loading columns")
+    return false
+  end
+  local cols = payload
+  if type(payload) == "table" and payload.columns ~= nil then
+    if payload.schema_filter_signature ~= self.schema_filter_signature then
+      os.remove(path)
+      return false
+    end
+    cols = payload.columns
+  else
+    os.remove(path)
     return false
   end
   if not self:_validate_columns(cols) then
@@ -1209,6 +1327,9 @@ function SchemaCache:save_to_disk()
   local data = {
     version = SCHEMA_CACHE_VERSION,
     conn_id = self.conn_id,
+    schema_filter_signature = self.schema_filter_signature,
+    root_mode = self.root_mode or "full",
+    root_loaded_schemas = vim.tbl_keys(self.loaded_schemas or {}),
     schemas = vim.tbl_keys(self.schemas),
     tables = {},
   }
@@ -1255,8 +1376,29 @@ function SchemaCache:load_from_disk()
     return false
   end
 
+  if data.version == 2 then
+    local legacy = self:_normalize_schema_index(data)
+    if legacy then
+      self:_remove_legacy_schema_index(path)
+    else
+      self:_remove_corrupt_file(path, "loading schema index")
+    end
+    return false
+  end
+
   if data.version ~= SCHEMA_CACHE_VERSION then
     self:_remove_corrupt_file(path, "loading schema index")
+    return false
+  end
+
+  if data.schema_filter_signature ~= self.schema_filter_signature then
+    vim.g.dbee_lsp_schema_cache_filter_signature_migrated = {
+      conn_id = self.conn_id,
+      path = path,
+      expected = self.schema_filter_signature,
+      actual = data.schema_filter_signature,
+    }
+    os.remove(path)
     return false
   end
 
@@ -1271,15 +1413,29 @@ function SchemaCache:load_from_disk()
   self.columns = {}
   self:_bump_disk_work_generation()
   self:_reset_indexes()
+  self.loaded_schemas = {}
+  self.root_mode = data.root_mode or "full"
 
   for _, s in ipairs(normalized.schemas) do
     self.schemas[s] = true
+  end
+
+  for _, folded_schema in ipairs(data.root_loaded_schemas or {}) do
+    if type(folded_schema) == "string" then
+      self.loaded_schemas[folded_schema] = true
+    end
   end
 
   for schema, tbls in pairs(normalized.tables) do
     self.tables[schema] = {}
     for name, stype in pairs(tbls) do
       self.tables[schema][name] = { type = stype }
+    end
+  end
+
+  if self.root_mode == "full" and next(self.loaded_schemas) == nil then
+    for schema in pairs(self.schemas) do
+      self.loaded_schemas[self:_fold(schema)] = true
     end
   end
 
@@ -1296,7 +1452,11 @@ end
 function SchemaCache:_save_columns_to_disk(key, cols)
   vim.fn.mkdir(self.cache_dir, "p")
   local path = self:_columns_cache_path(key)
-  self:_atomic_write_json(path, cols, "saving columns")
+  self:_atomic_write_json(path, {
+    version = SCHEMA_CACHE_VERSION,
+    schema_filter_signature = self.schema_filter_signature,
+    columns = cols,
+  }, "saving columns")
 end
 
 --- Load all cached column files for this connection from disk.
@@ -1336,6 +1496,55 @@ function SchemaCache:schedule_disk_prune()
   self:_schedule_deferred_column_scan({})
 end
 
+function SchemaCache:delete_column_cache_for_filter_change()
+  local prefix = self.conn_id .. "_cols_"
+  local paths = {}
+  if vim.fs and type(vim.fs.dir) == "function" then
+    local ok, iter = pcall(vim.fs.dir, self.cache_dir)
+    if ok and iter then
+      for name, entry_type in iter do
+        if entry_type == "file" and name:sub(1, #prefix) == prefix and name:sub(-5) == ".json" then
+          paths[#paths + 1] = self.cache_dir .. "/" .. name
+        end
+      end
+    end
+  else
+    paths = vim.fn.glob(self.cache_dir .. "/" .. prefix .. "*.json", false, true)
+  end
+
+  table.sort(paths)
+  self.pending_delete_total_files = #paths
+  self.pending_delete_sync_deleted = 0
+  self.pending_delete_deferred_drain_count = 0
+  self:_bump_disk_work_generation()
+  local generation = self.disk_work_generation
+  local sync_limit = math.min(100, #paths)
+  for index = 1, sync_limit do
+    if os.remove(paths[index]) then
+      self.pending_delete_sync_deleted = self.pending_delete_sync_deleted + 1
+    end
+  end
+
+  local next_index = sync_limit + 1
+  local function step()
+    if self.disk_work_generation ~= generation then
+      return
+    end
+    local last = math.min(next_index + 99, #paths)
+    for index = next_index, last do
+      os.remove(paths[index])
+    end
+    self.pending_delete_deferred_drain_count = self.pending_delete_deferred_drain_count + 1
+    next_index = last + 1
+    if next_index <= #paths then
+      vim.schedule(step)
+    end
+  end
+  if next_index <= #paths then
+    vim.schedule(step)
+  end
+end
+
 --- Get test-visible cache stats.
 ---@return table
 function SchemaCache:get_stats()
@@ -1357,6 +1566,9 @@ function SchemaCache:get_stats()
     max_columns_in_memory = MAX_COLUMNS_IN_MEMORY,
     sync_column_file_load_limit = SYNC_COLUMN_FILE_LOAD_LIMIT,
     sync_column_file_scan_limit = SYNC_COLUMN_FILE_SCAN_LIMIT,
+    pending_delete_total_files = self.pending_delete_total_files or 0,
+    pending_delete_sync_deleted = self.pending_delete_sync_deleted or 0,
+    pending_delete_deferred_drain_count = self.pending_delete_deferred_drain_count or 0,
   }
 end
 
@@ -1397,6 +1609,65 @@ function SchemaCache:get_table_completion_items(schema)
   return copy_items(self.table_items_by_schema[actual_schema])
 end
 
+function SchemaCache:schema_status(schema)
+  local actual_schema = self:find_schema(schema) or schema
+  if not schema_filter.matches(actual_schema, self.schema_scope) then
+    return "filtered_out", actual_schema
+  end
+  if not self:find_schema(actual_schema) then
+    return "missing", actual_schema
+  end
+  if self.root_mode == "schemas_only" and not self.loaded_schemas[self:_fold(actual_schema)] then
+    return "active_unloaded", actual_schema
+  end
+  return "loaded", actual_schema
+end
+
+function SchemaCache:get_schema_table_completion_async(schema)
+  local status, actual_schema = self:schema_status(schema)
+  if status == "loaded" then
+    return {
+      items = self:get_table_completion_items(actual_schema),
+      is_incomplete = false,
+    }
+  end
+  if status ~= "active_unloaded" then
+    return {
+      items = {},
+      is_incomplete = false,
+      reason = status,
+    }
+  end
+
+  if not self.handler or type(self.handler.connection_get_schema_objects_singleflight) ~= "function" then
+    return {
+      items = {},
+      is_incomplete = false,
+      reason = "schema_object_api_unavailable",
+    }
+  end
+
+  local root_epoch = self:_root_epoch({})
+  local request_id = self:_next_request_id()
+  self.handler:connection_get_schema_objects_singleflight({
+    conn_id = self.conn_id,
+    schema = actual_schema,
+    consumer = "lsp-schema-dot",
+    priority = "lsp",
+    request_id = request_id,
+    caller_token = "lsp",
+    callback = function(data)
+      self:on_schema_objects_loaded(data)
+    end,
+  })
+
+  return {
+    items = {},
+    is_incomplete = true,
+    root_epoch = root_epoch,
+  }
+end
+
 --- Get precomputed table completion items across all schemas.
 ---@return lsp.CompletionItem[]
 function SchemaCache:get_all_table_completion_items()
@@ -1420,7 +1691,7 @@ function SchemaCache:find_schema(schema_name)
   if not schema_name or schema_name == "" then
     return nil
   end
-  return self.schema_lookup[fold(schema_name)]
+  return self.schema_lookup[self:_fold(schema_name)]
 end
 
 --- Get columns through the non-blocking async miss path.
@@ -1621,6 +1892,47 @@ function SchemaCache:on_columns_loaded(data)
   return true
 end
 
+function SchemaCache:on_schema_objects_loaded(data)
+  if not data or data.conn_id ~= self.conn_id then
+    return false
+  end
+  if data.error or data.error_kind then
+    return false
+  end
+  local schema = self:find_schema(data.schema) or data.schema
+  if not schema or schema == "" then
+    return false
+  end
+  if not schema_filter.matches(schema, self.schema_scope) then
+    return false
+  end
+
+  self.schemas[schema] = true
+  self.tables[schema] = self.tables[schema] or {}
+  local function apply_structs(structs, parent_schema)
+    for _, struct in ipairs(structs or {}) do
+      local stype = struct.type or ""
+      local current_schema = struct.schema or parent_schema or schema
+      if stype == "schema" then
+        current_schema = struct.schema or struct.name or schema
+        self.schemas[current_schema] = true
+        self.tables[current_schema] = self.tables[current_schema] or {}
+        apply_structs(struct.children or {}, current_schema)
+      elseif stype == "table" or stype == "view" then
+        self.tables[current_schema] = self.tables[current_schema] or {}
+        self.tables[current_schema][struct.name] = { type = stype }
+      elseif struct.children then
+        apply_structs(struct.children, current_schema)
+      end
+    end
+  end
+  apply_structs(data.objects or {}, schema)
+  self.loaded_schemas[self:_fold(schema)] = true
+  self:_rebuild_structure_indexes()
+  self:save_to_disk()
+  return true
+end
+
 --- Cancel or retire all async column miss state.
 ---@param _reason? string
 ---@param _opts? table
@@ -1808,7 +2120,7 @@ function SchemaCache:find_table_in_schema(schema_name, table_name)
   if not schema_lookup then
     return nil, actual_schema
   end
-  local actual_name = schema_lookup[fold(table_name)]
+  local actual_name = schema_lookup[self:_fold(table_name)]
   if actual_name then
     return actual_name, actual_schema
   end
@@ -1819,7 +2131,7 @@ end
 ---@param table_name string
 ---@return string? actual_name, string? schema
 function SchemaCache:find_table(table_name)
-  local match = self.table_lookup_global[fold(table_name)]
+  local match = self.table_lookup_global[self:_fold(table_name)]
   if match then
     return match.name, match.schema
   end

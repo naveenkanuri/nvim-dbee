@@ -1,5 +1,9 @@
 -- Headless checks for Phase 11 LSP disk-cache safety and bounded loading.
 
+package.preload["nio"] = package.preload["nio"] or function()
+  return {}
+end
+
 local SchemaCache = require("dbee.lsp.schema_cache")
 
 local function fail(msg)
@@ -75,6 +79,14 @@ local function read_file(path)
   return content
 end
 
+local function column_payload(cache, cols, signature)
+  return vim.json.encode({
+    version = 3,
+    schema_filter_signature = signature or cache.schema_filter_signature,
+    columns = cols,
+  })
+end
+
 local function temp_residue_count(dir)
   return #vim.fn.glob(dir .. "/**/*.tmp.*", false, true)
 end
@@ -92,7 +104,8 @@ assert_true("schema file written", vim.fn.filereadable(cache:_cache_path()) == 1
 assert_true("column file written", vim.fn.filereadable(cache:_columns_cache_path("S.T")) == 1)
 assert_eq("no temp residue", temp_residue_count(cache.cache_dir), 0)
 local schema_index = vim.json.decode(read_file(cache:_cache_path()))
-assert_eq("schema cache version written", schema_index.version, 2)
+assert_eq("schema cache version written", schema_index.version, 3)
+assert_eq("schema cache signature written", schema_index.schema_filter_signature, cache.schema_filter_signature)
 
 local original = read_file(cache:_cache_path())
 local saved_rename = os.rename
@@ -129,6 +142,34 @@ assert_eq("legacy v1 no corrupt warning", warning_count("corrupt cache"), warn_b
 assert_true("legacy v1 removed", vim.fn.filereadable(legacy_path) == 0)
 assert_true("legacy v1 migration recorded", vim.g.dbee_lsp_schema_cache_legacy_v1_migrated ~= nil)
 assert_eq("legacy v1 migration conn", vim.g.dbee_lsp_schema_cache_legacy_v1_migrated.conn_id, "disk-legacy-v1")
+
+local legacy_v2_cache = new_isolated_cache("disk-legacy-v2")
+local legacy_v2_path = legacy_v2_cache:_cache_path()
+write_file(legacy_v2_path, vim.json.encode({
+  version = 2,
+  conn_id = "disk-legacy-v2",
+  schemas = { "LEGACY2" },
+  tables = {
+    LEGACY2 = {
+      ORDERS = "table",
+    },
+  },
+}))
+local warn_before_legacy_v2 = warning_count("corrupt cache")
+assert_eq("legacy v2 load returns false", legacy_v2_cache:load_from_disk(), false)
+assert_eq("legacy v2 no corrupt warning", warning_count("corrupt cache"), warn_before_legacy_v2)
+assert_true("legacy v2 removed", vim.fn.filereadable(legacy_v2_path) == 0)
+
+local signature_cache = new_isolated_cache("disk-signature-mismatch")
+signature_cache:build_from_metadata_rows({
+  { schema_name = "S", table_name = "T", obj_type = "table" },
+})
+signature_cache:save_to_disk()
+local signature_data = vim.json.decode(read_file(signature_cache:_cache_path()))
+signature_data.schema_filter_signature = "old-filter-signature"
+write_file(signature_cache:_cache_path(), vim.json.encode(signature_data))
+assert_eq("signature mismatch load returns false", signature_cache:load_from_disk(), false)
+assert_true("signature mismatch removed", vim.fn.filereadable(signature_cache:_cache_path()) == 0)
 
 local malformed_missing_version_cache = new_isolated_cache("disk-malformed-missing-version")
 local malformed_missing_version_path = malformed_missing_version_cache:_cache_path()
@@ -187,7 +228,7 @@ local prune_cache = new_isolated_cache("disk-prune")
 local uv = vim.uv or vim.loop
 for i = 1, 3 do
   local key = string.format("S.OLD_%03d", i)
-  write_file(prune_cache:_columns_cache_path(key), vim.json.encode({
+  write_file(prune_cache:_columns_cache_path(key), column_payload(prune_cache, {
     { name = "OLD_ID", type = "NUMBER" },
   }))
   local old = os.time() - (31 * 24 * 60 * 60)
@@ -206,7 +247,7 @@ large_cache:build_from_metadata_rows({
 large_cache:save_to_disk()
 for i = 1, 10000 do
   local key = string.format("S.T%05d", i)
-  write_file(large_cache:_columns_cache_path(key), vim.json.encode({
+  write_file(large_cache:_columns_cache_path(key), column_payload(large_cache, {
     { name = "ID", type = "NUMBER" },
   }))
 end
@@ -224,7 +265,7 @@ small_cache:build_from_metadata_rows({
 small_cache:save_to_disk()
 for i = 1, 50 do
   local key = string.format("S.SMALL_%03d", i)
-  write_file(small_cache:_columns_cache_path(key), vim.json.encode({
+  write_file(small_cache:_columns_cache_path(key), column_payload(small_cache, {
     { name = "ID", type = "NUMBER" },
   }))
 end
@@ -243,12 +284,12 @@ bounded_scan_cache:build_from_metadata_rows({
 bounded_scan_cache:save_to_disk()
 for i = 1, 50 do
   local key = string.format("S.CURRENT_%03d", i)
-  write_file(bounded_scan_cache:_columns_cache_path(key), vim.json.encode({
+  write_file(bounded_scan_cache:_columns_cache_path(key), column_payload(bounded_scan_cache, {
     { name = "ID", type = "NUMBER" },
   }))
 end
 for i = 1, 10000 do
-  write_file(bounded_scan_cache.cache_dir .. "/" .. string.format("other_conn_cols_%05d.json", i), vim.json.encode({
+  write_file(bounded_scan_cache.cache_dir .. "/" .. string.format("other_conn_cols_%05d.json", i), column_payload(bounded_scan_cache, {
     { name = "OTHER_ID", type = "NUMBER" },
   }))
 end
@@ -269,7 +310,7 @@ local adversarial_current_names = {}
 for i = 1, adversarial_unrelated_count do
   local name = string.format("other_conn_cols_%05d.json", i)
   adversarial_other_names[#adversarial_other_names + 1] = name
-  write_file(adversarial_cache.cache_dir .. "/" .. name, vim.json.encode({
+  write_file(adversarial_cache.cache_dir .. "/" .. name, column_payload(adversarial_cache, {
     { name = "OTHER_ID", type = "NUMBER" },
   }))
 end
@@ -277,7 +318,7 @@ for i = 1, adversarial_current_count do
   local key = string.format("S.CURRENT_%03d", i)
   local path = adversarial_cache:_columns_cache_path(key)
   adversarial_current_names[#adversarial_current_names + 1] = vim.fn.fnamemodify(path, ":t")
-  write_file(path, vim.json.encode({
+  write_file(path, column_payload(adversarial_cache, {
     { name = "ID", type = "NUMBER" },
   }))
 end
@@ -335,7 +376,7 @@ deferred_count_cache:build_from_metadata_rows({
 deferred_count_cache:save_to_disk()
 for i = 1, 200 do
   local key = string.format("S.DEFERRED_COUNT_%03d", i)
-  write_file(deferred_count_cache:_columns_cache_path(key), vim.json.encode({
+  write_file(deferred_count_cache:_columns_cache_path(key), column_payload(deferred_count_cache, {
     { name = "ID", type = "NUMBER" },
   }))
 end
@@ -359,7 +400,7 @@ deferred_prune_cache:save_to_disk()
 for i = 1, 150 do
   local key = string.format("S.DEFERRED_OLD_%03d", i)
   local path = deferred_prune_cache:_columns_cache_path(key)
-  write_file(path, vim.json.encode({
+  write_file(path, column_payload(deferred_prune_cache, {
     { name = "OLD_ID", type = "NUMBER" },
   }))
   local old = os.time() - (31 * 24 * 60 * 60)
@@ -383,7 +424,7 @@ local fenced_files = {}
 for i = 1, 125 do
   local key = string.format("S.DEFER_%03d", i)
   local path = fenced_cache:_columns_cache_path(key)
-  write_file(path, vim.json.encode({
+  write_file(path, column_payload(fenced_cache, {
     { name = "ID", type = "NUMBER" },
   }))
   fenced_files[#fenced_files + 1] = {
@@ -399,6 +440,38 @@ vim.wait(1000, function()
 end, 20)
 assert_eq("fenced columns stay empty", fenced_cache:get_stats().column_entry_count, 0)
 assert_true("deferred work canceled", fenced_cache:get_stats().deferred_disk_work_canceled > 0)
+
+local pending_fence_cache = new_isolated_cache("disk-pending-fence")
+pending_fence_cache:build_from_metadata_rows({
+  { schema_name = "S", table_name = "T", obj_type = "table" },
+})
+pending_fence_cache:save_to_disk()
+write_file(pending_fence_cache:_columns_cache_path("S.T"), column_payload(pending_fence_cache, {
+  { name = "STALE_COL", type = "NUMBER" },
+}, "old-filter-signature"))
+assert_eq("pending fence schema loads", pending_fence_cache:load_from_disk(), true)
+assert_eq("pending fence rejects stale columns", #pending_fence_cache:get_column_completion_items("S", "T"), 0)
+assert_true("pending fence stale file removed", vim.fn.filereadable(pending_fence_cache:_columns_cache_path("S.T")) == 0)
+
+local delete_cache = new_isolated_cache("disk-filter-delete")
+delete_cache:build_from_metadata_rows({
+  { schema_name = "S", table_name = "T", obj_type = "table" },
+})
+delete_cache:save_to_disk()
+for i = 1, 10000 do
+  local key = string.format("S.DELETE_%05d", i)
+  write_file(delete_cache:_columns_cache_path(key), column_payload(delete_cache, {
+    { name = "ID", type = "NUMBER" },
+  }))
+end
+delete_cache:delete_column_cache_for_filter_change()
+local delete_initial = delete_cache:get_stats()
+assert_eq("filter delete total", delete_initial.pending_delete_total_files, 10000)
+assert_true("filter delete sync bounded", delete_initial.pending_delete_sync_deleted <= 100)
+vim.wait(5000, function()
+  return #vim.fn.glob(delete_cache.cache_dir .. "/disk-filter-delete_cols_*.json", false, true) == 0
+end, 20)
+assert_eq("filter delete drained", #vim.fn.glob(delete_cache.cache_dir .. "/disk-filter-delete_cols_*.json", false, true), 0)
 
 vim.notify = saved_notify
 
@@ -420,6 +493,11 @@ print("UX13_CACHE_LEGACY_V1_REMOVED=true")
 print("UX13_CACHE_TRUE_CORRUPTION_WARN=true")
 print("UX13_CACHE_TRUE_CORRUPTION_WARN_RETAINED=true")
 print("UX13_CACHE_MIGRATION_ALL_PASS=true")
+print("ARCH14_CACHE_V3_MIGRATION_OK=true")
+print("ARCH14_FILTER_CHANGE_INVALIDATES=true")
+print("ARCH14_FILTER_CHANGE_CACHE_DELETION_BOUNDED=true")
+print("ARCH14_PENDING_DELETION_FENCE_OK=true")
+print("ARCH14_CACHE_TRUE_CORRUPTION_WARN_RETAINED=true")
 
 vim.fn.delete(root, "rf")
 vim.cmd("qa!")

@@ -1,6 +1,7 @@
 local state = require("dbee.api.state")
 local SchemaCache = require("dbee.lsp.schema_cache")
 local server = require("dbee.lsp.server")
+local schema_filter = require("dbee.schema_filter")
 local utils = require("dbee.utils")
 
 -- Metadata SQL queries per connection type.
@@ -116,6 +117,26 @@ local function clear_connection_tracking(conn_id)
   M._async_requested = {}
   M._metadata_scheduled = {}
   M._metadata_call_ids = {}
+end
+
+local function connection_uses_lazy_schema_root(handler, conn)
+  if not conn then
+    return false
+  end
+
+  local normalized
+  if handler and type(handler.get_schema_filter_normalized) == "function" and conn.id then
+    local ok, scope = pcall(handler.get_schema_filter_normalized, handler, conn.id)
+    if ok then
+      normalized = scope
+    end
+  end
+  if not normalized then
+    normalized = schema_filter.normalize(conn.schema_filter or nil, conn.type or nil)
+  end
+
+  local caps = schema_filter.capabilities((normalized and normalized.connection_type) or conn.type or nil)
+  return normalized and normalized.lazy_per_schema == true and caps.list_schemas == true and caps.structure_for_schema == true
 end
 
 ---@param data ConnectionInvalidatedEvent
@@ -263,11 +284,53 @@ function M._on_structure_loaded(handler, data)
 
   if M._client_id and M._cache then
     cancel_active_async("structure_loaded")
+    if type(M._cache.refresh_schema_scope) == "function" then
+      M._cache:refresh_schema_scope()
+    end
     M._cache:build_from_structure(data.structures)
     M._cache:save_to_disk()
   else
     local cache = SchemaCache:new(handler, data.conn_id)
     cache:build_from_structure(data.structures)
+    cache:save_to_disk()
+    M._start_lsp(cache, data.conn_id)
+  end
+end
+
+---@private
+---@param handler Handler
+---@param data table
+function M._on_schemas_loaded(handler, data)
+  if not data or not data.conn_id or data.error_kind == "superseded" then
+    return
+  end
+  if data.caller_token ~= "lsp" then
+    return
+  end
+
+  local payload_epoch = tonumber(data.root_epoch) or 0
+  if payload_epoch < handler:get_authoritative_root_epoch(data.conn_id) then
+    return
+  end
+  local conn = handler:get_current_connection()
+  if not conn or conn.id ~= data.conn_id or data.error then
+    return
+  end
+
+  if M._client_id and M._cache then
+    cancel_active_async("schemas_loaded")
+    local scope_changed = false
+    if type(M._cache.refresh_schema_scope) == "function" then
+      scope_changed = M._cache:refresh_schema_scope()
+    end
+    if scope_changed and type(M._cache.delete_column_cache_for_filter_change) == "function" then
+      M._cache:delete_column_cache_for_filter_change()
+    end
+    M._cache:build_from_schemas(data.schemas or {}, { preserve_loaded = not scope_changed })
+    M._cache:save_to_disk()
+  else
+    local cache = SchemaCache:new(handler, data.conn_id)
+    cache:build_from_schemas(data.schemas or {})
     cache:save_to_disk()
     M._start_lsp(cache, data.conn_id)
   end
@@ -286,6 +349,46 @@ function M._request_structure_refresh(handler, conn_id)
       M._on_structure_loaded(handler, data)
     end,
   })
+end
+
+---@private
+---@param handler Handler
+---@param conn_id connection_id
+function M._request_schema_list_refresh(handler, conn_id)
+  M._async_requested[conn_id] = true
+  if type(handler.connection_list_schemas_singleflight) ~= "function" then
+    M._request_structure_refresh(handler, conn_id)
+    return
+  end
+  handler:connection_list_schemas_singleflight({
+    conn_id = conn_id,
+    purpose = "lsp",
+    consumer = M._bootstrap_consumer_id,
+    caller_token = "lsp",
+    callback = function(data)
+      M._on_schemas_loaded(handler, data)
+    end,
+  })
+end
+
+---@private
+---@param handler Handler
+---@param conn_id connection_id
+function M._request_root_refresh(handler, conn_id)
+  local conn
+  if type(handler.connection_get_params) == "function" then
+    local ok, params = pcall(handler.connection_get_params, handler, conn_id)
+    if ok then
+      conn = params
+    end
+  end
+  conn = conn or { id = conn_id }
+
+  if connection_uses_lazy_schema_root(handler, conn) then
+    M._request_schema_list_refresh(handler, conn_id)
+  else
+    M._request_structure_refresh(handler, conn_id)
+  end
 end
 
 ---@private
@@ -366,7 +469,7 @@ function M._bootstrap_connection_invalidated(handler)
 
         M._connection_invalidated_consumer_live = true
         if should_refresh and current_conn and current_conn.id then
-          M._request_structure_refresh(handler, current_conn.id)
+          M._request_root_refresh(handler, current_conn.id)
         end
         return true
       end
@@ -432,6 +535,7 @@ function M._try_start()
   if not conn then
     return
   end
+  local lazy_root = connection_uses_lazy_schema_root(handler, conn)
 
   -- 1. Try disk cache (instant)
   local cache = SchemaCache:new(handler, conn.id)
@@ -439,7 +543,7 @@ function M._try_start()
     M._start_lsp(cache, conn.id)
     -- also trigger async refresh in background to keep cache fresh
     if not M._async_requested[conn.id] then
-      M._request_structure_refresh(handler, conn.id)
+      M._request_root_refresh(handler, conn.id)
     end
     return
   end
@@ -447,14 +551,14 @@ function M._try_start()
   -- 2. No disk cache — trigger async structure load (non-blocking).
   --    LSP will start when structure_loaded event fires.
   if not M._async_requested[conn.id] then
-    M._request_structure_refresh(handler, conn.id)
+    M._request_root_refresh(handler, conn.id)
   end
 
   -- 3. Schedule metadata query fallback.
   --    For large databases, structure_loaded may never arrive (Go→Lua
   --    serialization too large). After 5s, fall back to a lightweight
   --    metadata SQL query that returns only user schemas.
-  if not M._metadata_scheduled[conn.id] and METADATA_QUERIES[conn.type] then
+  if not lazy_root and not M._metadata_scheduled[conn.id] and METADATA_QUERIES[conn.type] then
     M._metadata_scheduled[conn.id] = true
     local target_id = conn.id
     local target_type = conn.type
@@ -590,7 +694,7 @@ function M.refresh()
   local handler = state.handler()
   local conn = handler:get_current_connection()
   if conn then
-    M._request_structure_refresh(handler, conn.id)
+    M._request_root_refresh(handler, conn.id)
   end
 end
 
@@ -632,7 +736,7 @@ function M._flush_connection_invalidations()
   if should_rewarm then
     cancel_active_async("connection_invalidated")
     clear_lsp_diagnostics()
-    M._request_structure_refresh(handler, current.id)
+    M._request_root_refresh(handler, current.id)
   end
 end
 
@@ -751,7 +855,7 @@ function M.register_events()
       clear_lsp_diagnostics()
       M._cache:invalidate()
       -- trigger fresh structure load
-      M._request_structure_refresh(handler, data.conn_id)
+      M._request_root_refresh(handler, data.conn_id)
     end
   end)
 end

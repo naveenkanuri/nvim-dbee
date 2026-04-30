@@ -155,6 +155,10 @@ local function get_completions(params, cache)
   end
 
   if ctx == "table_in_schema" then
+    if type(cache.get_schema_table_completion_async) == "function" then
+      local schema_result = cache:get_schema_table_completion_async(extra)
+      return completion_result(schema_result.items or {}, schema_result.is_incomplete == true)
+    end
     return completion_result(table_completions(cache, extra), false)
   end
 
@@ -266,6 +270,23 @@ local function compute_diagnostics(text, cache)
     local missing = false
     local message
     if schema_part and tbl then
+      if type(cache.schema_status) == "function" then
+        local status = cache:schema_status(schema_part)
+        if status == "filtered_out" then
+          diagnostics[#diagnostics + 1] = {
+            range = {
+              start = context.statement_offset_to_position(statement, ref_start),
+              ["end"] = context.statement_offset_to_position(statement, ref_start + #schema_part),
+            },
+            severity = DiagnosticSeverity.Information,
+            source = "dbee-lsp",
+            message = string.format("Schema %s is outside this connection's scope. Edit schema_filter to include.", schema_part),
+          }
+          return
+        elseif status == "active_unloaded" then
+          return
+        end
+      end
       local actual = cache:find_table_in_schema(schema_part, tbl)
       missing = actual == nil
       message = string.format("Unknown table: %s.%s", schema_part, tbl)
