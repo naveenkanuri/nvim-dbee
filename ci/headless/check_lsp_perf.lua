@@ -2148,7 +2148,7 @@ register({
   after = startup_after,
 })
 
-local large_disk_iteration = {}
+local large_disk_seeded = {}
 local large_disk_isolation_ok = true
 
 local function seed_large_disk_cache(count, conn_id)
@@ -2157,18 +2157,28 @@ local function seed_large_disk_cache(count, conn_id)
     conn_id = conn_id,
   })
   cache:save_to_disk()
+  local column_payload = vim.json.encode({
+    version = 3,
+    schema_filter_signature = cache.schema_filter_signature,
+    columns = make_columns("", "", DEFAULT_COLUMNS_PER_TABLE),
+  })
   for i = 1, count do
     local schema = schema_for_index(i)
     local table_name = table_for_index(i)
-    cache:_save_columns_to_disk(schema .. "." .. table_name, make_columns(schema, table_name, DEFAULT_COLUMNS_PER_TABLE))
+    local path = cache:_columns_cache_path(schema .. "." .. table_name)
+    local f = assert(io.open(path, "w"))
+    f:write(column_payload)
+    f:close()
   end
 end
 
 local function large_disk_startup_before(count)
   assert_isolated_state()
-  large_disk_iteration[count] = (large_disk_iteration[count] or 0) + 1
-  local conn_id = string.format("%s-large-%d-%03d", DEFAULT_CONN_ID, count, large_disk_iteration[count])
-  seed_large_disk_cache(count, conn_id)
+  local conn_id = string.format("%s-large-%d", DEFAULT_CONN_ID, count)
+  if not large_disk_seeded[count] then
+    seed_large_disk_cache(count, conn_id)
+    large_disk_seeded[count] = true
+  end
   local handler = make_handler({
     conn_id = conn_id,
     table_count = 100,
