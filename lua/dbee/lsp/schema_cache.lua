@@ -186,6 +186,9 @@ function SchemaCache:new(handler, conn_id)
     async_inflight = {},
     async_chains = {},
     async_failed = {},
+    completion_refresh_eligible = {},
+    completion_refresh_pending = {},
+    completion_refresh_notifier = nil,
     next_async_request_id = 0,
     cache_dir = cache_dir,
     fold_id = normalized_scope.fold,
@@ -224,6 +227,99 @@ function SchemaCache:refresh_schema_scope()
   self.schema_scope = normalized_scope
   self.schema_filter_signature = normalized_scope.schema_filter_signature
   return previous_signature ~= nil and previous_signature ~= self.schema_filter_signature
+end
+
+---@param notifier? fun(payload: table)
+function SchemaCache:set_completion_refresh_notifier(notifier)
+  if type(notifier) == "function" then
+    self.completion_refresh_notifier = notifier
+  else
+    self.completion_refresh_notifier = nil
+  end
+end
+
+---@private
+---@return integer
+function SchemaCache:_authoritative_root_epoch()
+  if self.handler and type(self.handler.get_authoritative_root_epoch) == "function" then
+    local ok, epoch = pcall(self.handler.get_authoritative_root_epoch, self.handler, self.conn_id)
+    if ok then
+      return tonumber(epoch) or 0
+    end
+  end
+  return 0
+end
+
+---@private
+---@param chain_key string?
+function SchemaCache:_mark_completion_refresh_eligible(chain_key)
+  if chain_key and chain_key ~= "" then
+    self.completion_refresh_eligible[chain_key] = true
+  end
+end
+
+---@private
+---@param entries table[]
+---@return boolean
+function SchemaCache:_consume_completion_refresh_eligible(entries)
+  local eligible = false
+  for _, entry in ipairs(entries or {}) do
+    if entry.chain_key and self.completion_refresh_eligible[entry.chain_key] then
+      eligible = true
+      self.completion_refresh_eligible[entry.chain_key] = nil
+    end
+  end
+  return eligible
+end
+
+---@private
+---@param probe table
+---@param request_id integer
+---@param root_epoch integer
+function SchemaCache:_queue_completion_refresh_notification(probe, request_id, root_epoch)
+  if type(self.completion_refresh_notifier) ~= "function" then
+    return
+  end
+  if root_epoch < self:_authoritative_root_epoch() then
+    return
+  end
+  if not schema_filter.matches(probe.schema, self.schema_scope) then
+    return
+  end
+
+  local notify_key = table.concat({
+    tostring(self.conn_id or ""),
+    tostring(probe.schema or ""),
+    tostring(probe.table_name or ""),
+    tostring(probe.materialization or ""),
+    tostring(root_epoch or 0),
+    tostring(self.schema_filter_signature or ""),
+  }, "\31")
+  if self.completion_refresh_pending[notify_key] then
+    return
+  end
+  self.completion_refresh_pending[notify_key] = true
+
+  local payload = {
+    conn_id = self.conn_id,
+    schema = probe.schema,
+    table = probe.table_name,
+    materialization = probe.materialization,
+    root_epoch = root_epoch,
+    schema_filter_signature = self.schema_filter_signature,
+    request_id = request_id,
+  }
+
+  vim.schedule(function()
+    self.completion_refresh_pending[notify_key] = nil
+    if type(self.completion_refresh_notifier) ~= "function" then
+      return
+    end
+    if root_epoch < self:_authoritative_root_epoch() then
+      return
+    end
+    self.completion_refresh_notifier(vim.deepcopy(payload))
+  end)
 end
 
 --- Build the cache from metadata query result rows.
@@ -660,6 +756,7 @@ end
 ---@param entry table
 function SchemaCache:_finish_async_entry(entry)
   self:_detach_async_entry(entry)
+  self.completion_refresh_eligible[entry.chain_key] = nil
   self.async_chains[entry.chain_key] = nil
 end
 
@@ -1791,6 +1888,15 @@ function SchemaCache:get_columns_async(schema, table_name, opts)
   schema = self:find_schema(schema) or schema or "_default"
   table_name = table_name or ""
 
+  if not schema_filter.matches(schema, self.schema_scope) then
+    return {
+      columns = {},
+      is_incomplete = false,
+      in_flight = false,
+      reason = "filtered_out",
+    }
+  end
+
   local actual_table = self:find_table_in_schema(schema, table_name)
   if actual_table then
     table_name = actual_table
@@ -1829,6 +1935,7 @@ function SchemaCache:get_columns_async(schema, table_name, opts)
   end
 
   if self.async_chains[chain_key] then
+    self:_mark_completion_refresh_eligible(chain_key)
     return {
       columns = {},
       is_incomplete = true,
@@ -1906,6 +2013,7 @@ function SchemaCache:get_columns_async(schema, table_name, opts)
     }
   end
 
+  self:_mark_completion_refresh_eligible(chain_key)
   return {
     columns = {},
     is_incomplete = true,
@@ -1925,6 +2033,10 @@ function SchemaCache:on_columns_loaded(data)
   end
 
   local payload_epoch = tonumber(data.root_epoch) or 0
+  if payload_epoch < self:_authoritative_root_epoch() then
+    return false
+  end
+
   local probe = nil
   for _, candidate in pairs(self.async_inflight) do
     if candidate.conn_id == data.conn_id
@@ -1943,11 +2055,21 @@ function SchemaCache:on_columns_loaded(data)
   self.async_inflight[probe.active_key] = nil
   local entries = probe.entries or {}
 
+  if not schema_filter.matches(probe.schema, self.schema_scope) then
+    for _, entry in ipairs(entries) do
+      entry.active_key = nil
+      self.async_chains[entry.chain_key] = nil
+      self.completion_refresh_eligible[entry.chain_key] = nil
+    end
+    return false
+  end
+
   if data.error then
     self.async_failed[probe.active_key] = true
     for _, entry in ipairs(entries) do
       entry.active_key = nil
       self.async_chains[entry.chain_key] = nil
+      self.completion_refresh_eligible[entry.chain_key] = nil
       self.async_failed[entry.chain_key] = true
     end
     return true
@@ -1972,9 +2094,13 @@ function SchemaCache:on_columns_loaded(data)
   local key = table_key(probe.schema, probe.table_name)
   self:_store_columns(key, cols)
   self:_save_columns_to_disk(key, cols)
+  local should_notify = self:_consume_completion_refresh_eligible(entries)
   for _, entry in ipairs(entries) do
     entry.active_key = nil
     self.async_chains[entry.chain_key] = nil
+  end
+  if should_notify then
+    self:_queue_completion_refresh_notification(probe, data.request_id, payload_epoch)
   end
   return true
 end
@@ -2028,6 +2154,8 @@ function SchemaCache:cancel_async(_reason, _opts)
   self.async_inflight = {}
   self.async_chains = {}
   self.async_failed = {}
+  self.completion_refresh_eligible = {}
+  self.completion_refresh_pending = {}
   self:_bump_disk_work_generation()
 end
 

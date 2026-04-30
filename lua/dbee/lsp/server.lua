@@ -350,6 +350,44 @@ function M.create(cache)
   local diagnostic_buffers = {}
 
   return function(dispatchers, config)
+    local diagnostic_refresh_scheduled = false
+
+    local function schedule_diagnostic_refresh()
+      if diagnostic_refresh_scheduled then
+        return
+      end
+      diagnostic_refresh_scheduled = true
+      vim.schedule(function()
+        diagnostic_refresh_scheduled = false
+        if closing then
+          return
+        end
+        if dispatchers and type(dispatchers.server_request) == "function" then
+          pcall(dispatchers.server_request, "workspace/diagnostic/refresh", vim.empty_dict())
+        end
+      end)
+    end
+
+    local function emit_columns_loaded(payload)
+      if closing then
+        return
+      end
+      if dispatchers and type(dispatchers.notification) == "function" then
+        pcall(dispatchers.notification, "dbee/columnsLoaded", payload)
+      end
+      schedule_diagnostic_refresh()
+    end
+
+    if cache and type(cache.set_completion_refresh_notifier) == "function" then
+      cache:set_completion_refresh_notifier(emit_columns_loaded)
+    end
+
+    local function clear_completion_refresh_notifier()
+      if cache and type(cache.set_completion_refresh_notifier) == "function" then
+        cache:set_completion_refresh_notifier(nil)
+      end
+    end
+
     local function clear_timer(uri)
       local timer = diagnostic_timers[uri]
       if timer then
@@ -466,6 +504,7 @@ function M.create(cache)
       notify = function(method, params)
         if method == "exit" then
           closing = true
+          clear_completion_refresh_notifier()
           clear_all_diagnostics()
           if dispatchers and dispatchers.on_exit then
             dispatchers.on_exit(0, 0)
@@ -482,6 +521,7 @@ function M.create(cache)
 
       terminate = function()
         closing = true
+        clear_completion_refresh_notifier()
         clear_all_diagnostics()
       end,
     }

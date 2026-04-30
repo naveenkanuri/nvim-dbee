@@ -503,7 +503,10 @@ local function snapshot_rendered_tree(ui, tree, parent_id)
   local snapshot = {}
   for _, node in ipairs(tree:get_nodes(parent_id)) do
     local children = snapshot_rendered_tree(ui, tree, node:get_id())
-    local was_materialized = ui._struct_cache.loaded_lazy_ids[node:get_id()] == true or node:is_expanded() or #children > 0
+    local was_materialized = ui._struct_cache.loaded_lazy_ids[node:get_id()] == true or #children > 0
+    if not TABLE_LIKE_TYPES[node.type] then
+      was_materialized = was_materialized or node:is_expanded()
+    end
     table.insert(snapshot, {
       id = node.id,
       name = node.name,
@@ -895,7 +898,13 @@ local function materialize_selected_path(ui, tree, path_ids)
     if not node and index > 1 then
       local parent = tree:get_node(path_ids[index - 1])
       if parent then
-        expand_node_filter_safe(ui, parent, false)
+        if type(parent.lazy_children) == "function" and not parent._materialized_in_tree then
+          local children = parent.lazy_children()
+          mark_lazy_loaded(ui, parent:get_id())
+          tree:set_nodes(children, parent:get_id())
+          parent._materialized_in_tree = true
+        end
+        parent:expand()
         node = tree:get_node(node_id)
       end
     end
@@ -3404,19 +3413,75 @@ function DrawerUI:get_actions()
           self.filter_text = value or ""
           self:schedule_filter_apply(session_id, self.filter_text)
         end,
-        on_submit = function()
+        on_submit = function(value)
           if session_id ~= self.active_filter_session_id then
             return
+          end
+
+          local submitted = value
+          if submitted == nil then
+            submitted = self.filter_text or ""
           end
 
           self.active_filter_session_id = nil
           self:cancel_pending_filter_apply()
 
-          -- Keep filtered tree as committed view. Land cursor on currently-selected match.
+          local snapshot = self.filter_restore_snapshot
+          local expansion_state = self.pre_filter_expansion
+          local restore_cursor = self.pre_filter_cursor
+
+          -- Restore the full captured tree, then land cursor on the selected match.
           local selected_node = self.tree:get_node()
+          if submitted ~= "" and submitted ~= (self.filter_text or "") then
+            self:apply_filter(submitted)
+            selected_node = self.tree:get_node()
+          end
           local selected_id = selected_node and selected_node:get_id()
+          local selected_path = selected_path_ids(self.tree, selected_node)
+          local filtered_snapshot = snapshot_rendered_tree(self, self.tree)
+          local selected_path_children = {}
+          for _, path_id in ipairs(selected_path) do
+            local children = self.tree:get_nodes(path_id)
+            if children and #children > 0 then
+              selected_path_children[path_id] = snapshot_rendered_tree(self, self.tree, path_id)
+            end
+          end
 
           clear_filter_state(self)
+          self:render_restore_snapshot(snapshot, expansion_state, restore_cursor)
+          if selected_id and #selected_path > 0 then
+            local exact_restored, resolved_id = materialize_selected_path(self, self.tree, selected_path)
+            if not exact_restored and resolved_id then
+              utils.log("warn", "Drawer filter submit focused nearest restored ancestor")
+            end
+            selected_id = resolved_id or selected_id
+            self.tree:render()
+            if not visible_node_row(self.tree, selected_id) then
+              for _, path_id in ipairs(selected_path) do
+                local parent = self.tree:get_node(path_id)
+                local graft = selected_path_children[path_id]
+                if parent and graft then
+                  self.tree:set_nodes(snapshot_to_tree_nodes(graft), path_id)
+                  parent._materialized_in_tree = true
+                  parent:expand()
+                  mark_lazy_loaded(self, path_id)
+                end
+              end
+              self.tree:render()
+              if not visible_node_row(self.tree, selected_id) then
+                self.tree:set_nodes(snapshot_to_tree_nodes(filtered_snapshot))
+                for index, path_id in ipairs(selected_path) do
+                  if index < #selected_path then
+                    local parent = self.tree:get_node(path_id)
+                    if parent then
+                      parent:expand()
+                    end
+                  end
+                end
+                self.tree:render()
+              end
+            end
+          end
 
           if selected_id and self.winid and vim.api.nvim_win_is_valid(self.winid) then
             local row = visible_node_row(self.tree, selected_id)

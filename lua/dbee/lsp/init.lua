@@ -1,4 +1,5 @@
 local state = require("dbee.api.state")
+local context = require("dbee.lsp.context")
 local SchemaCache = require("dbee.lsp.schema_cache")
 local server = require("dbee.lsp.server")
 local schema_filter = require("dbee.schema_filter")
@@ -60,6 +61,7 @@ METADATA_QUERIES["mssql"] = METADATA_QUERIES.sqlserver
 ---@field private _pending_connection_invalidations ConnectionInvalidatedEvent[]
 ---@field private _connection_invalidation_flush_scheduled boolean
 ---@field private _connection_invalidated_consumer_live boolean
+---@field private _completion_refresh_handler_installed boolean
 local M = {
   _client_id = nil,
   _cache = nil,
@@ -73,6 +75,7 @@ local M = {
   _pending_connection_invalidations = {},
   _connection_invalidation_flush_scheduled = false,
   _connection_invalidated_consumer_live = false,
+  _completion_refresh_handler_installed = false,
 }
 
 ---@param reason string
@@ -192,6 +195,146 @@ local function affected_connection_ids(data)
     affected[data.current_conn_id_after] = true
   end
   return affected
+end
+
+local function completion_refresh_mode_ok()
+  local ok, mode = pcall(vim.api.nvim_get_mode)
+  local value = ok and mode and mode.mode or vim.fn.mode()
+  local prefix = tostring(value or ""):sub(1, 1)
+  return prefix == "i" or prefix == "s"
+end
+
+---@param left string?
+---@param right string?
+---@return boolean
+local function same_cache_identifier(left, right)
+  if not left or not right or not M._cache then
+    return false
+  end
+  return schema_filter.fold(left, M._cache.fold_id) == schema_filter.fold(right, M._cache.fold_id)
+end
+
+---@param bufnr integer
+---@return string? schema, string? table_name
+function M._resolve_completion_refresh_target(bufnr)
+  if not M._cache then
+    return nil, nil
+  end
+  local cursor = vim.api.nvim_win_get_cursor(0)
+  local character = cursor[2]
+  local line = vim.api.nvim_buf_get_lines(bufnr, cursor[1] - 1, cursor[1], false)[1] or ""
+  if character < #line and line:sub(character + 1, character + 1) == "." then
+    character = character + 1
+  end
+  local params = {
+    textDocument = { uri = vim.uri_from_bufnr(bufnr) },
+    position = {
+      line = cursor[1] - 1,
+      character = character,
+    },
+  }
+  local ctx, extra, alias_info = context.analyze(params)
+  if ctx ~= "column_of_table" then
+    return nil, nil
+  end
+
+  local table_name = alias_info and alias_info.table or extra
+  if not table_name or table_name == "" then
+    return nil, nil
+  end
+
+  if alias_info and alias_info.schema then
+    local actual_name, actual_schema = M._cache:find_table_in_schema(alias_info.schema, table_name)
+    if actual_name then
+      return actual_schema, actual_name
+    end
+    return nil, nil
+  end
+
+  local actual_name, actual_schema = M._cache:find_table(table_name)
+  if actual_name then
+    return actual_schema, actual_name
+  end
+  return nil, nil
+end
+
+---@param opts? { allow_hidden_blink?: boolean }
+---@return boolean refreshed
+function M._refresh_completion_frontend(opts)
+  opts = opts or {}
+  local ok_blink, blink = pcall(require, "blink.cmp")
+  if ok_blink and type(blink) == "table" and type(blink.show) == "function" then
+    local should_refresh = opts.allow_hidden_blink == true
+    if not should_refresh and type(blink.is_visible) == "function" then
+      should_refresh = blink.is_visible()
+    end
+    if not should_refresh and type(blink.is_active) == "function" then
+      should_refresh = blink.is_active()
+    end
+    if should_refresh then
+      pcall(blink.show, { providers = { "lsp" } })
+      return true
+    end
+  end
+
+  local ok_cmp, cmp = pcall(require, "cmp")
+  if ok_cmp and type(cmp) == "table" and type(cmp.visible) == "function" and cmp.visible() then
+    if type(cmp.complete) == "function" then
+      pcall(cmp.complete)
+      return true
+    end
+  end
+
+  if vim.fn.pumvisible() == 1 and vim.lsp and vim.lsp.buf and type(vim.lsp.buf.completion) == "function" then
+    pcall(vim.lsp.buf.completion)
+    return true
+  end
+
+  return false
+end
+
+function M._handle_columns_loaded_notification(err, params, ctx)
+  if err or type(params) ~= "table" then
+    return
+  end
+  if not M._client_id or not M._conn_id or not M._cache then
+    return
+  end
+  if not ctx or ctx.client_id ~= M._client_id then
+    return
+  end
+  if params.conn_id ~= M._conn_id then
+    return
+  end
+  if not completion_refresh_mode_ok() then
+    return
+  end
+
+  local bufnr = vim.api.nvim_get_current_buf()
+  if not M._attached_bufs[bufnr] then
+    return
+  end
+
+  local schema, table_name = M._resolve_completion_refresh_target(bufnr)
+  if not same_cache_identifier(schema, params.schema) or not same_cache_identifier(table_name, params.table) then
+    return
+  end
+
+  M._refresh_completion_frontend({ allow_hidden_blink = true })
+end
+
+function M._install_completion_refresh_handler()
+  if M._completion_refresh_handler_installed then
+    return
+  end
+  if not vim.lsp then
+    return
+  end
+  vim.lsp.handlers = vim.lsp.handlers or {}
+  vim.lsp.handlers["dbee/columnsLoaded"] = function(err, params, ctx)
+    M._handle_columns_loaded_notification(err, params, ctx)
+  end
+  M._completion_refresh_handler_installed = true
 end
 
 --- Queue a buffer for LSP attachment.
@@ -785,6 +928,8 @@ end
 --- Register event listeners for automatic cache management.
 --- Called once during setup.
 function M.register_events()
+  M._install_completion_refresh_handler()
+
   if not state.is_core_loaded() then
     return
   end

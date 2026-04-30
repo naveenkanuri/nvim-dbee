@@ -1514,12 +1514,6 @@ function Wizard:cancel()
 end
 
 function Wizard:submit()
-  if self.state.test_status ~= "ok" then
-    self.state.last_error = "Test the connection before submitting."
-    self:render()
-    return nil, self.state.last_error
-  end
-
   local errors = validate_submission(self.state)
   if #errors > 0 then
     self.state.last_error = errors[1]

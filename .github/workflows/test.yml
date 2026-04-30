@@ -69,6 +69,7 @@ jobs:
           - check_lsp_schema_cache_optimization.lua
           - check_lsp_disk_cache_safety.lua
           - check_lsp_async_completion.lua
+          - check_lsp_completion_refresh.lua
           - check_lsp_diagnostics_correctness.lua
           - check_lsp_diagnostics_debounce.lua
           - check_lsp_schema_filter_lazy.lua
@@ -239,6 +240,7 @@ jobs:
             check_lsp_schema_cache_optimization.lua \
             check_lsp_disk_cache_safety.lua \
             check_lsp_async_completion.lua \
+            check_lsp_completion_refresh.lua \
             check_lsp_diagnostics_correctness.lua \
             check_lsp_diagnostics_debounce.lua
           do
@@ -291,6 +293,7 @@ jobs:
           grep -q '^LSP01_COMPLETION_COLUMN_MISS_ASYNC_FIRST_INCOMPLETE=true$' "${log}"
           grep -q '^LSP01_COMPLETION_COLUMN_MISS_ASYNC_STALE_DROPPED=true$' "${log}"
           grep -q '^LSP01_COMPLETION_COLUMN_MISS_ASYNC_AUTO_RETRIGGER_OK=true$' "${log}"
+          grep -q '^LSP_COMPLETION_REFRESH_NOTIFY_OK=true$' "${log}"
           grep -q '^LSP01_STARTUP_LARGE_DISK_CACHE_10000_SENTINEL_OK=true$' "${log}"
           grep -q '^LSP11_DISK_LOAD_BOUNDED=true$' "${log}"
           grep -q '^LSP11_DISK_DISCOVERY_BOUNDED=true$' "${log}"

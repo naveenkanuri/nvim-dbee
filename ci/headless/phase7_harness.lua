@@ -366,6 +366,9 @@ function H.install_ui_stubs(runtime, opts)
         if self.opts.on_change then
           self.opts.on_change(value)
         end
+        vim.wait(1, function()
+          return false
+        end, 1)
       end
 
       function session:submit(value)

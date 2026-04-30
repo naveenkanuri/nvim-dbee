@@ -323,6 +323,9 @@ package.loaded["dbee.ui.drawer.menu"] = {
       if opts.on_change then
         opts.on_change(value)
       end
+      vim.wait(1, function()
+        return false
+      end, 1)
     end
 
     function session:submit(value)

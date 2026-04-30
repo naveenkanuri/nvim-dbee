@@ -354,7 +354,7 @@ local function handler_real_nodes(handler, result, structure_cache, opts)
   local nodes = {}
 
   local sources = handler:get_sources()
-  local show_source_badge = #sources > 1
+  local show_source_badge = true
 
   for _, source in ipairs(sources) do
     local source_id = source:name()

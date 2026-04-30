@@ -106,6 +106,7 @@ perf-lsp: perf-bootstrap
 	  check_lsp_schema_cache_optimization.lua \
 	  check_lsp_disk_cache_safety.lua \
 	  check_lsp_async_completion.lua \
+	  check_lsp_completion_refresh.lua \
 	  check_lsp_diagnostics_correctness.lua \
 	  check_lsp_diagnostics_debounce.lua \
 	  check_lsp_schema_filter_lazy.lua \
