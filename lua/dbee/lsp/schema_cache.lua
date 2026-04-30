@@ -140,19 +140,39 @@ local function warn(message)
   vim.notify(message, vim.log.levels.WARN)
 end
 
+local function fail_closed_scope()
+  return {
+    schema_filter = { include = {}, exclude = {}, lazy_per_schema = false },
+    schema_filter_signature = "schema-filter-v1|fail-closed",
+    fold = "case_insensitive",
+    connection_type = "",
+    include = {},
+    exclude = {},
+    implicit_all = false,
+    active = true,
+    lazy_per_schema = false,
+    fail_closed = true,
+  }
+end
+
+local function read_authoritative_scope(handler, conn_id)
+  if handler and type(handler.get_schema_filter_normalized) == "function" then
+    local ok, scope = pcall(handler.get_schema_filter_normalized, handler, conn_id)
+    if ok and scope then
+      return scope, true
+    end
+    return nil, true
+  end
+  return schema_filter.normalize(nil, nil), false
+end
+
 ---@param handler Handler
 ---@param conn_id connection_id
 ---@return SchemaCache
 function SchemaCache:new(handler, conn_id)
   local cache_dir = vim.fn.stdpath("state") .. "/dbee/lsp_cache"
-  local normalized_scope = nil
-  if handler and type(handler.get_schema_filter_normalized) == "function" then
-    local ok, scope = pcall(handler.get_schema_filter_normalized, handler, conn_id)
-    if ok then
-      normalized_scope = scope
-    end
-  end
-  normalized_scope = normalized_scope or schema_filter.normalize(nil, nil)
+  local normalized_scope = read_authoritative_scope(handler, conn_id)
+  normalized_scope = normalized_scope or fail_closed_scope()
   local o = {
     handler = handler,
     conn_id = conn_id,
@@ -210,13 +230,11 @@ end
 ---@private
 ---@return table
 function SchemaCache:_read_normalized_scope()
-  if self.handler and type(self.handler.get_schema_filter_normalized) == "function" then
-    local ok, scope = pcall(self.handler.get_schema_filter_normalized, self.handler, self.conn_id)
-    if ok and scope then
-      return scope
-    end
+  local scope = read_authoritative_scope(self.handler, self.conn_id)
+  if scope then
+    return scope
   end
-  return schema_filter.normalize(nil, nil)
+  return self.schema_scope or fail_closed_scope()
 end
 
 ---@return boolean changed
@@ -773,6 +791,15 @@ function SchemaCache:_queue_async_probe(entry)
   local schema = entry.schema_candidates[entry.schema_index]
   local table_name = entry.table_candidates[entry.table_index]
   local materialization = entry.materializations[entry.materialization_index]
+  while schema and table_name and materialization and not schema_filter.matches(schema, self.schema_scope) do
+    if not self:_advance_async_probe_indices(entry) then
+      schema = nil
+      break
+    end
+    schema = entry.schema_candidates[entry.schema_index]
+    table_name = entry.table_candidates[entry.table_index]
+    materialization = entry.materializations[entry.materialization_index]
+  end
   if not schema or not table_name or not materialization then
     self:_finish_async_entry(entry)
     self.async_failed[entry.chain_key] = true
@@ -841,23 +868,30 @@ end
 ---@private
 ---@param entry table
 ---@return boolean
-function SchemaCache:_advance_async_probe(entry)
-  self:_detach_async_entry(entry)
-
+function SchemaCache:_advance_async_probe_indices(entry)
   entry.materialization_index = entry.materialization_index + 1
   if entry.materialization_index <= #entry.materializations then
-    return self:_queue_async_probe(entry)
+    return true
   end
 
   entry.materialization_index = 1
   entry.table_index = entry.table_index + 1
   if entry.table_index <= #entry.table_candidates then
-    return self:_queue_async_probe(entry)
+    return true
   end
 
   entry.table_index = 1
   entry.schema_index = entry.schema_index + 1
-  if entry.schema_index <= #entry.schema_candidates then
+  return entry.schema_index <= #entry.schema_candidates
+end
+
+---@private
+---@param entry table
+---@return boolean
+function SchemaCache:_advance_async_probe(entry)
+  self:_detach_async_entry(entry)
+
+  if self:_advance_async_probe_indices(entry) then
     return self:_queue_async_probe(entry)
   end
 
@@ -1363,8 +1397,7 @@ end
 ---@param path string
 ---@param operation string
 function SchemaCache:_remove_corrupt_file(path, operation)
-  -- Silent: pre-v1.2 cache files have a different shape; recovery regenerates them
-  -- transparently on next structure load.
+  warn(string.format("dbee-lsp: corrupt cache while %s: %s", operation, path))
   os.remove(path)
 end
 

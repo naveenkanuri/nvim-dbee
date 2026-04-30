@@ -114,7 +114,7 @@ local function new_cache_env(conn_id, rows, epoch_ref, scope_ref)
       return epoch_ref and epoch_ref.value or 1
     end,
     get_schema_filter_normalized = function()
-      return scope_ref and scope_ref.value or nil
+      return scope_ref and scope_ref.value or schema_filter.normalize(nil, nil)
     end,
     connection_get_columns_async = function(_, id, request_id, branch_id, root_epoch, opts)
       calls[#calls + 1] = {
@@ -242,6 +242,51 @@ wait_for_quiet()
 assert_eq("scope changed no notification", #scoped_delivery.notifications, 0)
 assert_eq("scope changed no column cache", scoped_delivery.cache:get_cached_columns()["APP.SAS_JOBS"], nil)
 
+local probe_scope = { value = app_scope }
+local scoped_probe = new_cache_env("refresh-probe-scope", {
+  { schema_name = "APP", table_name = "SAS_JOBS", obj_type = "table" },
+}, nil, probe_scope)
+local probe_result = scoped_probe.cache:get_columns_async("APP", "MISSING", {
+  probe_if_missing = true,
+  materializations = { "table" },
+})
+assert_eq("probe scoped miss incomplete", probe_result.is_incomplete, true)
+assert_eq("probe scoped one async call", #scoped_probe.calls, 1)
+assert_eq("probe scoped first schema", scoped_probe.calls[1].opts.schema, "APP")
+assert_true("probe scoped exhausted", not deliver(scoped_probe.cache, scoped_probe.calls[1], {}))
+assert_eq("probe scoped no default fallback", #scoped_probe.calls, 1)
+
+local fail_closed_calls = 0
+local fail_closed_cache = SchemaCache:new({
+  get_schema_filter_normalized = function()
+    return nil
+  end,
+  get_authoritative_root_epoch = function()
+    return 1
+  end,
+  connection_get_columns_async = function()
+    fail_closed_calls = fail_closed_calls + 1
+  end,
+}, "refresh-authority-fail-closed")
+fail_closed_cache:build_from_metadata_rows({
+  { schema_name = "APP", table_name = "SAS_JOBS", obj_type = "table" },
+})
+assert_eq("authority fail closed schema hidden", fail_closed_cache:find_schema("APP"), nil)
+local fail_closed_result = fail_closed_cache:get_columns_async("APP", "SAS_JOBS", {
+  probe_if_missing = true,
+  materializations = { "table" },
+})
+assert_eq("authority fail closed complete", fail_closed_result.is_incomplete, false)
+assert_eq("authority fail closed no transport", fail_closed_calls, 0)
+
+local root = vim.fn.getcwd()
+local drawer_source = table.concat(vim.fn.readfile(root .. "/lua/dbee/ui/drawer/init.lua"), "\n")
+local lsp_source = table.concat(vim.fn.readfile(root .. "/lua/dbee/lsp/init.lua"), "\n")
+local cache_source = table.concat(vim.fn.readfile(root .. "/lua/dbee/lsp/schema_cache.lua"), "\n")
+assert_true("drawer no raw schema filter normalize", drawer_source:find("schema_filter%.normalize%(conn", 1, false) == nil)
+assert_true("lsp no raw schema filter normalize", lsp_source:find("schema_filter%.normalize%(conn%.schema_filter", 1, false) == nil)
+assert_true("cache no nil fail-open fallback", cache_source:find("normalized_scope%s*=%s*normalized_scope%s*or%s*schema_filter%.normalize%(nil, nil%)") == nil)
+
 local burst_rows = {}
 for index = 1, 5 do
   burst_rows[#burst_rows + 1] = {
@@ -356,5 +401,7 @@ vim.api.nvim_get_mode = old_get_mode
 package.loaded["blink.cmp"] = old_blink
 package.loaded["cmp"] = old_cmp
 
+print("ARCH14_LSP_PROBE_SCOPE_OK=true")
+print("ARCH14_FILTER_AUTHORITY_SINGLE_SOURCE_OK=true")
 print("LSP_COMPLETION_REFRESH_NOTIFY_OK=true")
 vim.cmd("qa!")

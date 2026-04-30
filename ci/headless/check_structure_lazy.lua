@@ -671,6 +671,9 @@ local function new_fixture(opts)
         url = "postgres://test/" .. conn_id,
       }
     end,
+    get_schema_filter_normalized = function()
+      return require("dbee.schema_filter").normalize(nil, "postgres")
+    end,
     set_current_connection = function(_, conn_id)
       current_connection = {
         id = conn_id,

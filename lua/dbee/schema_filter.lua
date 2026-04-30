@@ -233,6 +233,9 @@ function M.validate_persisted_filter(raw_filter, conn_type)
 end
 
 function M.matches(schema, normalized)
+  if normalized and normalized.fail_closed == true then
+    return false
+  end
   if not normalized then
     return true
   end

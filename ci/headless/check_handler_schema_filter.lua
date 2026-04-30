@@ -257,6 +257,24 @@ local function run_schema_object_singleflight_and_backpressure()
   assert_eq("payload filtered count", #filtered_payload.objects, 1)
   assert_eq("payload filtered schema", filtered_payload.objects[1].schema, "app")
 
+  vim.fn.DbeeStructureForSchema = function()
+    return {
+      { type = "table", schema = "app", name = "sync_kept" },
+      { type = "table", schema = "other", name = "sync_leaked" },
+      {
+        type = "schema",
+        schema = "other",
+        name = "other",
+        children = {
+          { type = "table", schema = "other", name = "sync_nested_leak" },
+        },
+      },
+    }
+  end
+  local sync_filtered = payload_filter_handler:connection_get_schema_objects("conn-payload-filter", "app")
+  assert_eq("sync wrapper filtered count", #sync_filtered, 1)
+  assert_eq("sync wrapper filtered schema", sync_filtered[1].schema, "app")
+
   print("ARCH14_SCHEMA_OBJECT_SINGLEFLIGHT_OK=true")
   print("ARCH14_SCHEMA_OBJECT_BACKPRESSURE_OK=true")
   print("ARCH14_SCHEMA_OBJECT_QUEUE_BOUNDED=true")
@@ -264,6 +282,7 @@ local function run_schema_object_singleflight_and_backpressure()
   print("ARCH14_QUEUE_COALESCE_OK=true")
   print("ARCH14_OPTIONS_LUA_GO_ROUNDTRIP_OK=true")
   print("ARCH14_SCHEMA_OBJECTS_PAYLOAD_FILTERED=true")
+  print("ARCH14_SYNC_SCHEMA_OBJECTS_FILTERED=true")
 end
 
 local function run_manifest_contract()

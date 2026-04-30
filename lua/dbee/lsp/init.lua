@@ -130,12 +130,9 @@ local function connection_uses_lazy_schema_root(handler, conn)
   local normalized
   if handler and type(handler.get_schema_filter_normalized) == "function" and conn.id then
     local ok, scope = pcall(handler.get_schema_filter_normalized, handler, conn.id)
-    if ok then
+    if ok and scope then
       normalized = scope
     end
-  end
-  if not normalized then
-    normalized = schema_filter.normalize(conn.schema_filter or nil, conn.type or nil)
   end
 
   local caps = schema_filter.capabilities((normalized and normalized.connection_type) or conn.type or nil)

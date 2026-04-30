@@ -619,10 +619,14 @@ local function new_fixture(opts)
     end,
     connection_get_params = function(_, conn_id)
       return {
+        id = conn_id,
         name = conn_id,
         type = "postgres",
         url = "postgres://test/" .. conn_id,
       }
+    end,
+    get_schema_filter_normalized = function(_, conn_id)
+      return require("dbee.schema_filter").normalize(nil, "postgres")
     end,
     set_current_connection = function(_, conn_id)
       counters.last_current_connection = conn_id

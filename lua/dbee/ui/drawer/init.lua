@@ -259,47 +259,64 @@ local function handler_bump_root_epoch(ui, conn_ids)
   return next_epoch + 1
 end
 
----@param conn ConnectionParams
 ---@return table normalized
-local function normalized_schema_scope(conn)
-  local normalized = schema_filter.normalize(conn and conn.schema_filter or nil, conn and conn.type or nil)
-  return normalized or {
+local function fail_closed_schema_scope()
+  return {
     schema_filter = { include = {}, exclude = {}, lazy_per_schema = false },
-    schema_filter_signature = "",
-    fold = schema_filter.fold_id(conn and conn.type or nil),
-    implicit_all = true,
+    schema_filter_signature = "schema-filter-v1|fail-closed",
+    fold = "case_insensitive",
+    connection_type = "",
+    implicit_all = false,
     include = {},
     exclude = {},
     lazy_per_schema = false,
+    active = true,
+    fail_closed = true,
   }
 end
 
+---@param ui DrawerUI
+---@param conn_id connection_id
+---@return table normalized
+local function normalized_schema_scope(ui, conn_id)
+  if ui and ui.handler and type(ui.handler.get_schema_filter_normalized) == "function" then
+    local ok, normalized = pcall(ui.handler.get_schema_filter_normalized, ui.handler, conn_id)
+    if ok and normalized then
+      return normalized
+    end
+  end
+  return fail_closed_schema_scope()
+end
+
+---@param ui DrawerUI
 ---@param conn ConnectionParams
 ---@return boolean
-local function connection_uses_lazy_schema_root(conn)
-  local normalized = normalized_schema_scope(conn)
+local function connection_uses_lazy_schema_root(ui, conn)
+  local normalized = normalized_schema_scope(ui, conn and conn.id or nil)
   if normalized.lazy_per_schema ~= true then
     return false
   end
-  local caps = schema_filter.capabilities(conn and conn.type or nil)
+  local caps = schema_filter.capabilities(normalized.connection_type or conn and conn.type or nil)
   return caps.structure_for_schema == true and caps.list_schemas == true
 end
 
----@param conn ConnectionParams
+---@param ui DrawerUI
+---@param conn_id connection_id
 ---@param schema_name string
 ---@return boolean
-local function schema_visible_for_connection(conn, schema_name)
-  return schema_filter.matches(schema_name, normalized_schema_scope(conn))
+local function schema_visible_for_connection(ui, conn_id, schema_name)
+  return schema_filter.matches(schema_name, normalized_schema_scope(ui, conn_id))
 end
 
----@param conn ConnectionParams
+---@param ui DrawerUI
+---@param conn_id connection_id
 ---@param schemas table[]?
 ---@return DBStructure[]
-local function schema_rows_for_connection(conn, schemas)
+local function schema_rows_for_connection(ui, conn_id, schemas)
   local structs = {}
   for _, schema in ipairs(schemas or {}) do
     local name = schema.name or schema.schema or schema
-    if type(name) == "string" and name ~= "" and schema_visible_for_connection(conn, name) then
+    if type(name) == "string" and name ~= "" and schema_visible_for_connection(ui, conn_id, name) then
       structs[#structs + 1] = {
         name = name,
         schema = name,
@@ -1018,7 +1035,7 @@ local function build_connection_children(ui, conn, opts)
   local cached_root = ui._struct_cache.root[conn.id]
   if not cached_root then
     if not opts.suppress_root_request and not root_request_pending(ui, conn.id) then
-      if connection_uses_lazy_schema_root(conn) then
+      if connection_uses_lazy_schema_root(ui, conn) then
         request_schema_root_reload(ui, conn.id)
       else
         ui:request_structure_reload(conn.id)
@@ -1994,8 +2011,7 @@ function DrawerUI:on_structure_loaded(data)
     end
   end
 
-  local ok_params, conn_params = pcall(self.handler.connection_get_params, self.handler, data.conn_id)
-  local scope = normalized_schema_scope(ok_params and conn_params or nil)
+  local scope = normalized_schema_scope(self, data.conn_id)
   self._struct_cache.root[data.conn_id] = {
     structures = schema_filter.filter_structures(data.structures or {}, scope),
     error = data.error,
@@ -2046,12 +2062,12 @@ function DrawerUI:on_schemas_loaded(data)
 
   self._struct_cache.root_applied[data.conn_id] = math.max(applied_request_id, request_id)
   self._struct_cache.root_mode[data.conn_id] = "schemas_only"
-  local normalized = normalized_schema_scope(conn)
+  local normalized = normalized_schema_scope(self, data.conn_id)
   self._struct_cache.root_filter_signature[data.conn_id] = normalized.schema_filter_signature
   invalidate_authoritative_caches(self)
 
   self._struct_cache.root[data.conn_id] = {
-    structures = data.error and {} or schema_rows_for_connection(conn, data.schemas or {}),
+    structures = data.error and {} or schema_rows_for_connection(self, data.conn_id, data.schemas or {}),
     error = data.error,
     schemas_only = true,
   }
@@ -2086,8 +2102,7 @@ function DrawerUI:on_schema_objects_loaded(data, branch_id)
   state.applied_gen = math.max(state.applied_gen or 0, request_id)
   state.loading = false
   state.error = data.error or data.error_kind
-  local ok_params, conn_params = pcall(self.handler.connection_get_params, self.handler, data.conn_id)
-  local scope = normalized_schema_scope(ok_params and conn_params or nil)
+  local scope = normalized_schema_scope(self, data.conn_id)
   local filtered_objects = (data.error or data.error_kind)
     and nil
     or schema_filter.filter_structures(data.objects or {}, scope)

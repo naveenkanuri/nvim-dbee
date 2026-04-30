@@ -2297,7 +2297,7 @@ function Handler:connection_get_schema_objects(id, schema, opts)
   if not ret or ret == vim.NIL then
     return {}
   end
-  return ret
+  return self:_filter_structures_for_connection(id, ret)
 end
 
 ---@param id connection_id
