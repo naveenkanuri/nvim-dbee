@@ -426,6 +426,35 @@ local function install_dbee_functions(runtime)
     end
     return vim.NIL
   end
+
+  vim.fn.DbeeConnectionListSchemasAsync = function(conn_id, request_id, root_epoch, caller_token)
+    runtime.schema_list_calls[#runtime.schema_list_calls + 1] = {
+      conn_id = conn_id,
+      request_id = request_id,
+      root_epoch = root_epoch,
+      caller_token = caller_token,
+    }
+  end
+
+  vim.fn.DbeeConnectionListSchemas = function(conn_id)
+    runtime.schema_list_calls[#runtime.schema_list_calls + 1] = {
+      conn_id = conn_id,
+      sync = true,
+    }
+    return {
+      { name = "APP" },
+      { name = "FIN" },
+    }
+  end
+
+  vim.fn.DbeeConnectionListSchemasSpecAsync = function(params, request_id, root_epoch, caller_token)
+    runtime.schema_spec_list_calls[#runtime.schema_spec_list_calls + 1] = {
+      params = vim.deepcopy(params),
+      request_id = request_id,
+      root_epoch = root_epoch,
+      caller_token = caller_token,
+    }
+  end
 end
 
 local function wrap_filesource(source, runtime)
@@ -618,6 +647,8 @@ local function new_env(opts)
     connections = {},
     current_conn_id = nil,
     connection_test_spec_calls = {},
+    schema_list_calls = {},
+    schema_spec_list_calls = {},
     connection_invalidated_events = {},
     source_reload_failed_events = {},
     current_connection_changed_events = {},
@@ -786,6 +817,8 @@ end
 
 local function clear_runtime_observations(runtime)
   runtime.connection_test_spec_calls = {}
+  runtime.schema_list_calls = {}
+  runtime.schema_spec_list_calls = {}
   runtime.connection_invalidated_events = {}
   runtime.source_reload_failed_events = {}
   runtime.current_connection_changed_events = {}
@@ -1648,6 +1681,94 @@ local function run_no_auto_activate_contract()
   print("DCFG02_NO_AUTO_ACTIVATE_OK=true")
 end
 
+local function run_schema_filter_wizard_contract()
+  local env = new_env({
+    current_conn_id = "conn-meta",
+  })
+
+  clear_runtime_observations(env.runtime)
+  local add_wizard = expect_wizard(env, function()
+    env.drawer:open_add_connection_with_wizard(env:file_source_meta(), {
+      type = "postgres",
+    })
+  end)
+  assert_eq("add discovery default no", add_wizard.state.schema_filter.discovery_default, "no")
+  fill_postgres_form(add_wizard, {
+    name = "Schema Add",
+    host = "schema-add",
+    port = "5432",
+    database = "schema_db",
+    username = "schema_user",
+    password = "schema_pass",
+    sslmode = "require",
+  })
+  add_wizard:discover_schemas()
+  assert_eq("add discovery spec call count", #env.runtime.schema_spec_list_calls, 1)
+  assert_eq("add discovery spec no filter", env.runtime.schema_spec_list_calls[1].params.schema_filter, nil)
+  assert_eq("add discovery no create", #env.file_source.create_calls, 0)
+  assert_eq("add discovery current preserved", env.runtime.current_conn_id, "conn-meta")
+  env.handler:_on_schema_list_loaded({
+    request_id = env.runtime.schema_spec_list_calls[1].request_id,
+    caller_token = "wizard",
+    schemas = { { name = "APP" }, { name = "FIN" } },
+  })
+  assert_eq("add discovery stored count", #add_wizard.state.schema_filter.discovered_schemas, 2)
+  print("ARCH14_WIZARD_ADD_DISCOVERY_DEFAULT_NO=true")
+  print("ARCH14_WIZARD_ADD_DISCOVERY_NON_MUTATING=true")
+
+  env.handler:_on_schema_list_loaded({
+    request_id = env.handler:connection_list_schemas_spec_async({
+      name = "Invalid",
+      type = "postgres",
+      url = "postgres://invalid",
+    }, function(payload)
+      add_wizard:_on_schema_discovery(payload)
+    end),
+    caller_token = "wizard",
+    error = { message = "probe failed" },
+  })
+  assert_match("manual fallback error", add_wizard.state.schema_filter.discovery_error, "probe failed")
+  add_wizard:set_schema_filter_field("include_text", "APP%, FIN")
+  add_wizard:set_schema_filter_field("exclude_text", "APP_TMP%")
+  add_wizard:toggle_lazy_schema()
+  submit_and_assert_success(add_wizard)
+  local add_record = find_record_by_name(read_json(env.file_path), "Schema Add")
+  assert_eq("persist include first", add_record.schema_filter.include[1], "APP%")
+  assert_eq("persist include second", add_record.schema_filter.include[2], "FIN")
+  assert_eq("persist exclude", add_record.schema_filter.exclude[1], "APP_TMP%")
+  assert_true("persist lazy", add_record.schema_filter.lazy_per_schema == true)
+  print("ARCH14_WIZARD_SCHEMA_FILTER_EDIT_OK=true")
+  print("ARCH14_SCHEMA_DISCOVERY_MANUAL_FALLBACK=true")
+
+  clear_runtime_observations(env.runtime)
+  local edit_wizard = expect_wizard(env, function()
+    env.drawer:open_edit_connection_with_wizard(env:file_source_meta(), "conn-form")
+  end)
+  assert_eq("edit discovery default yes", edit_wizard.state.schema_filter.discovery_default, "yes")
+  edit_wizard:discover_schemas()
+  assert_eq("edit discovery conn call count", #env.runtime.schema_list_calls, 1)
+  assert_eq("edit discovery conn id", env.runtime.schema_list_calls[1].conn_id, "conn-form")
+  env.handler:_on_schema_list_loaded({
+    conn_id = "conn-form",
+    request_id = env.runtime.schema_list_calls[1].request_id,
+    root_epoch = env.runtime.schema_list_calls[1].root_epoch or 0,
+    caller_token = "__singleflight",
+    schemas = { { name = "APP" } },
+  })
+  assert_eq("edit discovery stored count", #edit_wizard.state.schema_filter.discovered_schemas, 1)
+  edit_wizard:set_schema_filter_field("include_text", "APP%")
+  edit_wizard:toggle_lazy_schema()
+  edit_wizard:clear_schema_filter()
+  submit_and_assert_success(edit_wizard)
+  local cleared_record = find_record(read_json(env.file_path), "conn-form")
+  assert_eq("clear filter omitted", cleared_record.schema_filter, nil)
+  print("ARCH14_WIZARD_EDIT_DISCOVERY_DEFAULT_YES=true")
+  print("ARCH14_WIZARD_CLEAR_FILTER_OK=true")
+
+  env:cleanup()
+  print("ARCH14_WIZARD_ALL_PASS=true")
+end
+
 local function run_wizard_highlight_contract()
   local function run_menu_winhighlight_threading_contract()
     Harness.reset_modules({
@@ -1823,6 +1944,7 @@ run_missing_filesource_edit_failure_contract()
 run_unknown_wizard_mode_contract()
 run_partial_failure_contract()
 run_no_auto_activate_contract()
+run_schema_filter_wizard_contract()
 run_wizard_highlight_contract()
 
 print("DCFG02_WIZARD_ALL_PASS=true")

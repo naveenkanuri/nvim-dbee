@@ -2646,6 +2646,8 @@ function DrawerUI:_open_connection_wizard(source_meta, opts)
     title = opts.title,
     source_meta = source_meta,
     seed = opts.seed,
+    handler = self.handler,
+    conn_id = opts.conn_id,
     on_submit = function(submission)
       local err = self.handler:submit_connection_wizard({
         source_id = source_meta.id,

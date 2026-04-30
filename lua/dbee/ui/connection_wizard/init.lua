@@ -2,6 +2,7 @@ local Popup = require("nui.popup")
 local Input = require("nui.input")
 
 local menu = require("dbee.ui.drawer.menu")
+local schema_filter = require("dbee.schema_filter")
 
 local uv = vim.loop
 
@@ -69,6 +70,37 @@ local SHARED_FIELDS = {
   username = true,
   password = true,
 }
+
+local function split_schema_patterns(value)
+  local out = {}
+  for item in tostring(value or ""):gmatch("[^,]+") do
+    local trimmed = vim.trim(item)
+    if trimmed ~= "" then
+      out[#out + 1] = trimmed
+    end
+  end
+  return out
+end
+
+local function schema_filter_to_state(raw_filter)
+  raw_filter = type(raw_filter) == "table" and raw_filter or {}
+  return {
+    include_text = table.concat(raw_filter.include or {}, ", "),
+    exclude_text = table.concat(raw_filter.exclude or {}, ", "),
+    lazy_per_schema = raw_filter.lazy_per_schema == true,
+    discovered_schemas = {},
+    discovery_error = nil,
+    discovery_status = nil,
+    discovery_default = "no",
+  }
+end
+
+local function schema_filter_is_active(filter_state)
+  filter_state = filter_state or {}
+  return vim.trim(filter_state.include_text or "") ~= ""
+    or vim.trim(filter_state.exclude_text or "") ~= ""
+    or filter_state.lazy_per_schema == true
+end
 
 local function deepcopy(value)
   return vim.deepcopy(value)
@@ -613,6 +645,47 @@ local function refresh_wallet_alias_state(state)
   end
 end
 
+local function build_schema_filter_from_state(state, conn_type)
+  local filter_state = state.schema_filter or {}
+  local include = split_schema_patterns(filter_state.include_text)
+  local exclude = split_schema_patterns(filter_state.exclude_text)
+  local filter = {}
+  if #include > 0 then
+    filter.include = include
+  end
+  if #exclude > 0 then
+    filter.exclude = exclude
+  end
+  if filter_state.lazy_per_schema == true then
+    filter.lazy_per_schema = true
+  end
+  if next(filter) == nil then
+    return nil, nil
+  end
+
+  local _, err = schema_filter.to_structure_options(filter, conn_type)
+  if err then
+    return nil, err
+  end
+  return filter, nil
+end
+
+local function apply_schema_filter_to_submission(state, submission)
+  local filter, err = build_schema_filter_from_state(state, submission.params and submission.params.type)
+  if err then
+    return nil, err
+  end
+  if filter then
+    submission.params.schema_filter = filter
+    if type(submission.wizard) == "table" then
+      submission.wizard.schema_filter = deepcopy(filter)
+    end
+  elseif type(submission.wizard) == "table" then
+    submission.wizard.schema_filter = nil
+  end
+  return submission, nil
+end
+
 -- normalize_seed prefers persisted metadata first, then lossless parse fallback,
 -- then raw compatibility when normalization would be lossy.
 local function normalize_seed(seed)
@@ -631,6 +704,7 @@ local function normalize_seed(seed)
     raw_fallback = false,
     preserve_existing_wizard = false,
     preserved_wizard = nil,
+    schema_filter = schema_filter_to_state(params.schema_filter),
   }
 
   for known_mode in pairs(FIELD_DEFS) do
@@ -797,6 +871,12 @@ local function validate_submission(state)
     required("url", "URL")
   end
 
+  local conn_type = state.mode == "other_raw" and fields.type or mode_db_kind(state.mode)
+  local _, filter_err = build_schema_filter_from_state(state, conn_type)
+  if filter_err then
+    errors[#errors + 1] = filter_err
+  end
+
   return errors
 end
 
@@ -822,7 +902,7 @@ local function serialize_submission(state)
     if not url then
       return nil, err
     end
-    return {
+    return apply_schema_filter_to_submission(state, {
       params = {
         name = fields.name,
         type = "oracle",
@@ -830,13 +910,13 @@ local function serialize_submission(state)
       },
       wizard = wizard,
       metadata_action = metadata_action,
-    }
+    })
   elseif state.mode == "oracle_custom_jdbc" then
     local url, err = render_oracle_connection_url(fields, fields.descriptor)
     if not url then
       return nil, err
     end
-    return {
+    return apply_schema_filter_to_submission(state, {
       params = {
         name = fields.name,
         type = "oracle",
@@ -844,9 +924,9 @@ local function serialize_submission(state)
       },
       wizard = wizard,
       metadata_action = metadata_action,
-    }
+    })
   elseif state.mode == "postgres_url" then
-    return {
+    return apply_schema_filter_to_submission(state, {
       params = {
         name = fields.name,
         type = "postgres",
@@ -854,11 +934,11 @@ local function serialize_submission(state)
       },
       wizard = wizard,
       metadata_action = metadata_action,
-    }
+    })
   elseif state.mode == "postgres_form" then
     local rendered_url = render_postgres_form_url(fields)
     wizard.rendered_url = rendered_url
-    return {
+    return apply_schema_filter_to_submission(state, {
       params = {
         name = fields.name,
         type = "postgres",
@@ -866,10 +946,10 @@ local function serialize_submission(state)
       },
       wizard = wizard,
       metadata_action = metadata_action,
-    }
+    })
   end
 
-  return {
+  return apply_schema_filter_to_submission(state, {
     params = {
       name = fields.name,
       type = fields.type,
@@ -877,7 +957,7 @@ local function serialize_submission(state)
     },
     wizard = wizard,
     metadata_action = metadata_action,
-  }
+  })
 end
 
 local Wizard = {}
@@ -944,10 +1024,12 @@ end
 
 function Wizard:new(opts)
   local popup = Popup(popup_options(opts))
+  local state = normalize_seed(opts.seed)
+  state.schema_filter.discovery_default = opts.mode == "edit" and "yes" or "no"
   local instance = setmetatable({
     opts = opts,
     popup = popup,
-    state = normalize_seed(opts.seed),
+    state = state,
     entries = {},
     mounted = false,
   }, self)
@@ -1050,6 +1132,28 @@ function Wizard:render()
     add_entry({ kind = "field", field = field }, string.format("%s: %s", field.label, self:format_field_value(field)))
   end
 
+  local filter_state = self.state.schema_filter or {}
+  lines[#lines + 1] = ""
+  add_entry(
+    { kind = "schema_include" },
+    string.format("Schema Include: %s", vim.trim(filter_state.include_text or "") ~= "" and filter_state.include_text or "All")
+  )
+  add_entry(
+    { kind = "schema_exclude" },
+    string.format("Schema Exclude: %s", vim.trim(filter_state.exclude_text or "") ~= "" and filter_state.exclude_text or "None")
+  )
+  add_entry(
+    { kind = "schema_lazy" },
+    string.format("Lazy Schemas: %s", filter_state.lazy_per_schema and "Enabled" or "Disabled")
+  )
+  add_entry(
+    { kind = "schema_discover" },
+    string.format("Discover Schemas: %s", filter_state.discovery_default == "yes" and "Default yes" or "Default no")
+  )
+  if schema_filter_is_active(filter_state) then
+    add_entry({ kind = "schema_clear" }, "Clear Schema Filter")
+  end
+
   lines[#lines + 1] = ""
   add_entry({ kind = "submit" }, "Submit")
   add_entry({ kind = "cancel" }, "Cancel")
@@ -1061,6 +1165,13 @@ function Wizard:render()
   if self.state.last_error then
     lines[#lines + 1] = ""
     lines[#lines + 1] = "Error: " .. self.state.last_error
+  end
+  if filter_state.discovery_error then
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "Schema discovery: " .. filter_state.discovery_error
+  elseif filter_state.discovery_status then
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "Schema discovery: " .. filter_state.discovery_status
   end
 
   vim.bo[self.popup.bufnr].modifiable = true
@@ -1277,6 +1388,126 @@ function Wizard:edit_field(field)
   })
 end
 
+function Wizard:set_schema_filter_field(key, value)
+  self.state.schema_filter = self.state.schema_filter or schema_filter_to_state(nil)
+  self.state.schema_filter[key] = value
+  self.state.schema_filter.discovery_error = nil
+  self.state.schema_filter.discovery_status = nil
+  self:render()
+end
+
+function Wizard:edit_schema_patterns(key, title)
+  local filter_state = self.state.schema_filter or schema_filter_to_state(nil)
+  menu.input({
+    relative_winid = self.popup.winid,
+    title = title,
+    default_value = filter_state[key] or "",
+    mappings = {},
+    winhighlight = WIZARD_WINHIGHLIGHT,
+    on_confirm = function(value)
+      self:set_schema_filter_field(key, value)
+    end,
+  })
+end
+
+function Wizard:toggle_lazy_schema()
+  self.state.schema_filter = self.state.schema_filter or schema_filter_to_state(nil)
+  self.state.schema_filter.lazy_per_schema = not self.state.schema_filter.lazy_per_schema
+  self.state.schema_filter.discovery_error = nil
+  self.state.schema_filter.discovery_status = nil
+  self:render()
+end
+
+function Wizard:clear_schema_filter()
+  self.state.schema_filter = schema_filter_to_state(nil)
+  self.state.schema_filter.discovery_default = self.opts.mode == "edit" and "yes" or "no"
+  self:render()
+end
+
+function Wizard:_schema_names_from_payload(payload)
+  local names = {}
+  local seen = {}
+  for _, schema in ipairs((payload and payload.schemas) or {}) do
+    local name = schema.name or schema.schema or schema
+    if type(name) == "string" and name ~= "" and not seen[name] then
+      seen[name] = true
+      names[#names + 1] = name
+    end
+  end
+  table.sort(names)
+  return names
+end
+
+function Wizard:_on_schema_discovery(payload)
+  self.state.schema_filter = self.state.schema_filter or schema_filter_to_state(nil)
+  if payload and payload.error then
+    self.state.schema_filter.discovery_error = tostring(payload.error.message or payload.error)
+    self.state.schema_filter.discovery_status = nil
+    self:render()
+    return
+  end
+
+  local names = self:_schema_names_from_payload(payload)
+  self.state.schema_filter.discovered_schemas = names
+  self.state.schema_filter.discovery_error = nil
+  self.state.schema_filter.discovery_status = string.format("%d schemas discovered", #names)
+  self:render()
+end
+
+function Wizard:discover_schemas()
+  local handler = self.opts.handler
+  if not handler then
+    self.state.schema_filter.discovery_error = "Schema discovery is unavailable for this source."
+    self:render()
+    return
+  end
+
+  local submission, err = serialize_submission(self.state)
+  if not submission then
+    self.state.schema_filter.discovery_error = tostring(err)
+    self:render()
+    return
+  end
+
+  self.state.schema_filter.discovery_error = nil
+  self.state.schema_filter.discovery_status = "Loading..."
+  self:render()
+
+  if self.opts.mode == "edit" and self.opts.conn_id and type(handler.connection_list_schemas_singleflight) == "function" then
+    handler:connection_list_schemas_singleflight({
+      conn_id = self.opts.conn_id,
+      purpose = "wizard",
+      consumer = "wizard-schema-discovery",
+      caller_token = "wizard",
+      callback = function(payload)
+        self:_on_schema_discovery(payload)
+      end,
+    })
+    return
+  end
+
+  if self.opts.mode == "edit" and self.opts.conn_id and type(handler.connection_list_schemas) == "function" then
+    local ok, schemas = pcall(handler.connection_list_schemas, handler, self.opts.conn_id)
+    if not ok then
+      self:_on_schema_discovery({ error = schemas })
+    else
+      self:_on_schema_discovery({ schemas = schemas })
+    end
+    return
+  end
+
+  if type(handler.connection_list_schemas_spec_async) ~= "function" then
+    self:_on_schema_discovery({ error = "Schema discovery is unavailable for unsaved connections." })
+    return
+  end
+
+  local spec = deepcopy(submission.params)
+  spec.schema_filter = nil
+  handler:connection_list_schemas_spec_async(spec, function(payload)
+    self:_on_schema_discovery(payload)
+  end)
+end
+
 function Wizard:activate_selected()
   local entry = self.entries[self.state.selection]
   if not entry then
@@ -1288,6 +1519,16 @@ function Wizard:activate_selected()
     self:edit_mode()
   elseif entry.kind == "field" then
     self:edit_field(entry.field)
+  elseif entry.kind == "schema_include" then
+    self:edit_schema_patterns("include_text", "Schema Include")
+  elseif entry.kind == "schema_exclude" then
+    self:edit_schema_patterns("exclude_text", "Schema Exclude")
+  elseif entry.kind == "schema_lazy" then
+    self:toggle_lazy_schema()
+  elseif entry.kind == "schema_discover" then
+    self:discover_schemas()
+  elseif entry.kind == "schema_clear" then
+    self:clear_schema_filter()
   elseif entry.kind == "submit" then
     self:submit()
   elseif entry.kind == "cancel" then
