@@ -47,13 +47,17 @@
   v1.3 fix: extend filter to operate on visible row set when `_struct_cache` empty for current root. Keep Phase 4 D-31 filter-exit contract intact. New unit test covering connection-list-only filter case.
   Severity: **HIGH** — primary navigation pattern broken. Workaround: scroll/jump manually (`gg`/`G`/`/conn_name` via vim-search not drawer filter).
 
-### v1.1 Phase 8 wizard highlight regression (surfaced 2026-04-29 during v1.1 live test) — UNUSABLE on dark colorschemes
+### v1.1 Phase 8 wizard highlight regression — Phase 13 r1 fix DID NOT WORK (still UNUSABLE 2026-04-30)
 
-- **Wizard input field text invisible (text fg = bg)** (`lua/dbee/ui/wizard/*` or wherever Phase 8 compound modal lives):
-  Typing into the Name field shows cursor moving but typed characters don't render. Type/Mode dropdown either doesn't render or renders text on dark-on-dark. Repro: open Add Connection wizard, type any name → cursor advances, text invisible.
-  Likely root cause: nui.nvim Input/Select components in the wizard lack explicit `winhighlight` config. Inherits `Normal` over `NormalFloat` where fg/bg collide on user's dark colorscheme. Phase 8 D-XX may have defined highlight contract but implementation skipped applying it to child windows.
-  v1.3 fix: explicit `winhighlight = "Normal:NormalFloat,FloatBorder:FloatBorder,..."` on each wizard Input/Select component. Test against multiple dark colorschemes (Naveen's current scheme + e.g. tokyonight, catppuccin-mocha, gruvbox-dark) before close.
-  Severity: **HIGH** — wizard is a headline v1.1 deliverable but unusable on Naveen's daily colorscheme. Workaround: edit `connections.json` directly to add connections.
+- **Wizard input field text STILL invisible** despite Phase 13 commit `1436bdc` (`fix(13-01-03): wizard highlights`):
+  Phase 13 r1 fix added `winhighlight = "Normal:NormalFloat,FloatBorder:FloatBorder,..."` per Input/Select/Border component. r2 added `UX13_WIZARD_NUI_WIN_OPTIONS_THREADED=true` test stubbing nui constructors and asserting threaded `win_options.winhighlight`. Test gate PASSED. **But real-world rendering on Naveen's daily colorscheme STILL shows invisible text.**
+  Test was too shallow: validated `win_options.winhighlight` is THREADED to nui constructor, but didn't validate the resulting rendered text is actually visible. Root cause likely:
+  1. `Normal:NormalFloat` mapping inherits the same fg=bg problem (user's colorscheme has NormalFloat with collision OR `nui.nvim` overrides winhighlight further down its component tree)
+  2. Highlight applied to wrong child window (border vs prompt vs popup buffer)
+  3. `nui.input` / `nui.menu` ignoring `win_options` for the prompt buffer where the input cursor lives
+  4. User's colorscheme renders `NormalFloat` with poor contrast for input fields
+  v1.3 next-attempt fix: rather than blind `Normal:NormalFloat` mapping, define an explicit `DbeeWizardInput` highlight group with hardcoded contrast colors (e.g., fg=#cdd6f4, bg=#1e1e2e or use `cterm` 15-on-0). Apply via `winhighlight = "Normal:DbeeWizardInput,..."`. Headless test must use `nvim --headless` with a real screenshot capture (or `vim.api.nvim_get_hl()` inspection of the rendered buffer) to verify text fg ≠ bg, NOT just verify the winhighlight string was passed in.
+  Severity: **HIGH** — confirmed still broken via live testing 2026-04-30. Phase 13 fix was NOT effective. Workaround unchanged: edit `connections.json` directly.
 
 ### v1.2 Phase 11 LSP cache migration UX (surfaced 2026-04-29 during v1.1 live test) — POLISH
 
