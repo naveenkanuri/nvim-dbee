@@ -2148,12 +2148,13 @@ register({
   after = startup_after,
 })
 
-local large_disk_seeded = {}
+local large_disk_iteration = {}
+local large_disk_isolation_ok = true
 
-local function seed_large_disk_cache(count)
+local function seed_large_disk_cache(count, conn_id)
   clear_lsp_cache_dir()
   local cache = make_cache(100, DEFAULT_COLUMNS_PER_TABLE, {
-    conn_id = DEFAULT_CONN_ID,
+    conn_id = conn_id,
   })
   cache:save_to_disk()
   for i = 1, count do
@@ -2161,15 +2162,15 @@ local function seed_large_disk_cache(count)
     local table_name = table_for_index(i)
     cache:_save_columns_to_disk(schema .. "." .. table_name, make_columns(schema, table_name, DEFAULT_COLUMNS_PER_TABLE))
   end
-  large_disk_seeded[count] = true
 end
 
 local function large_disk_startup_before(count)
   assert_isolated_state()
-  if not large_disk_seeded[count] then
-    seed_large_disk_cache(count)
-  end
+  large_disk_iteration[count] = (large_disk_iteration[count] or 0) + 1
+  local conn_id = string.format("%s-large-%d-%03d", DEFAULT_CONN_ID, count, large_disk_iteration[count])
+  seed_large_disk_cache(count, conn_id)
   local handler = make_handler({
+    conn_id = conn_id,
     table_count = 100,
     columns_per_table = DEFAULT_COLUMNS_PER_TABLE,
     connection_type = CONNECTION_TYPE_NO_METADATA,
@@ -2182,6 +2183,7 @@ local function large_disk_startup_before(count)
     handler = handler,
     bufnr = bufnr,
     count = count,
+    conn_id = conn_id,
   }
 end
 
@@ -2200,6 +2202,7 @@ local function large_disk_startup_run(state, finish, slug)
     end
 
     local stats = lsp._cache and lsp._cache:get_stats() or {}
+    state.cache = lsp._cache
     if state.count > (stats.sync_column_file_load_limit or 100) then
       vim.wait(1000, function()
         stats = lsp._cache and lsp._cache:get_stats() or {}
@@ -2238,6 +2241,22 @@ local function large_disk_startup_run(state, finish, slug)
   finish(elapsed_ns)
 end
 
+local function large_disk_startup_after(state)
+  if state.cache and type(state.cache.cancel_async) == "function" then
+    state.cache:cancel_async("perf-large-disk-isolation", { conn_id = state.conn_id })
+    vim.wait(50, function()
+      local stats = state.cache:get_stats()
+      return stats.deferred_disk_work_scheduled ~= true
+    end, 5)
+    local stats = state.cache:get_stats()
+    if stats.deferred_disk_work_scheduled == true then
+      large_disk_isolation_ok = false
+      scenario_sentinels[state.label or "large-disk"] = false
+    end
+  end
+  startup_after(state)
+end
+
 local LARGE_DISK_STARTUP_SCENARIOS = {
   { slug = "STARTUP_LARGE_DISK_CACHE_100", threshold_key = "startup_large_disk_cache_100", count = 100 },
   { slug = "STARTUP_LARGE_DISK_CACHE_1000", threshold_key = "startup_large_disk_cache_1000", count = 1000 },
@@ -2257,7 +2276,7 @@ local function register_large_disk_startup(entry)
     run = function(state, finish)
       large_disk_startup_run(state, finish, slug)
     end,
-    after = startup_after,
+    after = large_disk_startup_after,
   })
 end
 
@@ -2360,6 +2379,7 @@ end
 emit("LSP01_LINUX_PERF_THRESHOLD_PASS", platform == "linux" and active_rollup or "unfrozen")
 emit("LSP01_MACOS_PERF_THRESHOLD_PASS", platform == "macos" and active_rollup or "unfrozen")
 emit("LSP01_REAL_LSP_PERF_ALL_PASS", real_lsp_perf_all_pass)
+emit("ARCH14_LARGE_CACHE_BENCHMARK_ISOLATED", large_disk_isolation_ok and "true" or "false")
 
 write_summary(real_lsp_perf_all_pass)
 
