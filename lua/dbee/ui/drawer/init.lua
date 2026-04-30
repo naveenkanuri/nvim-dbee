@@ -300,23 +300,21 @@ local function connection_uses_lazy_schema_root(ui, conn)
   return caps.structure_for_schema == true and caps.list_schemas == true
 end
 
----@param ui DrawerUI
----@param conn_id connection_id
+---@param normalized table
 ---@param schema_name string
 ---@return boolean
-local function schema_visible_for_connection(ui, conn_id, schema_name)
-  return schema_filter.matches(schema_name, normalized_schema_scope(ui, conn_id))
+local function schema_visible_for_scope(normalized, schema_name)
+  return schema_filter.matches(schema_name, normalized)
 end
 
----@param ui DrawerUI
----@param conn_id connection_id
+---@param normalized table
 ---@param schemas table[]?
 ---@return DBStructure[]
-local function schema_rows_for_connection(ui, conn_id, schemas)
+local function schema_rows_for_connection(normalized, schemas)
   local structs = {}
   for _, schema in ipairs(schemas or {}) do
     local name = schema.name or schema.schema or schema
-    if type(name) == "string" and name ~= "" and schema_visible_for_connection(ui, conn_id, name) then
+    if type(name) == "string" and name ~= "" and schema_visible_for_scope(normalized, name) then
       structs[#structs + 1] = {
         name = name,
         schema = name,
@@ -2067,7 +2065,7 @@ function DrawerUI:on_schemas_loaded(data)
   invalidate_authoritative_caches(self)
 
   self._struct_cache.root[data.conn_id] = {
-    structures = data.error and {} or schema_rows_for_connection(self, data.conn_id, data.schemas or {}),
+    structures = data.error and {} or schema_rows_for_connection(normalized, data.schemas or {}),
     error = data.error,
     schemas_only = true,
   }
