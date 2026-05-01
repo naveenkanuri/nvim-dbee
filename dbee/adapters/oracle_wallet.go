@@ -551,6 +551,11 @@ func safeZipEntryName(name string) (string, error) {
 	if strings.HasPrefix(normalized, "/") || filepath.IsAbs(normalized) || hasWindowsDrivePrefix(normalized) {
 		return "", fmt.Errorf("unsafe wallet zip entry %q: absolute paths are not allowed", name)
 	}
+	for _, segment := range strings.Split(normalized, "/") {
+		if segment == ".." {
+			return "", fmt.Errorf("unsafe wallet zip entry %q: path traversal is not allowed", name)
+		}
+	}
 	cleanName := path.Clean(normalized)
 	if cleanName == "." || cleanName == ".." || strings.HasPrefix(cleanName, "../") {
 		return "", fmt.Errorf("unsafe wallet zip entry %q: path traversal is not allowed", name)

@@ -251,6 +251,7 @@ func TestOracleWalletZipMarkers(t *testing.T) {
 	emit.True("WALLET_ZIP_ATOMIC_RENAME_OK")
 
 	assertUnsafeZipRejected(t, tmp, "Slip.zip", "../cwallet.sso", "x", "path traversal")
+	assertUnsafeZipRejected(t, tmp, "NestedSlip.zip", "nested/../cwallet.sso", "x", "path traversal")
 	emit.True("WALLET_ZIP_SLIP_REJECTED")
 
 	assertSymlinkZipRejected(t, tmp)
