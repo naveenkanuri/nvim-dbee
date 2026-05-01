@@ -66,8 +66,15 @@ local function make_handler()
     handler.counters.sync = handler.counters.sync + 1
     return {}
   end
-  function handler:connection_get_columns_async()
+  function handler:connection_get_columns_async(conn_id, request_id, branch_id, root_epoch, request)
     handler.counters.async = handler.counters.async + 1
+    handler.last_columns_async = {
+      conn_id = conn_id,
+      request_id = request_id,
+      branch_id = branch_id,
+      root_epoch = root_epoch,
+      request = request,
+    }
   end
   function handler:connection_get_schema_objects_singleflight()
     handler.counters.async = handler.counters.async + 1
@@ -581,21 +588,34 @@ do
     return first_label(target:get_table_completion_items("public", { schema_quoted = true, include_data = true }), "users")
   end)
 
-  local c4 = make_cache("lsp12-gen-columns")
+  local c4_handler = make_handler()
+  local c4 = SchemaCache:new(c4_handler, "lsp12-gen-columns")
+  c4:build_from_metadata_rows({ { schema_name = "public", table_name = "users", obj_type = "table" } })
+  local old_columns_item = synthetic_table_item(c4, c4:generation(), "public", "users")
   local async_result = c4:get_columns_async("public", "users", {
     schema_quoted = true,
     table_quoted = true,
   })
-  assert_false("columns warm should not be incomplete", async_result.is_incomplete)
-  assert_path_generation("on_columns_loaded", c4, function(target)
-    target:_store_columns("public.users", { { name = "id", type = "integer" } })
-  end, function(target)
-    return first_label(target:get_column_completion_items("public", "users", {
-      schema_quoted = true,
-      table_quoted = true,
-      include_data = true,
-    }), "id")
-  end)
+  assert_true("columns async should be incomplete", async_result.is_incomplete)
+  assert_true("columns async request captured", c4_handler.last_columns_async ~= nil)
+  assert_true("columns loaded applied", c4:on_columns_loaded({
+    conn_id = "lsp12-gen-columns",
+    kind = "columns",
+    request_id = c4_handler.last_columns_async.request_id,
+    branch_id = c4_handler.last_columns_async.branch_id,
+    root_epoch = c4_handler.last_columns_async.root_epoch,
+    columns = { { name = "id", type = "integer" } },
+  }))
+  local old_columns_result = resolve.handle(old_columns_item, c4, { memo = {} })
+  assert_eq("on_columns_loaded old incomplete", old_columns_result.data.dbee_resolve_status, "incomplete")
+  local fresh_columns_item = first_label(c4:get_column_completion_items("public", "users", {
+    schema_quoted = true,
+    table_quoted = true,
+    include_data = true,
+  }), "id")
+  assert_true("on_columns_loaded fresh item", fresh_columns_item and fresh_columns_item.data)
+  local fresh_columns_result = resolve.handle(fresh_columns_item, c4, { memo = {} })
+  assert_true("on_columns_loaded fresh docs", fresh_columns_result.documentation ~= nil)
 
   local c5 = make_cache("lsp12-gen-schema-objects")
   assert_path_generation("on_schema_objects_loaded", c5, function(target)
