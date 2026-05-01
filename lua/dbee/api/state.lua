@@ -26,7 +26,10 @@ local function oracle_wallet_auto_extract_enabled()
 end
 
 local function sync_oracle_wallet_auto_extract()
-  vim.fn.DbeeOracleWalletSetAutoExtract(oracle_wallet_auto_extract_enabled())
+  -- Best-effort: silently skip if the Go backend predates the wallet RPC
+  -- (e.g. user has an older `dbee` binary). Default behavior on the Go side
+  -- is auto-extract enabled, which matches the Lua default.
+  pcall(vim.fn.DbeeOracleWalletSetAutoExtract, oracle_wallet_auto_extract_enabled())
 end
 
 local function setup_handler()
@@ -38,8 +41,11 @@ local function setup_handler()
     error("setup() has not been called yet")
   end
 
-  -- register remote plugin
+  -- register remote plugin and mark core_loaded immediately. RegisterPlugin
+  -- can only run once per session; if a later setup step throws, a retry
+  -- must NOT call register() again ("Plugin '0' is already registered").
   register()
+  m.core_loaded = true
 
   -- add install binary to path
   local pathsep = ":"
@@ -59,8 +65,6 @@ local function setup_handler()
   if m.config.default_connection then
     pcall(m.handler.set_current_connection, m.handler, m.config.default_connection)
   end
-
-  m.core_loaded = true
 end
 
 local function setup_ui()
