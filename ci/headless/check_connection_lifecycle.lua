@@ -376,7 +376,13 @@ local function new_env(opts)
     return wizard
   end
 
-  local handler = Handler:new({ source })
+  -- Second source so source-badge renders (#sources > 1 per convert.lua:357).
+  -- DCFG01 fixture asserts "Alpha  [source1]" — requires multi-source for badge to show.
+  local source2 = new_source({})
+  source2._id = "source2"
+  source2._file = vim.fn.getcwd() .. "/source2.json"
+
+  local handler = Handler:new({ source, source2 })
   Harness.drain()
 
   runtime.current_conn_id = opts.current_conn_id or source._specs[1].id
@@ -503,8 +509,15 @@ local function run_lifecycle_contracts()
   end)
 
   local snapshot = env.handler:get_connection_state_snapshot()
-  assert_eq("snapshot_sources_count", #snapshot.sources, 1)
-  assert_eq("snapshot_connection_count", #snapshot.sources[1].connections, 2)
+  -- 2 sources: primary "source1" (Alpha+Beta) + stub "source2" (empty, for badge rendering)
+  assert_eq("snapshot_sources_count", #snapshot.sources, 2)
+  -- find the source1 entry by id (order not guaranteed)
+  local source1_entry
+  for _, s in ipairs(snapshot.sources) do
+    if s.id == "source1" then source1_entry = s; break end
+  end
+  assert_true("snapshot_source1_present", source1_entry ~= nil)
+  assert_eq("snapshot_connection_count", #source1_entry.connections, 2)
   assert_eq("snapshot_current_conn", snapshot.current_connection.id, "conn-alpha")
   assert_eq("snapshot_epoch_alpha", snapshot.snapshot_authoritative_epoch["conn-alpha"], 0)
   assert_eq("snapshot_epoch_beta", snapshot.snapshot_authoritative_epoch["conn-beta"], 0)
