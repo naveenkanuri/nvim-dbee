@@ -254,26 +254,68 @@ function M.extract_statements(text)
   return statements
 end
 
+---@param statement { text: string, start: { line: integer, character: integer }, _offset_index?: table }
+---@return { offsets: integer[], positions: table[] }
+local function ensure_statement_offset_index(statement)
+  if statement._offset_index then
+    return statement._offset_index
+  end
+
+  local offsets = { 1 }
+  local positions = {
+    {
+      line = statement.start.line,
+      character = statement.start.character,
+    },
+  }
+  local line = statement.start.line
+  local character = statement.start.character
+
+  for index = 1, #statement.text do
+    local ch = statement.text:sub(index, index)
+    if ch == "\n" then
+      line = line + 1
+      character = 0
+      offsets[#offsets + 1] = index + 1
+      positions[#positions + 1] = {
+        line = line,
+        character = character,
+      }
+    else
+      character = character + 1
+    end
+  end
+
+  statement._offset_index = {
+    offsets = offsets,
+    positions = positions,
+  }
+  return statement._offset_index
+end
+
 ---Convert a 1-based byte offset inside a statement to an absolute position.
 ---@param statement { text: string, start: { line: integer, character: integer } }
 ---@param offset integer
 ---@return { line: integer, character: integer }
 function M.statement_offset_to_position(statement, offset)
-  local line = statement.start.line
-  local character = statement.start.character
-  local text = statement.text:sub(1, math.max(0, offset - 1))
-  for i = 1, #text do
-    local ch = text:sub(i, i)
-    if ch == "\n" then
-      line = line + 1
-      character = 0
+  local index = ensure_statement_offset_index(statement)
+  local target = math.max(1, math.min(tonumber(offset) or 1, #statement.text + 1))
+  local low = 1
+  local high = #index.offsets
+  local best = 1
+  while low <= high do
+    local mid = math.floor((low + high) / 2)
+    if index.offsets[mid] <= target then
+      best = mid
+      low = mid + 1
     else
-      character = character + 1
+      high = mid - 1
     end
   end
+  local base = index.positions[best]
   return {
-    line = line,
-    character = character,
+    line = base.line,
+    character = base.character + (target - index.offsets[best]),
   }
 end
 
@@ -341,6 +383,9 @@ local function parse_aliases(bufnr, line, col)
 
   table.sort(matches, function(a, b)
     if a.pos == b.pos then
+      if a.specificity == b.specificity then
+        return (a.ref_start or 0) < (b.ref_start or 0)
+      end
       return a.specificity < b.specificity
     end
     return a.pos < b.pos
@@ -475,7 +520,28 @@ local function scan_identifier_tokens(line)
   local index = 1
   while index <= #line do
     local ch = line:sub(index, index)
-    if ch == '"' then
+    local next_ch = line:sub(index + 1, index + 1)
+    if ch == "-" and next_ch == "-" then
+      break
+    elseif ch == "/" and next_ch == "*" then
+      local _, close_end = line:find("*/", index + 2, true)
+      index = close_end and (close_end + 1) or (#line + 1)
+    elseif ch == "'" then
+      index = index + 1
+      while index <= #line do
+        local current = line:sub(index, index)
+        if current == "'" then
+          if line:sub(index + 1, index + 1) == "'" then
+            index = index + 2
+          else
+            index = index + 1
+            break
+          end
+        else
+          index = index + 1
+        end
+      end
+    elseif ch == '"' then
       local start_index = index
       local raw = { ch }
       index = index + 1
@@ -509,7 +575,7 @@ local function scan_identifier_tokens(line)
           }
         end
       end
-    elseif ch:match("[%w_]") then
+    elseif ch:match("[%a_]") then
       local start_index = index
       while index <= #line and line:sub(index, index):match("[%w_]") do
         index = index + 1
@@ -525,6 +591,10 @@ local function scan_identifier_tokens(line)
           end_col = index - 1,
         }
       end
+    elseif ch:match("%d") then
+      while index <= #line and line:sub(index, index):match("[%w_%.]") do
+        index = index + 1
+      end
     else
       index = index + 1
     end
@@ -536,28 +606,98 @@ end
 ---@return table[]
 local function scan_statement_tokens(statement)
   local tokens = {}
-  local line = statement.start.line
-  local line_start = 1
   local index = 1
+  ensure_statement_offset_index(statement)
 
-  while index <= #statement.text + 1 do
-    if index > #statement.text or statement.text:sub(index, index) == "\n" then
-      local line_text = statement.text:sub(line_start, index - 1)
-      local base_character = line == statement.start.line and statement.start.character or 0
-      for _, token in ipairs(scan_identifier_tokens(line_text)) do
-        token.line = line
-        token.offset_start = line_start + token.start_col
-        token.offset_end = line_start + token.end_col
-        token.range = {
-          start = { line = line, character = base_character + token.start_col },
-          ["end"] = { line = line, character = base_character + token.end_col },
-        }
-        tokens[#tokens + 1] = token
+  while index <= #statement.text do
+    local ch = statement.text:sub(index, index)
+    local next_ch = statement.text:sub(index + 1, index + 1)
+    if ch == "-" and next_ch == "-" then
+      local newline = statement.text:find("\n", index + 2, true)
+      index = newline or (#statement.text + 1)
+    elseif ch == "/" and next_ch == "*" then
+      local _, close_end = statement.text:find("*/", index + 2, true)
+      index = close_end and (close_end + 1) or (#statement.text + 1)
+    elseif ch == "'" then
+      index = index + 1
+      while index <= #statement.text do
+        local current = statement.text:sub(index, index)
+        if current == "'" then
+          if statement.text:sub(index + 1, index + 1) == "'" then
+            index = index + 2
+          else
+            index = index + 1
+            break
+          end
+        else
+          index = index + 1
+        end
       end
-      line = line + 1
-      line_start = index + 1
+    elseif ch == '"' then
+      local start_index = index
+      local raw = { ch }
+      index = index + 1
+      local closed = false
+      while index <= #statement.text do
+        local current = statement.text:sub(index, index)
+        raw[#raw + 1] = current
+        if current == '"' then
+          if statement.text:sub(index + 1, index + 1) == '"' then
+            index = index + 1
+            raw[#raw + 1] = '"'
+          else
+            closed = true
+            index = index + 1
+            break
+          end
+        else
+          index = index + 1
+        end
+      end
+      if closed then
+        local raw_text = table.concat(raw)
+        local parsed = parse_identifier(raw_text)
+        if parsed then
+          tokens[#tokens + 1] = {
+            raw = raw_text,
+            name = parsed.name,
+            quoted = true,
+            offset_start = start_index,
+            offset_end = index,
+            range = {
+              start = M.statement_offset_to_position(statement, start_index),
+              ["end"] = M.statement_offset_to_position(statement, index),
+            },
+          }
+        end
+      end
+    elseif ch:match("[%a_]") then
+      local start_index = index
+      while index <= #statement.text and statement.text:sub(index, index):match("[%w_]") do
+        index = index + 1
+      end
+      local raw_text = statement.text:sub(start_index, index - 1)
+      local parsed = parse_identifier(raw_text)
+      if parsed then
+        tokens[#tokens + 1] = {
+          raw = raw_text,
+          name = parsed.name,
+          quoted = false,
+          offset_start = start_index,
+          offset_end = index,
+          range = {
+            start = M.statement_offset_to_position(statement, start_index),
+            ["end"] = M.statement_offset_to_position(statement, index),
+          },
+        }
+      end
+    elseif ch:match("%d") then
+      while index <= #statement.text and statement.text:sub(index, index):match("[%w_%.]") do
+        index = index + 1
+      end
+    else
+      index = index + 1
     end
-    index = index + 1
   end
 
   return tokens
@@ -759,7 +899,7 @@ local function parse_statement_table_refs(statement)
 
   local function first_clause_boundary(text, start_index)
     local boundary = text:find(";", start_index, true)
-    for _, keyword in ipairs({ "where", "join", "on", "group", "order", "having", "limit", "union" }) do
+    for _, keyword in ipairs({ "select", "where", "join", "on", "group", "order", "having", "limit", "union" }) do
       local found = text:find("%f[%a]" .. keyword_pattern(keyword) .. "%f[%A]", start_index)
       if found and (not boundary or found < boundary) then
         boundary = found
@@ -884,13 +1024,36 @@ end
 local function statement_column_refs(statement, table_refs)
   local columns = {}
   local aliases = {}
+  local tables_by_key = {}
   for _, ref in ipairs(table_refs or {}) do
     if ref.alias_key then
       aliases[ref.alias_key] = ref
     end
+    if ref.table and ref.table ~= "" then
+      tables_by_key[ref.table] = ref
+      if not ref.table_quoted then
+        tables_by_key[ref.table:lower()] = ref
+      end
+    end
   end
   local tokens = scan_statement_tokens(statement)
-  local qualified_token_indexes = {}
+  local table_ref_token_indexes = {}
+  local sorted_table_refs = vim.deepcopy(table_refs or {})
+  table.sort(sorted_table_refs, function(a, b)
+    return (a.ref_start or 0) < (b.ref_start or 0)
+  end)
+  local table_ref_index = 1
+  for index, token in ipairs(tokens) do
+    while sorted_table_refs[table_ref_index]
+      and token.offset_start >= (sorted_table_refs[table_ref_index].ref_end or 0)
+    do
+      table_ref_index = table_ref_index + 1
+    end
+    local ref = sorted_table_refs[table_ref_index]
+    if ref and token.offset_start >= ref.ref_start and token.offset_end <= ref.ref_end then
+      table_ref_token_indexes[index] = true
+    end
+  end
 
   local function token_keyword(token)
     return token and token.quoted ~= true and sql_keywords_set[token.name:lower()]
@@ -904,23 +1067,21 @@ local function statement_column_refs(statement, table_refs)
     if alias then
       return alias
     end
-    for _, ref in ipairs(table_refs or {}) do
-      if ref.table == prefix or (not ref.table_quoted and ref.table:lower() == prefix:lower()) then
-        return ref
-      end
-    end
-    return nil
+    return tables_by_key[prefix] or tables_by_key[prefix:lower()]
   end
 
   for index = 1, #tokens - 1 do
     local left = tokens[index]
     local right = tokens[index + 1]
     local between = statement.text:sub(left.offset_end, right.offset_start - 1)
-    if between:match("^%s*%.%s*$") and not token_keyword(left) and not token_keyword(right) then
+    if between:match("^%s*%.%s*$")
+      and not table_ref_token_indexes[index]
+      and not table_ref_token_indexes[index + 1]
+      and not token_keyword(left)
+      and not token_keyword(right)
+    then
       local ref = ref_for_prefix(left.name)
       if ref then
-        qualified_token_indexes[index] = true
-        qualified_token_indexes[index + 1] = true
         columns[#columns + 1] = {
           schema = ref.schema,
           schema_quoted = ref.schema_quoted,
@@ -934,30 +1095,100 @@ local function statement_column_refs(statement, table_refs)
     end
   end
 
+  local function trim_span(start_offset, end_offset)
+    while start_offset <= end_offset and statement.text:sub(start_offset, start_offset):match("%s") do
+      start_offset = start_offset + 1
+    end
+    while end_offset >= start_offset and statement.text:sub(end_offset, end_offset):match("%s") do
+      end_offset = end_offset - 1
+    end
+    return start_offset, end_offset
+  end
+
+  local function split_select_items(start_offset, end_offset)
+    local items = {}
+    local item_start = start_offset
+    local depth = 0
+    local index = start_offset
+    local quote = nil
+    while index <= end_offset do
+      local ch = statement.text:sub(index, index)
+      local next_ch = statement.text:sub(index + 1, index + 1)
+      if quote == "'" then
+        if ch == "'" then
+          if next_ch == "'" then
+            index = index + 1
+          else
+            quote = nil
+          end
+        end
+      elseif quote == '"' then
+        if ch == '"' then
+          if next_ch == '"' then
+            index = index + 1
+          else
+            quote = nil
+          end
+        end
+      elseif ch == "'" or ch == '"' then
+        quote = ch
+      elseif ch == "(" then
+        depth = depth + 1
+      elseif ch == ")" and depth > 0 then
+        depth = depth - 1
+      elseif ch == "," and depth == 0 then
+        local first, last = trim_span(item_start, index - 1)
+        if first <= last then
+          items[#items + 1] = { start_offset = first, end_offset = last }
+        end
+        item_start = index + 1
+      end
+      index = index + 1
+    end
+    local first, last = trim_span(item_start, end_offset)
+    if first <= last then
+      items[#items + 1] = { start_offset = first, end_offset = last }
+    end
+    return items
+  end
+
+  local function simple_identifier_item(item)
+    local raw = statement.text:sub(item.start_offset, item.end_offset)
+    local parsed = parse_identifier(raw)
+    if not parsed then
+      return nil
+    end
+    if not parsed.quoted and (not raw:match("^[%a_][%w_]*$") or sql_keywords_set[parsed.name:lower()]) then
+      return nil
+    end
+    return {
+      name = parsed.name,
+      quoted = parsed.quoted,
+      range = {
+        start = M.statement_offset_to_position(statement, item.start_offset),
+        ["end"] = M.statement_offset_to_position(statement, item.end_offset + 1),
+      },
+    }
+  end
+
   if #table_refs == 1 then
     local single_ref = table_refs[1]
-    local from_offset = nil
     local from_match = statement.text:find("%f[%a]" .. keyword_pattern("from") .. "%f[%A]")
-    if from_match then
-      from_offset = from_match
-    end
-
-    for index, token in ipairs(tokens) do
-      local next_char = statement.text:sub(token.offset_end):match("^%s*(.)")
-      if not qualified_token_indexes[index]
-        and not token_keyword(token)
-        and next_char ~= "("
-        and (not from_offset or token.offset_start < from_offset)
-      then
-        columns[#columns + 1] = {
-          schema = single_ref.schema,
-          schema_quoted = single_ref.schema_quoted,
-          table = single_ref.table,
-          table_quoted = single_ref.table_quoted,
-          column = token.name,
-          column_quoted = token.quoted,
-          range = token.range,
-        }
+    local select_start, select_end = statement.text:find("%f[%a]" .. keyword_pattern("select") .. "%f[%A]")
+    if from_match and select_end and select_start < from_match then
+      for _, item in ipairs(split_select_items(select_end + 1, from_match - 1)) do
+        local column = simple_identifier_item(item)
+        if column then
+          columns[#columns + 1] = {
+            schema = single_ref.schema,
+            schema_quoted = single_ref.schema_quoted,
+            table = single_ref.table,
+            table_quoted = single_ref.table_quoted,
+            column = column.name,
+            column_quoted = column.quoted,
+            range = column.range,
+          }
+        end
       end
     end
   end
@@ -968,31 +1199,6 @@ end
 ---@param text string
 ---@return table[]
 local function extract_symbol_statements(text)
-  local statements = {}
-  local line_nr = 0
-  for line_text in ((text or "") .. "\n"):gmatch("([^\n]*)\n") do
-    local has_table_ref = false
-    for _, keyword in ipairs({ "from", "join", "update", "into" }) do
-      if line_text:find("%f[%a]" .. keyword_pattern(keyword) .. "%f[%A]") then
-        has_table_ref = true
-        break
-      end
-    end
-    if has_table_ref then
-      statements[#statements + 1] = {
-        text = line_text,
-        start = {
-          line = line_nr,
-          character = 0,
-        },
-      }
-    end
-    line_nr = line_nr + 1
-  end
-
-  if #statements > 0 then
-    return statements
-  end
   return M.extract_statements(text or "")
 end
 
