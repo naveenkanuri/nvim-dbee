@@ -257,6 +257,15 @@ local resolve_plain = docs.format_resolve({
 assert_eq("resolve plaintext fallback", resolve_plain.documentation.kind, "plaintext")
 emit("LSP12_HOVER_MARKDOWN_FORMAT_OK", "true")
 
+local backtick_markdown = docs.format_hover({
+  kind = "schema",
+  schema = "weird``name",
+  tables = {},
+  table_count = 0,
+}, {})
+assert_true("backtick code span delimiter", backtick_markdown.value:find("``` weird``name ```", 1, true) ~= nil)
+emit("LSP12_HOVER_MARKDOWN_BACKTICK_SAFE", "true")
+
 local long_lines = {}
 for i = 1, 6 do
   long_lines[i] = "select id"

@@ -2,7 +2,6 @@ local M = {}
 
 local MARKDOWN_ESCAPE = {
   ["\\"] = "\\\\",
-  ["`"] = "\\`",
   ["*"] = "\\*",
   ["_"] = "\\_",
   ["{"] = "\\{",
@@ -22,14 +21,27 @@ local MARKDOWN_ESCAPE = {
 ---@param value any
 ---@return string
 function M.escape_markdown(value)
-  return tostring(value or ""):gsub("[\\`%*_%{%}%[%]%(%)#%+%-%.!|]", MARKDOWN_ESCAPE)
+  return tostring(value or ""):gsub("[\\%*_%{%}%[%]%(%)#%+%-%.!|]", MARKDOWN_ESCAPE)
 end
 
 ---@param value any
 ---@return string
-local function inline_code(value)
-  return "`" .. M.escape_markdown(value) .. "`"
+function M.code_span(value)
+  local text = M.escape_markdown(value)
+  local longest = 0
+  for run in text:gmatch("`+") do
+    if #run > longest then
+      longest = #run
+    end
+  end
+  local delimiter = string.rep("`", longest + 1)
+  if longest > 0 then
+    return delimiter .. " " .. text .. " " .. delimiter
+  end
+  return delimiter .. text .. delimiter
 end
+
+local inline_code = M.code_span
 
 ---@param client_caps table?
 ---@param surface? "hover"|"completion"
