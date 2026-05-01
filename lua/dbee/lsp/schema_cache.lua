@@ -2183,6 +2183,15 @@ end
 ---@return string
 function SchemaCache:document_symbol_cache_identity()
   local scope = self.schema_scope or {}
+  local authority_status = "authority_unavailable"
+  local authority_signature = ""
+  local ok, authority = pcall(self.read_lsp_authority, self)
+  if ok and authority then
+    authority_status = tostring(authority.status or "authority_unavailable")
+    if authority.status == "ok" and authority.scope then
+      authority_signature = tostring(authority.scope.schema_filter_signature or "")
+    end
+  end
   return table.concat({
     tostring(self:cache_identity()),
     tostring(self.conn_id or ""),
@@ -2190,6 +2199,8 @@ function SchemaCache:document_symbol_cache_identity()
     tostring(self:generation()),
     tostring(self.fold_id or ""),
     tostring(self.schema_filter_signature or ""),
+    authority_status,
+    authority_signature,
     scope.fail_closed == true and "fail_closed" or "scope_available",
     tostring(self.root_mode or ""),
   }, "|")
@@ -2209,6 +2220,40 @@ function SchemaCache:schema_in_current_scope(schema, scope)
   end
   local active_scope = scope or self.schema_scope
   return schema_filter.matches(schema, active_scope)
+end
+
+---@param schema string?
+---@param opts? { schema_quoted?: boolean, quoted?: boolean }
+---@return boolean known
+---@return string? reason
+---@return string? actual_schema
+function SchemaCache:document_symbol_schema_known(schema, opts)
+  opts = opts or {}
+  if not schema or schema == "" then
+    return false, "missing_schema"
+  end
+
+  local authority = self:read_lsp_authority()
+  if authority.status ~= "ok" or not authority.scope then
+    return false, authority.status or "authority_unavailable"
+  end
+
+  local epoch_check = epoch_authority.check_fresh(self, self.handler, self.conn_id)
+  if not epoch_check.fresh then
+    return false, "stale_root_epoch"
+  end
+
+  local actual_schema = self:find_schema(schema, {
+    quoted = quoted_option(opts, "schema_quoted", "quoted"),
+  })
+  if not actual_schema then
+    return false, "missing_schema"
+  end
+  if not self:schema_in_current_scope(actual_schema, authority.scope) then
+    return false, "filtered_out", actual_schema
+  end
+
+  return true, nil, actual_schema
 end
 
 ---@private

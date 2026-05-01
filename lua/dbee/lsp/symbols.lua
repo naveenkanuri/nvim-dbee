@@ -119,14 +119,11 @@ local function schema_known(cache, ref)
   if not ref.schema or ref.schema == "" then
     return false
   end
-  if not cache or type(cache.find_schema) ~= "function" then
+  if not cache or type(cache.document_symbol_schema_known) ~= "function" then
     return false
   end
-  local known = epoch_authority.read_with_freshness(cache, cache.handler, cache.conn_id, function()
-    local ok, actual = pcall(cache.find_schema, cache, ref.schema, { quoted = ref.schema_quoted })
-    return ok and actual ~= nil
-  end)
-  return known == true
+  local ok, known = pcall(cache.document_symbol_schema_known, cache, ref.schema, { schema_quoted = ref.schema_quoted })
+  return ok and known == true
 end
 
 local function range_key(range)

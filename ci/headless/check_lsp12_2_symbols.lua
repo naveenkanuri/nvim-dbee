@@ -222,8 +222,18 @@ local neutral = request(client, "textDocument/documentSymbol", {
   textDocument = { uri = uri },
 })
 assert_true("authority neutral", #neutral > 0)
+assert_eq("authority unavailable no schema parent", symbol_named(neutral, "public"), nil)
+assert_true("authority unavailable source table", symbol_named(neutral, "public.users") ~= nil)
+scope_ref.value = schema_filter.normalize({ include = { "audit" } }, "postgres")
+local filtered_authority_buf, filtered_authority_uri = make_buffer({ "select * from public.users" })
+local filtered_authority = request(client, "textDocument/documentSymbol", {
+  textDocument = { uri = filtered_authority_uri },
+})
+assert_eq("filtered authority no schema parent", symbol_named(filtered_authority, "public"), nil)
+assert_true("filtered authority source table", symbol_named(filtered_authority, "public.users") ~= nil)
 scope_ref.value = schema_filter.normalize(nil, "postgres")
 emit("LSP12_2_DOCSYMBOL_AUTHORITY_NEUTRAL", "true")
+emit("LSP12_2_DOCSYMBOL_AUTHORITY_DEGRADES_TO_NAME", "true")
 
 local users_node = child_named(symbol_named(tree, "public"), "users")
 assert_true("qualified column", child_named(users_node, "id") ~= nil)
@@ -322,6 +332,21 @@ assert_true("quote/comment split users retained", symbol_named(aware_split, "use
 assert_eq("quote/comment split schema omitted", symbol_named(aware_split, "public"), nil)
 assert_eq("quote/comment split fake omitted", symbol_named(aware_split, "public.fake"), nil)
 emit("LSP12_2_DOCSYMBOL_STMT_SPLIT_QUOTE_COMMENT_AWARE", "true")
+
+local diag_ns = server.diagnostic_namespace()
+local diagnostic_text_buf, diagnostic_text_uri = make_buffer({
+  "select 1 from users -- from public.fake",
+  "select '; from public.fake' as s from users",
+  "select $$; from public.fake$$ as s from users",
+  "select * from users /* join public.fake */",
+})
+vim.diagnostic.set(diag_ns, diagnostic_text_buf, {})
+client.notify("textDocument/didSave", {
+  textDocument = { uri = diagnostic_text_uri },
+})
+local diagnostic_text = vim.diagnostic.get(diagnostic_text_buf, { namespace = diag_ns })
+assert_eq("diagnostic comments/strings omitted", #diagnostic_text, 0)
+emit("LSP12_2_DIAGNOSTICS_IGNORES_COMMENTS_AND_STRINGS", "true")
 
 local dedupe_buf, dedupe_uri = make_buffer({ "select * from public.users; select * from PUBLIC.USERS" })
 local dedupe = request(client, "textDocument/documentSymbol", {

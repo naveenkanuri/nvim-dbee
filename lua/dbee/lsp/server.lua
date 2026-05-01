@@ -335,30 +335,22 @@ end
 local function compute_diagnostics(text, cache)
   local diagnostics = {}
 
-  local function keyword_pattern(keyword)
-    local parts = {}
-    for i = 1, #keyword do
-      local ch = keyword:sub(i, i)
-      parts[#parts + 1] = "[" .. ch:lower() .. ch:upper() .. "]"
-    end
-    return table.concat(parts)
-  end
-
-  local function add_unknown(statement, ref, ref_start)
-    local parsed = context.parse_table_ref(ref)
+  local function add_unknown(statement, ref)
+    local raw_ref = ref and ref.ref or ""
     local missing = false
     local message
-    if parsed and parsed.schema then
-      local schema_part = parsed.schema
-      local tbl = parsed.table
+    if ref and ref.schema then
+      local schema_part = ref.schema
+      local tbl = ref.table
       if type(cache.schema_status) == "function" then
-        local status = cache:schema_status(schema_part, { schema_quoted = parsed.schema_quoted })
+        local status = cache:schema_status(schema_part, { schema_quoted = ref.schema_quoted })
         if status == "filtered_out" then
-          local raw_schema = ref:match("^(.-)%.") or schema_part
           diagnostics[#diagnostics + 1] = {
             range = {
-              start = context.statement_offset_to_position(statement, ref_start),
-              ["end"] = context.statement_offset_to_position(statement, ref_start + #raw_schema),
+              start = ref.schema_range and ref.schema_range.start
+                or context.statement_offset_to_position(statement, ref.ref_start),
+              ["end"] = ref.schema_range and ref.schema_range["end"]
+                or context.statement_offset_to_position(statement, ref.ref_start + #schema_part),
             },
             severity = DiagnosticSeverity.Information,
             source = "dbee-lsp",
@@ -370,18 +362,17 @@ local function compute_diagnostics(text, cache)
         end
       end
       local actual = cache:find_table_in_schema(schema_part, tbl, {
-        schema_quoted = parsed.schema_quoted,
-        table_quoted = parsed.table_quoted,
+        schema_quoted = ref.schema_quoted,
+        table_quoted = ref.table_quoted,
       })
       missing = actual == nil
       message = string.format("Unknown table: %s.%s", schema_part, tbl)
     else
-      parsed = parsed or context.parse_table_ref(ref)
-      if not parsed or parsed.schema then
+      if not ref or not ref.table then
         return
       end
-      local tbl = parsed.table
-      local actual = cache:find_table(tbl, { table_quoted = parsed.table_quoted })
+      local tbl = ref.table
+      local actual = cache:find_table(tbl, { table_quoted = ref.table_quoted })
       missing = actual == nil
       if missing and type(cache.has_unloaded_active_schemas) == "function" and cache:has_unloaded_active_schemas() then
         return
@@ -395,8 +386,10 @@ local function compute_diagnostics(text, cache)
 
     diagnostics[#diagnostics + 1] = {
       range = {
-        start = context.statement_offset_to_position(statement, ref_start),
-        ["end"] = context.statement_offset_to_position(statement, ref_start + #ref),
+        start = ref.ref_range and ref.ref_range.start
+          or context.statement_offset_to_position(statement, ref.ref_start),
+        ["end"] = ref.ref_range and ref.ref_range["end"]
+          or context.statement_offset_to_position(statement, ref.ref_end or (ref.ref_start + #raw_ref)),
       },
       severity = DiagnosticSeverity.Warning,
       source = "dbee-lsp",
@@ -404,22 +397,10 @@ local function compute_diagnostics(text, cache)
     }
   end
 
-  local function scan_statement(statement, keyword)
-    local pattern = "()%f[%a]" .. keyword_pattern(keyword) .. "%f[%A]%s+()([^%s,;%(%)]+)"
-    local init = 1
-    while true do
-      local match_start, match_end, _, ref_start, ref = statement.text:find(pattern, init)
-      if not match_start then
-        break
-      end
-      add_unknown(statement, ref, ref_start)
-      init = match_end + 1
-    end
-  end
-
   for _, statement in ipairs(context.extract_statements(text)) do
-    scan_statement(statement, "from")
-    scan_statement(statement, "join")
+    for _, ref in ipairs(context.statement_table_refs(statement)) do
+      add_unknown(statement, ref)
+    end
   end
 
   return diagnostics
