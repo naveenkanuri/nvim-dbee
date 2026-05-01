@@ -102,7 +102,7 @@ end
 ---@field private filter_debounce_ms integer debounce window for live apply
 ---@field private pending_filter_text? string latest queued filter text
 ---@field private filter_timer? uv_timer_t
----@field private cached_search_model? { nodes: table[], coverage: DrawerModelCoverage } immutable search corpus reused across repeated filter starts within the same authoritative drawer generation
+---@field private cached_search_model? { nodes: table[], coverage: DrawerModelCoverage, all_search_conn_ids: table<string, true>, ready_conn_ids: table<string, true> } immutable search corpus reused across repeated filter starts within the same authoritative drawer generation
 ---@field private cached_render_snapshot? DrawerRenderSnapshotNode[] baseline rendered-tree snapshot reused across repeated filter starts while the rendered tree is unchanged
 ---@field private filter_cached_connections integer ready cached connections in the current filter session
 ---@field private filter_total_connections integer total connections visible to the drawer
@@ -2499,10 +2499,13 @@ end
 ---@return string? error_message
 function DrawerUI:capture_filter_snapshot()
   if not self.cached_search_model then
-    local search_model, coverage = drawer_model.build_search_model(self.handler, self._struct_cache)
+    local search_model, coverage, all_search_conn_ids, ready_conn_ids =
+      drawer_model.build_search_model(self.handler, self._struct_cache)
     self.cached_search_model = {
       nodes = search_model,
       coverage = coverage,
+      all_search_conn_ids = all_search_conn_ids,
+      ready_conn_ids = ready_conn_ids,
     }
   end
 
@@ -2512,7 +2515,12 @@ function DrawerUI:capture_filter_snapshot()
 
   local coverage = self.cached_search_model.coverage
   local merged_model, visible_connections, visible_uncached_connections =
-    drawer_model.merge_visible_connection_rows(self.cached_search_model.nodes, self.cached_render_snapshot)
+    drawer_model.merge_visible_connection_rows(
+      self.cached_search_model.nodes,
+      self.cached_render_snapshot,
+      self.cached_search_model.all_search_conn_ids,
+      self.cached_search_model.ready_conn_ids
+    )
   if #merged_model == 0 then
     return false, "No visible connections available for filter"
   end

@@ -3,6 +3,7 @@ local convert = require("dbee.ui.drawer.convert")
 local M = {}
 
 local SEARCHABLE_TYPES = {
+  folder = true,
   schema = true,
   table = true,
   view = true,
@@ -22,9 +23,11 @@ local SEARCHABLE_TYPES = {
 ---@field type string
 ---@field schema string?
 ---@field raw_name string?
+---@field folder_id string?
 ---@field conn_id string?
 ---@field source_meta table?
 ---@field search_text string?
+---@field structure_ready boolean?
 ---@field action_1 function?
 ---@field action_2 function?
 ---@field action_3 function?
@@ -70,6 +73,12 @@ local function connection_coverage(handler, structure_cache)
   return coverage
 end
 
+local function structure_cache_has_ready(structure_cache, conn_id)
+  local cached = structure_cache and structure_cache.root and structure_cache.root[conn_id]
+    or structure_cache and structure_cache[conn_id]
+  return cached ~= nil and not cached.error
+end
+
 local function read_node_children(node)
   local children = rawget(node, "__children")
   if type(children) == "table" then
@@ -97,8 +106,10 @@ local function to_render_node(node)
     type = node.type,
     schema = node.schema,
     raw_name = node.raw_name,
+    folder_id = node.folder_id,
     conn_id = node.conn_id,
     source_meta = node.source_meta,
+    search_text = node.search_text,
     action_1 = node.action_1,
     action_2 = node.action_2,
     action_3 = node.action_3,
@@ -152,6 +163,27 @@ local function add_search_part(parts, value)
   parts[#parts + 1] = tostring(value)
 end
 
+local function build_search_connection_node(conn, source_meta, structure_cache, structure_ready)
+  local display_name = search_connection_name(conn, source_meta)
+  local cached = structure_cache and structure_cache.root and structure_cache.root[conn.id] or structure_cache and structure_cache[conn.id]
+  local children = {}
+  if structure_ready and cached then
+    children = build_search_struct_nodes(cached.structures, conn.id)
+  end
+
+  return {
+    id = conn.id,
+    name = display_name,
+    raw_name = conn.name,
+    type = "connection",
+    conn_id = conn.id,
+    source_meta = source_meta,
+    search_text = M.connection_search_text(conn.id, conn.name, display_name, source_meta),
+    structure_ready = structure_ready == true,
+    children = children,
+  }
+end
+
 ---@param conn_id string?
 ---@param raw_name string?
 ---@param display_name string?
@@ -189,9 +221,12 @@ end
 ---@param structure_cache table
 ---@return table[] search_model
 ---@return DrawerModelCoverage coverage
+---@return table<string, true> all_search_conn_ids
+---@return table<string, true> ready_conn_ids
 function M.build_search_model(handler, structure_cache)
-  local coverage = connection_coverage(handler, structure_cache)
+  local coverage = { ready_connections = 0, total_connections = 0 }
   local search_model = {}
+  local root_id = "__handler_root__"
 
   for _, source in ipairs(handler:get_sources()) do
     local source_id = source:name()
@@ -203,37 +238,70 @@ function M.build_search_model(handler, structure_cache)
       can_delete = type(source.delete) == "function",
       file = search_source_file(source),
     }
+    local conns = handler:source_get_connections(source_id)
+    local folders = {}
+    if type(handler.source_get_folders) == "function" then
+      folders = handler:source_get_folders(source_id)
+    end
 
-    for _, conn in ipairs(handler:source_get_connections(source_id)) do
-      local cached = structure_cache and structure_cache.root and structure_cache.root[conn.id] or structure_cache and structure_cache[conn.id]
-      if cached and not cached.error then
-        local display_name = search_connection_name(conn, source_meta)
-        table.insert(search_model, {
-          id = conn.id,
-          name = display_name,
-          raw_name = conn.name,
-          type = "connection",
-          conn_id = conn.id,
-          source_meta = source_meta,
-          search_text = M.connection_search_text(conn.id, conn.name, display_name, source_meta),
-          children = build_search_struct_nodes(cached.structures, conn.id),
-        })
+    local ready_set = {}
+    local conn_by_id = {}
+    for _, conn in ipairs(conns) do
+      coverage.total_connections = coverage.total_connections + 1
+      conn_by_id[conn.id] = conn
+      local ready = structure_cache_has_ready(structure_cache, conn.id)
+      if ready then
+        coverage.ready_connections = coverage.ready_connections + 1
+        ready_set[conn.id] = true
+      end
+    end
+
+    local in_folder = {}
+    for _, folder in ipairs(folders) do
+      local children = {}
+      for _, conn_id in ipairs(folder.connection_ids or {}) do
+        local conn = conn_by_id[conn_id]
+        if conn then
+          in_folder[conn_id] = true
+          children[#children + 1] = build_search_connection_node(conn, source_meta, structure_cache, ready_set[conn_id])
+        end
+      end
+      search_model[#search_model + 1] = {
+        id = convert.folder_node_id(root_id, source_id, folder.id),
+        name = folder.name,
+        type = "folder",
+        raw_name = folder.name,
+        folder_id = folder.id,
+        source_meta = source_meta,
+        search_text = folder.name,
+        children = children,
+      }
+    end
+
+    for _, conn in ipairs(conns) do
+      if not in_folder[conn.id] then
+        search_model[#search_model + 1] = build_search_connection_node(conn, source_meta, structure_cache, ready_set[conn.id])
       end
     end
   end
 
-  return search_model, coverage
-end
-
-local function collect_connection_ids(nodes, out)
-  out = out or {}
-  for _, node in ipairs(nodes or {}) do
-    if node.type == "connection" then
-      out[node.conn_id or node.id] = true
+  local all_search_conn_ids, ready_conn_ids = {}, {}
+  local function collect_ids(node)
+    if node.type == "connection" and node.conn_id then
+      all_search_conn_ids[node.conn_id] = true
+      if node.structure_ready == true then
+        ready_conn_ids[node.conn_id] = true
+      end
     end
-    collect_connection_ids(node.children, out)
+    for _, child in ipairs(node.children or {}) do
+      collect_ids(child)
+    end
   end
-  return out
+  for _, root_node in ipairs(search_model) do
+    collect_ids(root_node)
+  end
+
+  return search_model, coverage, all_search_conn_ids, ready_conn_ids
 end
 
 local function collect_visible_connection_rows(nodes, out)
@@ -249,24 +317,45 @@ end
 
 ---@param search_model table[]
 ---@param rendered_snapshot table[]
+---@param all_search_conn_ids? table<string, true>
+---@param ready_conn_ids? table<string, true>
 ---@return table[] merged_model
 ---@return integer visible_connections
 ---@return integer visible_uncached_connections
-function M.merge_visible_connection_rows(search_model, rendered_snapshot)
+function M.merge_visible_connection_rows(search_model, rendered_snapshot, all_search_conn_ids, ready_conn_ids)
   local merged_model = {}
   for _, node in ipairs(search_model or {}) do
     merged_model[#merged_model + 1] = node
   end
 
-  local cached_conn_ids = collect_connection_ids(search_model)
+  local all_ids = {}
+  for conn_id in pairs(all_search_conn_ids or {}) do
+    all_ids[conn_id] = true
+  end
+  if next(all_ids) == nil then
+    local function collect_all(node)
+      if node.type == "connection" and (node.conn_id or node.id) then
+        all_ids[node.conn_id or node.id] = true
+      end
+      for _, child in ipairs(node.children or {}) do
+        collect_all(child)
+      end
+    end
+    for _, node in ipairs(search_model or {}) do
+      collect_all(node)
+    end
+  end
+  ready_conn_ids = ready_conn_ids or {}
   local visible_connections = 0
   local visible_uncached_connections = 0
   for _, node in ipairs(collect_visible_connection_rows(rendered_snapshot)) do
     visible_connections = visible_connections + 1
     local conn_id = node.conn_id or node.id
-    if conn_id and not cached_conn_ids[conn_id] then
-      cached_conn_ids[conn_id] = true
+    if conn_id and not ready_conn_ids[conn_id] then
       visible_uncached_connections = visible_uncached_connections + 1
+    end
+    if conn_id and not all_ids[conn_id] then
+      all_ids[conn_id] = true
       merged_model[#merged_model + 1] = {
         id = node.id,
         name = node.name,
