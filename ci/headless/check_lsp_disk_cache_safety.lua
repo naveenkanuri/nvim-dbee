@@ -83,6 +83,7 @@ local function column_payload(cache, cols, signature)
   return vim.json.encode({
     version = 3,
     schema_filter_signature = signature or cache.schema_filter_signature,
+    root_epoch = cache:metadata_root_epoch(),
     columns = cols,
   })
 end
@@ -106,6 +107,7 @@ assert_eq("no temp residue", temp_residue_count(cache.cache_dir), 0)
 local schema_index = vim.json.decode(read_file(cache:_cache_path()))
 assert_eq("schema cache version written", schema_index.version, 3)
 assert_eq("schema cache signature written", schema_index.schema_filter_signature, cache.schema_filter_signature)
+assert_eq("schema cache root epoch written", schema_index.root_epoch, cache:metadata_root_epoch())
 
 local original = read_file(cache:_cache_path())
 local saved_rename = os.rename

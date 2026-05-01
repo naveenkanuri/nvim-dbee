@@ -601,6 +601,45 @@ do
   emit("LSP12_RESOLVE_INVALIDATION_LAG_FAIL_CLOSED", "true")
 end
 
+do
+  local disk_cache = make_cache("lsp12-disk-epoch")
+  disk_cache:save_to_disk()
+  disk_cache:_save_columns_to_disk("public.users", disk_cache.columns["public.users"])
+  epoch_ref.value = 2
+  local loaded_cache = SchemaCache:new(make_handler(), "lsp12-disk-epoch")
+  assert_true("disk epoch stale cache loads", loaded_cache:load_from_disk())
+  assert_eq("disk epoch restored from disk", loaded_cache:metadata_root_epoch(), 1)
+
+  local disk_line = "select id from public.users"
+  local disk_buf, disk_uri = make_buffer({ disk_line })
+  local disk_hover = hover.handle({
+    textDocument = { uri = disk_uri },
+    position = { line = 0, character = position_of(disk_line, "id") },
+  }, loaded_cache)
+  assert_eq("disk stale hover no docs", disk_hover, nil)
+
+  local disk_table_item = first_label(loaded_cache:get_table_completion_items("public", {
+    schema_quoted = true,
+    include_data = true,
+  }), "users")
+  assert_true("disk stale table item", disk_table_item and disk_table_item.data)
+  local disk_table_resolved = resolve.handle(disk_table_item, loaded_cache, { memo = {} })
+  assert_eq("disk stale table no docs", disk_table_resolved.documentation, nil)
+  assert_eq("disk stale table incomplete", disk_table_resolved.data.dbee_resolve_status, "incomplete")
+
+  local disk_column_item = first_label(loaded_cache:get_column_completion_items("public", "users", {
+    schema_quoted = true,
+    table_quoted = true,
+    include_data = true,
+  }), "id")
+  assert_true("disk stale column item", disk_column_item and disk_column_item.data)
+  local disk_column_resolved = resolve.handle(disk_column_item, loaded_cache, { memo = {} })
+  assert_eq("disk stale column no docs", disk_column_resolved.documentation, nil)
+  assert_eq("disk stale column incomplete", disk_column_resolved.data.dbee_resolve_status, "incomplete")
+  epoch_ref.value = 1
+  emit("LSP12_DISK_CACHE_EPOCH_FAIL_CLOSED", "true")
+end
+
 local function assert_path_generation(label, before_cache, mutate, fresh_item, destructive)
   local old_item = synthetic_table_item(before_cache, before_cache:generation(), "public", "users")
   mutate(before_cache)

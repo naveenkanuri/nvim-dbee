@@ -1353,8 +1353,22 @@ function SchemaCache:_load_column_file(path, prefix)
     return false
   end
   local cols = payload
+  local root_epoch = nil
   if type(payload) == "table" and payload.columns ~= nil then
     if payload.schema_filter_signature ~= self.schema_filter_signature then
+      os.remove(path)
+      return false
+    end
+    if payload.root_epoch == nil then
+      self:_remove_legacy_column_cache(path)
+      return false
+    end
+    root_epoch = tonumber(payload.root_epoch)
+    if root_epoch == nil then
+      self:_remove_corrupt_file(path, "loading column cache")
+      return false
+    end
+    if root_epoch ~= tonumber(self:metadata_root_epoch() or 0) then
       os.remove(path)
       return false
     end
@@ -1373,7 +1387,7 @@ function SchemaCache:_load_column_file(path, prefix)
 
   local fname = vim.fn.fnamemodify(path, ":t:r")
   local key = fname:sub(#prefix + 1)
-  self:_store_columns(key, cols)
+  self:_store_columns(key, cols, { root_epoch = root_epoch })
   return true
 end
 
@@ -1686,6 +1700,7 @@ function SchemaCache:save_to_disk()
     version = SCHEMA_CACHE_VERSION,
     conn_id = self.conn_id,
     schema_filter_signature = self.schema_filter_signature,
+    root_epoch = self:metadata_root_epoch(),
     root_mode = self.root_mode or "full",
     root_loaded_schemas = vim.tbl_keys(self.loaded_schemas or {}),
     schemas = vim.tbl_keys(self.schemas),
@@ -1760,13 +1775,23 @@ function SchemaCache:load_from_disk()
     return false
   end
 
+  if data.root_epoch == nil then
+    self:_remove_legacy_schema_index(path)
+    return false
+  end
+  local root_epoch = tonumber(data.root_epoch)
+  if root_epoch == nil then
+    self:_remove_corrupt_file(path, "loading schema index")
+    return false
+  end
+
   local normalized = self:_normalize_schema_index(data)
   if not normalized then
     self:_remove_corrupt_file(path, "loading schema index")
     return false
   end
 
-  self:_bump_metadata_generation("load_from_disk")
+  self:_bump_metadata_generation("load_from_disk", root_epoch)
   self.schemas = {}
   self.tables = {}
   self.columns = {}
@@ -1814,6 +1839,7 @@ function SchemaCache:_save_columns_to_disk(key, cols)
   self:_atomic_write_json(path, {
     version = SCHEMA_CACHE_VERSION,
     schema_filter_signature = self.schema_filter_signature,
+    root_epoch = self:metadata_root_epoch(),
     columns = cols,
   }, "saving columns")
 end

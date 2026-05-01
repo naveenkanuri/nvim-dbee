@@ -2160,6 +2160,7 @@ local function seed_large_disk_cache(count, conn_id)
   local column_payload = vim.json.encode({
     version = 3,
     schema_filter_signature = cache.schema_filter_signature,
+    root_epoch = cache:metadata_root_epoch(),
     columns = make_columns("", "", DEFAULT_COLUMNS_PER_TABLE),
   })
   for i = 1, count do
