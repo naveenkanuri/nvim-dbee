@@ -2616,6 +2616,51 @@ local function lsp12_3_position(line, needle)
   return start_pos
 end
 
+local function lsp12_3_many_schema_structure(schema_count)
+  local structs = {}
+  for i = 1, schema_count do
+    local schema = string.format("SCHEMA_MANY_%03d", i)
+    structs[#structs + 1] = {
+      name = schema,
+      type = "schema",
+      schema = schema,
+      children = {
+        {
+          name = string.format("TABLE_MANY_%03d", i),
+          type = "table",
+          schema = schema,
+        },
+      },
+    }
+  end
+  return structs
+end
+
+local function lsp12_3_many_schema_before(schema_count, line)
+  local cache = make_cache(1, DEFAULT_COLUMNS_PER_TABLE, {
+    preload_columns = false,
+    structure = lsp12_3_many_schema_structure(schema_count),
+  })
+  local bufnr, uri = make_buffer({ line })
+  local client, client_id = start_lsp(cache, bufnr)
+  client:notify("textDocument/didOpen", {
+    textDocument = {
+      uri = uri,
+      languageId = "sql",
+      version = 1,
+      text = line,
+    },
+  })
+  return {
+    cache = cache,
+    handler = cache.handler,
+    bufnr = bufnr,
+    uri = uri,
+    client = client,
+    client_id = client_id,
+  }
+end
+
 local function lsp12_3_assert_no_request_db(state, before_sync, before_async, slug)
   local sync_delta = (state.handler.counters.connection_get_columns or 0) - before_sync
   local async_delta = (state.handler.counters.connection_get_columns_async or 0) - before_async
@@ -2709,6 +2754,81 @@ lsp12_3_register({
       error("source command order mismatch")
     end
     lsp12_3_assert_no_request_db(state, before_sync, before_async, "CODEACTION_SOURCE_COMMANDS")
+    return elapsed
+  end,
+})
+
+lsp12_3_register({
+  slug = "CODEACTION_LARGE_BUFFER",
+  before = function()
+    local lines = {}
+    for i = 1, 1000 do
+      lines[i] = "-- filler"
+    end
+    lines[500] = "SELECT * FROM SCHEMA_001.TABLE_000001"
+    return lsp12_3_before(lines, {
+      columns_per_table = 200,
+    })
+  end,
+  run = function(state)
+    local line = "SELECT * FROM SCHEMA_001.TABLE_000001"
+    local pos = lsp12_3_position(line, "*")
+    local before_sync = state.handler.counters.connection_get_columns or 0
+    local before_async = state.handler.counters.connection_get_columns_async or 0
+    local result, elapsed = lsp12_3_code_action(state, 499, pos, pos + 1, { "refactor.rewrite" })
+    if type(result) ~= "table" or #result ~= 1 or not (result[1].edit and result[1].edit.documentChanges) then
+      error("large buffer expand code action missing versioned edit")
+    end
+    lsp12_3_assert_no_request_db(state, before_sync, before_async, "CODEACTION_LARGE_BUFFER")
+    return elapsed
+  end,
+})
+
+lsp12_3_register({
+  slug = "CODEACTION_MANY_SCHEMAS",
+  before = function()
+    return lsp12_3_many_schema_before(100, "SELECT COL_001 FROM TABLE_MANY_100")
+  end,
+  run = function(state)
+    local line = "SELECT COL_001 FROM TABLE_MANY_100"
+    local pos = lsp12_3_position(line, "TABLE_MANY_100")
+    local before_sync = state.handler.counters.connection_get_columns or 0
+    local before_async = state.handler.counters.connection_get_columns_async or 0
+    local result, elapsed = lsp12_3_code_action(state, 0, pos, pos, { "refactor.rewrite" })
+    if type(result) ~= "table" or #result ~= 1 or not (result[1].edit and result[1].edit.documentChanges) then
+      error("many schemas qualify code action missing versioned edit")
+    end
+    local edit = result[1].edit.documentChanges[1].edits[1]
+    if edit.newText ~= "SCHEMA_MANY_100." then
+      error("many schemas qualify produced unexpected edit " .. tostring(edit.newText))
+    end
+    lsp12_3_assert_no_request_db(state, before_sync, before_async, "CODEACTION_MANY_SCHEMAS")
+    return elapsed
+  end,
+})
+
+lsp12_3_register({
+  slug = "CODEACTION_DENSE_REFS",
+  before = function()
+    local parts = { "SELECT COL_001 FROM TABLE_000001 t1" }
+    for i = 2, 500 do
+      parts[#parts + 1] = string.format("JOIN %s t%d ON 1 = 1", table_for_index(i), i)
+    end
+    return lsp12_3_before({ table.concat(parts, " ") }, {
+      table_count = 500,
+    })
+  end,
+  run = function(state)
+    local line = vim.api.nvim_buf_get_lines(state.bufnr, 0, 1, false)[1]
+    local needle = table_for_index(500)
+    local pos = lsp12_3_position(line, needle)
+    local before_sync = state.handler.counters.connection_get_columns or 0
+    local before_async = state.handler.counters.connection_get_columns_async or 0
+    local result, elapsed = lsp12_3_code_action(state, 0, pos, pos, { "source" })
+    if type(result) ~= "table" or #result ~= 2 then
+      error("dense refs source command discovery expected reload and refresh actions")
+    end
+    lsp12_3_assert_no_request_db(state, before_sync, before_async, "CODEACTION_DENSE_REFS")
     return elapsed
   end,
 })

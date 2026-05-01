@@ -348,6 +348,48 @@ assert_eq("cte shadow expand omitted", #cte_actions, 0)
 assert_eq("cte shadow lookup count", cte_lookup_count, 0)
 emit("LSP12_3_EXPAND_CTE_SHADOW_NO_ACTION", "true")
 
+local recursive_cte_line = "with recursive users as (select 1) select * from users"
+local recursive_cte_buf, recursive_cte_uri = make_buffer({ recursive_cte_line })
+did_open(client, recursive_cte_uri, 1, recursive_cte_line)
+local recursive_cte_lookup_count = 0
+cache.get_code_action_table_columns = function()
+  recursive_cte_lookup_count = recursive_cte_lookup_count + 1
+  fail("WITH RECURSIVE CTE shadow reached cached column lookup")
+end
+local recursive_cte_star = position_of(recursive_cte_line, "*")
+local recursive_cte_expand = code_action(
+  client,
+  recursive_cte_uri,
+  0,
+  recursive_cte_star,
+  recursive_cte_star + 1,
+  { "refactor.rewrite" }
+)
+cache.get_code_action_table_columns = original_columns
+local recursive_cte_ref_pos = position_of(recursive_cte_line, "users", 2)
+local recursive_cte_qualify = code_action(
+  client,
+  recursive_cte_uri,
+  0,
+  recursive_cte_ref_pos,
+  recursive_cte_ref_pos,
+  { "refactor.rewrite" }
+)
+local recursive_cte_reload = code_action(
+  client,
+  recursive_cte_uri,
+  0,
+  recursive_cte_ref_pos,
+  recursive_cte_ref_pos,
+  { "source" }
+)
+assert_eq("recursive cte expand omitted", #recursive_cte_expand, 0)
+assert_eq("recursive cte qualify omitted", #recursive_cte_qualify, 0)
+assert_eq("recursive cte source only refresh", #recursive_cte_reload, 1)
+assert_true("recursive cte refresh retained", first_command(recursive_cte_reload, "dbee/refresh_schema") ~= nil)
+assert_eq("recursive cte lookup count", recursive_cte_lookup_count, 0)
+emit("LSP12_3_WITH_RECURSIVE_CTE_SHADOW_NO_ACTION", "true")
+
 local qualify_line = "select id from orders"
 local qualify_buf, qualify_uri = make_buffer({ qualify_line })
 did_open(client, qualify_uri, 1, qualify_line)
@@ -365,6 +407,45 @@ local ambiguous_pos = position_of(ambiguous_line, "users")
 local ambiguous = code_action(client, ambiguous_uri, 0, ambiguous_pos, ambiguous_pos, { "refactor.rewrite" })
 assert_eq("ambiguous qualify omitted", #ambiguous, 0)
 emit("LSP12_3_QUALIFY_IDENTIFIER_AMBIGUOUS_NO_ACTION", "true")
+
+local partial_handler = make_handler()
+local partial_cache = SchemaCache:new(partial_handler, "lsp12-3-partial")
+assert_true("partial schemas", partial_cache:build_from_schemas({
+  { name = "public" },
+  { name = "audit" },
+}, { root_epoch = epoch_ref.value }))
+assert_true("partial public load", partial_cache:on_schema_objects_loaded({
+  conn_id = "lsp12-3-partial",
+  schema = "public",
+  root_epoch = epoch_ref.value,
+  objects = {
+    { name = "users", type = "table", schema = "public" },
+  },
+}))
+partial_cache:_store_columns("public.users", {
+  { name = "id", type = "integer" },
+}, { root_epoch = epoch_ref.value })
+local partial_client = client_for(partial_cache)
+initialize(partial_client)
+local partial_line = "select * from users"
+local partial_buf, partial_uri = make_buffer({ partial_line })
+did_open(partial_client, partial_uri, 1, partial_line)
+local partial_star = position_of(partial_line, "*")
+local partial_users = position_of(partial_line, "users")
+assert_eq(
+  "partial lazy expand omitted",
+  #code_action(partial_client, partial_uri, 0, partial_star, partial_star + 1, { "refactor.rewrite" }),
+  0
+)
+assert_eq(
+  "partial lazy qualify omitted",
+  #code_action(partial_client, partial_uri, 0, partial_users, partial_users, { "refactor.rewrite" }),
+  0
+)
+local partial_source = code_action(partial_client, partial_uri, 0, partial_users, partial_users, { "source" })
+assert_eq("partial lazy source only refresh", #partial_source, 1)
+assert_true("partial lazy refresh retained", first_command(partial_source, "dbee/refresh_schema") ~= nil)
+emit("LSP12_3_UNQUALIFIED_PARTIAL_LAZY_FAIL_CLOSED", "true")
 
 local quoted_qualify_line = 'select id from "Case Table"'
 local quoted_qualify_buf, quoted_qualify_uri = make_buffer({ quoted_qualify_line })
@@ -473,6 +554,14 @@ local no_actions = code_action(client, no_action_uri, 0, one_pos, one_pos, { "re
 assert_eq("no actionable refactor", #no_actions, 0)
 emit("LSP12_3_NO_ACTIONABLE_RANGE_EMPTY", "true")
 
+local whitespace_buf, whitespace_uri = make_buffer({ "   " })
+did_open(client, whitespace_uri, 1, "   ")
+local whitespace_source = code_action(client, whitespace_uri, 0, 0, 0, { "source" })
+assert_eq("whitespace source refresh only", #whitespace_source, 1)
+assert_true("whitespace refresh returned", first_command(whitespace_source, "dbee/refresh_schema") ~= nil)
+assert_eq("whitespace reload omitted", first_command(whitespace_source, "dbee/reload_table"), nil)
+emit("LSP12_3_REFRESH_AVAILABLE_NO_STATEMENT_CONTEXT", "true")
+
 local disabled_cache = make_cache()
 local disabled_client, disabled_calls = client_for(disabled_cache, {
   lsp = { code_actions = false },
@@ -552,9 +641,10 @@ local stale_action = code_action(client, stale_uri, 0, order_star, order_star + 
 vim.api.nvim_buf_set_lines(stale_buf, 0, -1, false, { "select id from orders" })
 did_change(client, stale_uri, 2, "select id from orders")
 local stale_edit_version = stale_action.edit.documentChanges[1].textDocument.version
-if stale_edit_version == 2 then
-  pcall(vim.lsp.util.apply_workspace_edit, stale_action.edit, "utf-16")
+if vim.lsp.util.buf_versions then
+  vim.lsp.util.buf_versions[stale_buf] = 2
 end
+pcall(vim.lsp.util.apply_workspace_edit, stale_action.edit, "utf-16")
 local stale_after = vim.api.nvim_buf_get_lines(stale_buf, 0, -1, false)[1]
 assert_eq("stale edit version captured", stale_edit_version, 1)
 assert_eq("stale edit no-op", stale_after, "select id from orders")
@@ -588,14 +678,64 @@ local context_text = read_file("lua/dbee/lsp/context.lua")
 local cache_text = read_file("lua/dbee/lsp/schema_cache.lua")
 local server_text = read_file("lua/dbee/lsp/server.lua")
 local init_text = read_file("lua/dbee/lsp/init.lua")
+local function assert_absent(label, text, pattern, plain)
+  assert_eq(label, text:find(pattern, 1, plain == true), nil)
+end
+local function slice(label, text, start_pattern, end_pattern)
+  local start_pos = text:find(start_pattern, 1, true)
+  if not start_pos then
+    fail("missing static guard start: " .. label)
+  end
+  local end_pos = end_pattern and text:find(end_pattern, start_pos + 1, true) or nil
+  if not end_pos then
+    end_pos = #text + 1
+  end
+  return text:sub(start_pos, end_pos - 1)
+end
+
 assert_true("canonical helper used", code_actions_text:find("schema_name_canonical%.is_unquoted_canonical") ~= nil)
 assert_true("epoch helper used", code_actions_text:find("epoch_authority%.check_fresh") ~= nil)
 assert_true("reload helper present", cache_text:find("reload_table_metadata_async", 1, true) ~= nil)
 assert_true("execute dispatch present", server_text:find("workspace/executeCommand", 1, true) ~= nil)
 assert_true("init callbacks present", init_text:find("code_action_refresh_schema", 1, true) ~= nil)
-assert_eq("code actions no connection_get", code_actions_text:find("connection_get_", 1, true), nil)
-assert_eq("context no connection_get", context_text:find("connection_get_", 1, true), nil)
-assert_eq("server no column metadata db", server_text:find("connection_get_columns", 1, true), nil)
+local context_code_action_text = slice(
+  "context code action helpers",
+  context_text,
+  "function M.code_action_statement",
+  "function M.analyze"
+)
+local reload_helper_text = slice(
+  "schema cache reload helper",
+  cache_text,
+  "function SchemaCache:reload_table_metadata_async",
+  "--- Apply a structure_children_loaded column payload"
+)
+local server_code_action_text = slice(
+  "server code action routes",
+  server_text,
+  'elseif method == "textDocument/codeAction"',
+  "return true, current_id"
+)
+local init_command_text = slice(
+  "init command callbacks",
+  init_text,
+  "local function code_action_command_context",
+  "--- Start LSP with a populated cache."
+)
+assert_absent("code actions no connection_get", code_actions_text, "connection_get_", true)
+assert_absent("context helpers no connection_get", context_code_action_text, "connection_get_", true)
+assert_absent("server routes no connection_get", server_code_action_text, "connection_get_", true)
+assert_absent("init callbacks no direct column db", init_command_text, "connection_get_columns", true)
+assert_absent("init callbacks no direct schema object db", init_command_text, "connection_get_schema_objects", true)
+assert_absent("code actions no handler epoch bypass", code_actions_text, "epoch_authority%.handler_epoch")
+assert_absent("code actions no cache epoch bypass", code_actions_text, "epoch_authority%.cache_epoch")
+assert_absent("code actions no read freshness bypass", code_actions_text, "epoch_authority%.read_with_freshness")
+assert_absent("server route no authority helper", server_text, "schema_filter_authority", true)
+assert_absent("context helpers no authority helper", context_code_action_text, "schema_filter_authority", true)
+assert_absent("schema cache reload no current connection", reload_helper_text, "get_current_connection", true)
+assert_absent("schema cache reload no structure refresh", reload_helper_text, "connection_get_structure", true)
+assert_true("refresh command id present", code_actions_text:find('COMMAND_REFRESH_SCHEMA = "dbee/refresh_schema"', 1, true) ~= nil)
+assert_true("reload command id present", code_actions_text:find('COMMAND_RELOAD_TABLE = "dbee/reload_table"', 1, true) ~= nil)
 emit("LSP12_3_NEW_CODE_ACTION_NO_HELPER_BYPASS", "true")
 
 local makefile_text = read_file("Makefile")
