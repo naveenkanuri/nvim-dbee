@@ -516,6 +516,10 @@ local function snapshot_rendered_tree(ui, tree, parent_id)
     if not TABLE_LIKE_TYPES[node.type] then
       was_materialized = was_materialized or node:is_expanded()
     end
+    local lazy_children = nil
+    if not was_materialized then
+      lazy_children = node.lazy_children
+    end
     table.insert(snapshot, {
       id = node.id,
       name = node.name,
@@ -527,7 +531,7 @@ local function snapshot_rendered_tree(ui, tree, parent_id)
       action_1 = node.action_1,
       action_2 = node.action_2,
       action_3 = node.action_3,
-      lazy_children = was_materialized and nil or node.lazy_children,
+      lazy_children = lazy_children,
       rendered_children_loaded = was_materialized,
       children = children,
     })
@@ -2119,10 +2123,13 @@ function DrawerUI:on_schema_objects_loaded(data, branch_id)
   state.loading = false
   state.error = data.error or data.error_kind
   local scope = normalized_schema_scope(self, data.conn_id)
-  local filtered_objects = (data.error or data.error_kind)
-    and nil
-    or schema_filter.filter_structures(data.objects or {}, scope)
-  state.raw = (data.error or data.error_kind) and nil or sorted_struct_children(filtered_objects or {})
+  local filtered_objects = nil
+  if not data.error and not data.error_kind then
+    filtered_objects = schema_filter.filter_structures(data.objects or {}, scope)
+    state.raw = sorted_struct_children(filtered_objects or {})
+  else
+    state.raw = nil
+  end
   if not data.error and not data.error_kind then
     self._struct_cache.root_loaded_schemas[data.conn_id] = self._struct_cache.root_loaded_schemas[data.conn_id] or {}
     self._struct_cache.root_loaded_schemas[data.conn_id][schema_filter.fold(data.schema, "case_insensitive")] = true
@@ -2241,7 +2248,11 @@ function DrawerUI:on_structure_children_loaded(data)
   state.applied_gen = request_id
   state.loading = false
   state.error = data.error
-  state.raw = data.error and nil or (data.columns or {})
+  if data.error then
+    state.raw = nil
+  else
+    state.raw = data.columns or {}
+  end
   state.render_limit = math.max(state.render_limit or CHILD_CHUNK_SIZE, CHILD_CHUNK_SIZE)
   state.built_count = math.min(#normalize_children(state.raw), state.render_limit)
 

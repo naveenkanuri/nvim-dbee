@@ -5,6 +5,7 @@ vim.fn.mkdir(vim.env.XDG_STATE_HOME, "p")
 
 local server = require("dbee.lsp.server")
 local SchemaCache = require("dbee.lsp.schema_cache")
+local schema_filter = require("dbee.schema_filter")
 
 local function fail(msg)
   print("LSP_SCHEMA_ALIAS_FATAL=true")
@@ -58,7 +59,8 @@ local bufnr = vim.api.nvim_create_buf(false, true)
 vim.api.nvim_buf_set_name(bufnr, "/tmp/dbee-schema-qualified-alias.sql")
 local uri = vim.uri_from_bufnr(bufnr)
 
-local function request_completion(line_idx, line_text, trigger_char)
+local function request_completion(line_idx, line_text, trigger_char, target_client)
+  target_client = target_client or client
   vim.api.nvim_buf_set_lines(bufnr, line_idx, line_idx + 1, false, { line_text })
   local done = false
   local response = nil
@@ -70,7 +72,7 @@ local function request_completion(line_idx, line_text, trigger_char)
     params.context = { triggerCharacter = trigger_char }
   end
 
-  client.request("textDocument/completion", params, function(err, result)
+  target_client.request("textDocument/completion", params, function(err, result)
     response = { err = err, result = result }
     done = true
   end)
@@ -149,6 +151,30 @@ deliver(view_probe, {
 local view_warm = request_completion(2, v_line)
 assert_true("view fallback labels", has_label(view_warm.items, "VIEW_COL"))
 
+local pg_scope = assert(schema_filter.normalize(nil, "postgres"))
+local pg_cache = SchemaCache:new({
+  get_schema_filter_normalized = function()
+    return pg_scope
+  end,
+  connection_get_columns = fail_sync_fetch,
+  get_authoritative_root_epoch = function()
+    return 1
+  end,
+  connection_get_columns_async = function()
+    fail("case-folded cache hit unexpectedly queued async columns")
+  end,
+}, "test-schema-alias-case-fold")
+pg_cache:build_from_metadata_rows({
+  { schema_name = "public", table_name = "users", obj_type = "table" },
+})
+pg_cache:_store_columns("public.users", {
+  { name = "id", type = "integer" },
+})
+local pg_client = server.create(pg_cache)({}, {})
+local pg_result = request_completion(3, "select * from PUBLIC.users u where u.", nil, pg_client)
+assert_eq("case folded schema complete", pg_result.isIncomplete, false)
+assert_true("case folded schema labels", has_label(pg_result.items, "id"))
+
 print("LSP_SCHEMA_ALIAS_D_ENTRYID=true")
 print("LSP_SCHEMA_ALIAS_D_JPS_DN_ENTRYID=false")
 print("LSP_SCHEMA_ALIAS_P_ENTRYID=false")
@@ -163,6 +189,7 @@ print("LSP_SCHEMA_ALIAS_WARM_LABELS=true")
 assert_true("no sync fetch", not sync_fetch_called)
 print("LSP_SCHEMA_ALIAS_NO_SYNC_FETCH=true")
 print("LSP_SCHEMA_ALIAS_VIEW_FALLBACK_OK=true")
+print("LSP_SCHEMA_ALIAS_CASE_FOLD_OK=true")
 
 if sync_fetch_called then
   fail("sync fetch called")

@@ -1518,13 +1518,18 @@ function Handler:_on_singleflight_structure_loaded(data)
     return
   end
 
+  local structures = nil
+  if not data.error then
+    structures = self:_filter_structures_for_connection(flight.conn_id, data.structures)
+  end
+
   for _, waiter in ipairs(flight.waiters or {}) do
     self:_notify_structure_waiter(waiter, {
       conn_id = flight.conn_id,
       request_id = waiter.request_id,
       root_epoch = payload_root_epoch,
       caller_token = waiter.caller_token,
-      structures = data.error and nil or self:_filter_structures_for_connection(flight.conn_id, data.structures),
+      structures = structures,
       error = data.error,
     })
   end
@@ -1540,12 +1545,16 @@ function Handler:_on_schema_list_loaded(data)
   local spec_waiter = self._schema_spec_request_lookup[data.request_id]
   if spec_waiter then
     self._schema_spec_request_lookup[data.request_id] = nil
+    local schemas = nil
+    if not data.error then
+      schemas = copy_payload(data.schemas)
+    end
     self:_notify_schema_waiter(spec_waiter, {
       conn_id = data.conn_id,
       request_id = spec_waiter.request_id,
       root_epoch = tonumber(data.root_epoch) or 0,
       caller_token = spec_waiter.caller_token,
-      schemas = data.error and nil or copy_payload(data.schemas),
+      schemas = schemas,
       error = data.error,
     })
     return
@@ -1670,6 +1679,11 @@ function Handler:_on_schema_objects_loaded(data)
     filtered_objects = self:_filter_structures_for_connection(flight.conn_id, data.objects)
   end
 
+  local objects = nil
+  if not data.error and not data.error_kind then
+    objects = copy_payload(filtered_objects)
+  end
+
   for _, waiter in ipairs(flight.waiters or {}) do
     self:_notify_schema_waiter(waiter, {
       conn_id = flight.conn_id,
@@ -1677,7 +1691,7 @@ function Handler:_on_schema_objects_loaded(data)
       root_epoch = payload_epoch,
       caller_token = waiter.caller_token,
       schema = flight.schema,
-      objects = (data.error or data.error_kind) and nil or copy_payload(filtered_objects),
+      objects = objects,
       error = data.error,
       error_kind = data.error_kind,
     })

@@ -8,6 +8,7 @@
 ---@field private schema_items lsp.CompletionItem[]
 ---@field private table_items_by_schema table<string, lsp.CompletionItem[]>
 ---@field private all_table_items lsp.CompletionItem[]
+---@field private all_table_item_source_by_label table<string, string>
 ---@field private column_items_by_key table<string, lsp.CompletionItem[]>
 ---@field private schema_lookup table<string, string>
 ---@field private table_lookup_by_schema table<string, table<string, string>>
@@ -160,6 +161,7 @@ function SchemaCache:new(handler, conn_id)
     schema_items = {},
     table_items_by_schema = {},
     all_table_items = {},
+    all_table_item_source_by_label = {},
     column_items_by_key = {},
     schema_lookup = {},
     table_lookup_by_schema = {},
@@ -457,6 +459,7 @@ function SchemaCache:_reset_indexes()
   self.schema_items = {}
   self.table_items_by_schema = {}
   self.all_table_items = {}
+  self.all_table_item_source_by_label = {}
   self.column_items_by_key = {}
   self.schema_lookup = {}
   self.table_lookup_by_schema = {}
@@ -474,6 +477,7 @@ function SchemaCache:_rebuild_structure_indexes()
   self.schema_items = {}
   self.table_items_by_schema = {}
   self.all_table_items = {}
+  self.all_table_item_source_by_label = {}
   self.schema_lookup = {}
   self.table_lookup_by_schema = {}
   self.table_lookup_global = {}
@@ -518,6 +522,7 @@ function SchemaCache:_refresh_global_table_index()
   self.table_lookup_global = {}
   self.all_table_items = {}
   self.all_table_names = {}
+  self.all_table_item_source_by_label = {}
 
   local schema_names = vim.tbl_keys(self.schemas)
   table.sort(schema_names)
@@ -530,6 +535,7 @@ function SchemaCache:_refresh_global_table_index()
         or { name = item.label, schema = schema }
       if not seen[item.label] then
         seen[item.label] = true
+        self.all_table_item_source_by_label[item.label] = schema
         self.all_table_items[#self.all_table_items + 1] = vim.deepcopy(item)
       end
     end
@@ -544,37 +550,25 @@ function SchemaCache:_refresh_global_table_index()
 end
 
 ---@private
----@param label string
-function SchemaCache:_update_global_table_index_for_label(label)
-  local folded = self:_fold(label)
-  self.table_lookup_global[folded] = nil
-
-  local schema_names = vim.tbl_keys(self.schemas)
-  table.sort(schema_names)
-
-  local representative = nil
-  for _, schema in ipairs(schema_names) do
-    local lookup = self.table_lookup_by_schema[schema]
-    if lookup and lookup[folded] then
-      self.table_lookup_global[folded] = {
-        name = lookup[folded],
-        schema = schema,
-      }
-      break
-    end
+---@param schema string
+---@param name string
+---@param table_type string
+function SchemaCache:_update_global_table_index_for_table(schema, name, table_type)
+  local folded = self:_fold(name)
+  local current = self.table_lookup_global[folded]
+  if not current or schema < current.schema or current.schema == schema then
+    self.table_lookup_global[folded] = {
+      name = name,
+      schema = schema,
+    }
   end
 
-  for _, schema in ipairs(schema_names) do
-    local info = self.tables[schema] and self.tables[schema][label]
-    if info then
-      representative = table_completion_item(schema, label, info.type)
-      break
-    end
-  end
-
-  if representative then
-    upsert_sorted_item(self.all_table_items, vim.deepcopy(representative))
-    upsert_sorted_value(self.all_table_names, representative.label)
+  local current_source = self.all_table_item_source_by_label[name]
+  if not current_source or schema < current_source or current_source == schema then
+    self.all_table_item_source_by_label[name] = schema
+    local item = table_completion_item(schema, name, table_type)
+    upsert_sorted_item(self.all_table_items, vim.deepcopy(item))
+    upsert_sorted_value(self.all_table_names, item.label)
   end
 end
 
@@ -615,7 +609,7 @@ function SchemaCache:_upsert_table_index(schema, name, table_type)
   end
   local item = table_completion_item(schema, name, table_type)
   upsert_sorted_item(self.table_items_by_schema[schema], item)
-  self:_update_global_table_index_for_label(name)
+  self:_update_global_table_index_for_table(schema, name, table_type)
 end
 
 ---@private
