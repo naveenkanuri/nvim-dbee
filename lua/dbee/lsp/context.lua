@@ -864,106 +864,175 @@ local function parse_statement_table_refs(statement)
   local refs = {}
   local matches = {}
 
-  local function add_matches(keyword, specificity)
-    local pattern = "()%f[%a]" .. keyword_pattern(keyword) .. "%f[%A]%s+()([^%s,;%(%)]+)%s*([%w_]*)"
-    local init = 1
-    while true do
-      local match_start, match_end, _, ref_start, ref, alias = statement.text:find(pattern, init)
-      if not match_start then
+  local tokens = scan_statement_tokens(statement)
+  local from_boundaries = {
+    select = true,
+    where = true,
+    join = true,
+    inner = true,
+    left = true,
+    right = true,
+    full = true,
+    cross = true,
+    outer = true,
+    on = true,
+    group = true,
+    order = true,
+    having = true,
+    limit = true,
+    offset = true,
+    union = true,
+    set = true,
+    values = true,
+  }
+
+  local function token_lower(token)
+    if not token or token.quoted == true then
+      return nil
+    end
+    return token.name:lower()
+  end
+
+  local function token_keyword(token)
+    local lower = token_lower(token)
+    return lower and sql_keywords_set[lower] == true
+  end
+
+  local function from_boundary(token)
+    local lower = token_lower(token)
+    return lower and from_boundaries[lower] == true
+  end
+
+  local function separator_between(left_end, right_start)
+    if not left_end or not right_start or right_start <= left_end then
+      return ""
+    end
+    return statement.text:sub(left_end, right_start - 1)
+  end
+
+  local function dot_between(left, right)
+    if not left or not right then
+      return false
+    end
+    return separator_between(left.offset_end, right.offset_start):match("^%s*%.%s*$") ~= nil
+  end
+
+  local function parse_table_at(index, specificity)
+    local first = tokens[index]
+    if not first or token_keyword(first) then
+      return nil, index + 1
+    end
+
+    local second = tokens[index + 1]
+    if second and not token_keyword(second) and dot_between(first, second) then
+      return {
+        pos = first.offset_start,
+        specificity = specificity,
+        ref_start = first.offset_start,
+        ref_end = second.offset_end,
+        ref = first.raw .. "." .. second.raw,
+        schema = first.name,
+        schema_quoted = first.quoted,
+        schema_range = first.range,
+        table = second.name,
+        table_quoted = second.quoted,
+        table_range = second.range,
+      }, index + 2
+    end
+
+    return {
+      pos = first.offset_start,
+      specificity = specificity,
+      ref_start = first.offset_start,
+      ref_end = first.offset_end,
+      ref = first.raw,
+      table = first.name,
+      table_quoted = first.quoted,
+      table_range = first.range,
+    }, index + 1
+  end
+
+  local function attach_alias(ref, index)
+    local token = tokens[index]
+    if not ref or not token then
+      return index
+    end
+    if separator_between(ref.ref_end, token.offset_start):find(",", 1, true) then
+      return index
+    end
+
+    local alias_token
+    local lower = token_lower(token)
+    if lower == "as" then
+      local candidate = tokens[index + 1]
+      if candidate and not token_keyword(candidate) then
+        alias_token = candidate
+        index = index + 2
+      else
+        return index + 1
+      end
+    elseif not from_boundary(token) and not token_keyword(token) then
+      alias_token = token
+      index = index + 1
+    else
+      return index
+    end
+
+    ref.alias = alias_token.name
+    ref.alias_key = alias_token.name:lower()
+    return index
+  end
+
+  local function add_match(ref)
+    if ref then
+      matches[#matches + 1] = ref
+    end
+  end
+
+  local function parse_from_list(start_index)
+    local index = start_index
+    while index <= #tokens do
+      if from_boundary(tokens[index]) then
         break
       end
-      local parsed = M.parse_table_ref(ref)
-      if parsed then
-        local alias_lower = alias and alias:lower() or ""
-        if sql_keywords_set[alias_lower] then
-          alias = nil
-          alias_lower = ""
-        end
-        matches[#matches + 1] = {
-          pos = match_start,
-          specificity = specificity,
-          ref_start = ref_start,
-          ref_end = ref_start + #ref,
-          ref = ref,
-          alias = alias and alias ~= "" and alias or nil,
-          alias_key = alias_lower ~= "" and alias_lower or nil,
-          schema = parsed.schema,
-          schema_quoted = parsed.schema_quoted,
-          table = parsed.table,
-          table_quoted = parsed.table_quoted,
-        }
+      local ref
+      ref, index = parse_table_at(index, 1)
+      if ref then
+        index = attach_alias(ref, index)
+        add_match(ref)
       end
-      init = match_end + 1
     end
   end
 
-  local function first_clause_boundary(text, start_index)
-    local boundary = text:find(";", start_index, true)
-    for _, keyword in ipairs({ "select", "where", "join", "on", "group", "order", "having", "limit", "union" }) do
-      local found = text:find("%f[%a]" .. keyword_pattern(keyword) .. "%f[%A]", start_index)
-      if found and (not boundary or found < boundary) then
-        boundary = found
-      end
+  local function parse_single_after(keyword, start_index, specificity)
+    local index = start_index
+    while tokens[index] and token_lower(tokens[index]) == "as" do
+      index = index + 1
     end
-    return boundary
-  end
-
-  local function add_from_list_matches()
-    local pattern = "()%f[%a]" .. keyword_pattern("from") .. "%f[%A]%s+()"
-    local init = 1
-    while true do
-      local match_start, list_start = statement.text:find(pattern, init)
-      if not match_start then
-        break
-      end
-      local boundary = first_clause_boundary(statement.text, list_start)
-      local list_end = boundary and (boundary - 1) or #statement.text
-      local item_start = list_start
-      while item_start <= list_end do
-        local comma = statement.text:find(",", item_start, true)
-        local item_end = comma and math.min(comma - 1, list_end) or list_end
-        local chunk = statement.text:sub(item_start, item_end)
-        local leading, ref, alias = chunk:match("^(%s*)([^%s,;%(%)]+)%s*([%w_]*)")
-        if ref then
-          local ref_start = item_start + #leading
-          local parsed = M.parse_table_ref(ref)
-          if parsed then
-            local alias_lower = alias and alias:lower() or ""
-            if sql_keywords_set[alias_lower] then
-              alias = nil
-              alias_lower = ""
-            end
-            matches[#matches + 1] = {
-              pos = match_start,
-              specificity = 1,
-              ref_start = ref_start,
-              ref_end = ref_start + #ref,
-              ref = ref,
-              alias = alias and alias ~= "" and alias or nil,
-              alias_key = alias_lower ~= "" and alias_lower or nil,
-              schema = parsed.schema,
-              schema_quoted = parsed.schema_quoted,
-              table = parsed.table,
-              table_quoted = parsed.table_quoted,
-            }
-          end
-        end
-        if not comma or comma > list_end then
-          break
-        end
-        item_start = comma + 1
-      end
-      init = list_end + 1
+    local ref
+    ref, index = parse_table_at(index, specificity)
+    if ref then
+      attach_alias(ref, index)
+      add_match(ref)
     end
   end
 
-  add_from_list_matches()
-  for _, keyword in ipairs({ "join", "update", "into" }) do
-    add_matches(keyword, 1)
+  local index = 1
+  while index <= #tokens do
+    local lower = token_lower(tokens[index])
+    if lower == "from" then
+      parse_from_list(index + 1)
+    elseif lower == "join" or lower == "update" or lower == "into" then
+      parse_single_after(lower, index + 1, 1)
+    end
+    index = index + 1
   end
 
   table.sort(matches, function(a, b)
     if a.pos == b.pos then
+      if a.specificity == b.specificity then
+        return (a.ref_start or 0) < (b.ref_start or 0)
+      end
       return a.specificity < b.specificity
     end
     return a.pos < b.pos
@@ -984,6 +1053,10 @@ local function ref_with_ranges(statement, ref)
     start = M.statement_offset_to_position(statement, ref.ref_start),
     ["end"] = M.statement_offset_to_position(statement, ref.ref_end),
   }
+
+  if enriched.schema_range and enriched.table_range then
+    return enriched
+  end
 
   local parts = split_identifier_ref(ref.ref)
   if parts and #parts == 2 then
