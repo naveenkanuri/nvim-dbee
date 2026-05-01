@@ -40,9 +40,13 @@ end
 ---@class DrawerUINode: NuiTree.Node
 ---@field id string unique identifier
 ---@field name string display name
----@field type ""|"table"|"view"|"procedure"|"function"|"column"|"history"|"note"|"connection"|"database_switch"|"add"|"edit"|"remove"|"help"|"source"|"separator"|"load_more" type of node
+---@field type ""|"table"|"view"|"procedure"|"function"|"column"|"history"|"note"|"connection"|"folder"|"database_switch"|"add"|"edit"|"remove"|"help"|"source"|"separator"|"load_more" type of node
 ---@field schema? string
 ---@field raw_name? string
+---@field folder_id? string
+---@field conn_id? string
+---@field source_meta? table
+---@field search_text? string
 ---@field action_1? drawer_node_action primary action if function takes a second selection parameter, pick_items get picked before the call
 ---@field action_2? drawer_node_action secondary action if function takes a second selection parameter, pick_items get picked before the call
 ---@field action_3? drawer_node_action tertiary action if function takes a second selection parameter, pick_items get picked before the call

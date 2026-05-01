@@ -37,6 +37,14 @@ function M.structure_node_id(parent_id, struct)
 end
 
 ---@param parent_id string
+---@param source_id string
+---@param folder_id string
+---@return string
+function M.folder_node_id(parent_id, source_id, folder_id)
+  return parent_id .. ID_SEP .. encode_node_segment({ "folder", source_id, folder_id })
+end
+
+---@param parent_id string
 ---@param column Column
 ---@return string
 function M.column_node_id(parent_id, column)
@@ -218,6 +226,47 @@ function M.decorate_connection_node(node, handler, source_meta, conn_id, opts)
   return node
 end
 
+---@param node DrawerUINode|table
+---@param handler Handler
+---@param source_meta { id: string }
+---@param folder_id string
+function M.decorate_folder_node(node, handler, source_meta, folder_id)
+  node.action_2 = function(cb, _, input)
+    input {
+      title = "Rename folder: " .. tostring(node.raw_name or ""),
+      default = node.raw_name or "",
+      on_confirm = function(new_name)
+        if new_name and new_name ~= "" then
+          local ok, err = pcall(handler.source_rename_folder, handler, source_meta.id, folder_id, new_name)
+          if not ok then
+            utils.log("error", "rename folder: " .. tostring(err))
+          end
+        end
+        cb()
+      end,
+    }
+  end
+
+  node.action_3 = function(cb, select)
+    local DELETE_LABEL = "Delete (members ungrouped)"
+    select {
+      title = "Delete folder: " .. tostring(node.raw_name or ""),
+      items = { DELETE_LABEL, "Cancel" },
+      on_confirm = function(selection)
+        if selection == DELETE_LABEL then
+          local ok, err = pcall(handler.source_remove_folder, handler, source_meta.id, folder_id)
+          if not ok then
+            utils.log("error", "delete folder: " .. tostring(err))
+          end
+        end
+        cb()
+      end,
+    }
+  end
+
+  return node
+end
+
 ---@param source Source
 ---@param source_id string
 ---@return { id: string, name: string, can_create: boolean, can_update: boolean, can_delete: boolean, file: string|nil }
@@ -254,6 +303,61 @@ local function connection_display_name(conn, source_meta, show_source_badge)
   return string.format("%s  [%s]", tostring(conn.name or conn.id), tostring(source_name or ""))
 end
 
+local connection_nodes
+
+---@param handler Handler
+---@param conn ConnectionParams
+---@param result ResultUI
+---@param structure_cache table
+---@param opts? { connection_children?: fun(conn: ConnectionParams, source_meta: table): DrawerUINode[] }
+---@param source_meta table
+---@param show_source_badge boolean
+---@return DrawerUINode
+local function build_connection_node(handler, conn, result, structure_cache, opts, source_meta, show_source_badge)
+  local node = NuiTree.Node {
+    id = conn.id,
+    name = connection_display_name(conn, source_meta, show_source_badge),
+    raw_name = conn.name,
+    type = "connection",
+    conn_id = conn.id,
+    source_meta = source_meta,
+    search_text = conn.name,
+    lazy_children = function()
+      return connection_nodes(handler, conn, result, structure_cache, opts, source_meta)
+    end,
+  } --[[@as DrawerUINode]]
+
+  M.decorate_connection_node(node, handler, source_meta, conn.id)
+  return node
+end
+
+---@param folder Folder
+---@param source_meta table
+---@param folder_id_full string
+---@param children DrawerUINode[]
+---@param handler Handler
+---@return DrawerUINode
+local function build_folder_node(folder, source_meta, folder_id_full, children, handler)
+  local node = NuiTree.Node {
+    id = folder_id_full,
+    name = "📁 " .. tostring(folder.name),
+    type = "folder",
+    raw_name = folder.name,
+    folder_id = folder.id,
+    source_meta = source_meta,
+    search_text = folder.name,
+    lazy_children = function()
+      return children
+    end,
+    action_1 = function(cb)
+      cb()
+    end,
+  } --[[@as DrawerUINode]]
+
+  M.decorate_folder_node(node, handler, source_meta, folder.id)
+  return node
+end
+
 ---@param handler Handler
 ---@param conn ConnectionParams
 ---@param result ResultUI
@@ -261,7 +365,7 @@ end
 ---@param opts? { connection_children?: fun(conn: ConnectionParams, source_meta: table): DrawerUINode[] }
 ---@param source_meta? table
 ---@return DrawerUINode[]
-local function connection_nodes(handler, conn, result, structure_cache, opts, source_meta)
+function connection_nodes(handler, conn, result, structure_cache, opts, source_meta)
   if opts and type(opts.connection_children) == "function" then
     return opts.connection_children(conn, source_meta)
   end
@@ -355,26 +459,40 @@ local function handler_real_nodes(handler, result, structure_cache, opts)
 
   local sources = handler:get_sources()
   local show_source_badge = #sources > 1
+  local root_id = "__handler_root__"
 
   for _, source in ipairs(sources) do
     local source_id = source:name()
     local source_meta = build_source_meta(source, source_id)
+    local folders = {}
+    if type(handler.source_get_folders) == "function" then
+      folders = handler:source_get_folders(source_id)
+    end
+    local conns = handler:source_get_connections(source_id)
+    local conn_by_id = {}
+    for _, conn in ipairs(conns) do
+      conn_by_id[conn.id] = conn
+    end
 
-    -- get connections of that source
-    for _, conn in ipairs(handler:source_get_connections(source_id)) do
-      local node = NuiTree.Node {
-        id = conn.id,
-        name = connection_display_name(conn, source_meta, show_source_badge),
-        raw_name = conn.name,
-        type = "connection",
-        lazy_children = function()
-          return connection_nodes(handler, conn, result, structure_cache, opts, source_meta)
-        end,
-      } --[[@as DrawerUINode]]
+    local in_folder = {}
+    for _, folder in ipairs(folders) do
+      local folder_id_full = M.folder_node_id(root_id, source_id, folder.id)
+      local children = {}
+      for _, conn_id in ipairs(folder.connection_ids or {}) do
+        local conn = conn_by_id[conn_id]
+        if conn then
+          in_folder[conn_id] = true
+          children[#children + 1] =
+            build_connection_node(handler, conn, result, structure_cache, opts, source_meta, show_source_badge)
+        end
+      end
+      nodes[#nodes + 1] = build_folder_node(folder, source_meta, folder_id_full, children, handler)
+    end
 
-      M.decorate_connection_node(node, handler, source_meta, conn.id)
-
-      table.insert(nodes, node)
+    for _, conn in ipairs(conns) do
+      if not in_folder[conn.id] then
+        nodes[#nodes + 1] = build_connection_node(handler, conn, result, structure_cache, opts, source_meta, show_source_badge)
+      end
     end
   end
 
