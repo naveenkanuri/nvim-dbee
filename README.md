@@ -166,6 +166,8 @@ require("dbee").setup({
   lsp = {
     diagnostics_mode = "debounce_didchange", -- "debounce_didchange", "save_only", or "off"
     diagnostics_debounce_ms = 250,
+    hover = true,
+    resolve = true,
   },
 })
 ```
@@ -174,6 +176,12 @@ Cold table or schema-qualified alias completion now returns promptly while
 columns warm asynchronously. Trigger completion again after warmup to receive
 the full column list. External completion stacks such as `cmp-dbee` remain
 supported for custom setups.
+
+The built-in LSP also advertises cache-backed hover and
+`completionItem/resolve` by default. Set `lsp.hover = false` or
+`lsp.resolve = false` to suppress those capabilities. Hover and resolve use
+already-loaded schema cache data only, so details may be minimal until table
+columns have warmed.
 
 Here are the defaults:
 

@@ -1,4 +1,6 @@
 local context = require("dbee.lsp.context")
+local hover = require("dbee.lsp.hover")
+local resolve = require("dbee.lsp.resolve")
 
 local M = {}
 local DIAGNOSTIC_NS = vim.api.nvim_create_namespace("dbee/lsp")
@@ -33,11 +35,13 @@ end
 ---@param opts? table
 ---@return lsp.CompletionItem[]
 local function table_completions(cache, schema, opts)
+  opts = opts or {}
+  opts.include_data = true
   if schema then
     return cache:get_table_completion_items(schema, opts)
   end
 
-  return cache:get_all_table_completion_items()
+  return cache:get_all_table_completion_items({ include_data = true })
 end
 
 --- Build completion items for column names of a specific table.
@@ -103,6 +107,7 @@ local function column_completions(cache, table_ref, alias_info)
     return completion_result(cache:get_column_completion_items(actual_schema, actual_name, {
       schema_quoted = true,
       table_quoted = true,
+      include_data = true,
     }), false)
   end
 
@@ -139,7 +144,7 @@ end
 ---@param cache SchemaCache
 ---@return lsp.CompletionItem[]
 local function schema_completions(cache)
-  return cache:get_schema_completion_items()
+  return cache:get_schema_completion_items({ include_data = true })
 end
 
 --- Build completion items for SQL keywords.
@@ -173,6 +178,8 @@ local function get_completions(params, cache)
 
   if ctx == "table_in_schema" then
     if type(cache.get_schema_table_completion_async) == "function" then
+      alias_info = alias_info or {}
+      alias_info.include_data = true
       local schema_result = cache:get_schema_table_completion_async(extra, alias_info)
       return completion_result(schema_result.items or {}, schema_result.is_incomplete == true)
     end
@@ -224,6 +231,32 @@ local function get_lsp_diagnostics_config()
   return {
     diagnostics_mode = lsp.diagnostics_mode or defaults.diagnostics_mode,
     diagnostics_debounce_ms = lsp.diagnostics_debounce_ms or defaults.diagnostics_debounce_ms,
+  }
+end
+
+local function get_lsp_feature_config(opts)
+  local defaults = {
+    hover = true,
+    resolve = true,
+  }
+  if opts and type(opts.lsp) == "table" then
+    return {
+      hover = opts.lsp.hover ~= false,
+      resolve = opts.lsp.resolve ~= false,
+    }
+  end
+  local ok, state = pcall(require, "dbee.api.state")
+  if not ok or not state or type(state.config) ~= "function" then
+    return defaults
+  end
+  local config_ok, cfg = pcall(state.config)
+  local lsp = config_ok and cfg and cfg.lsp or nil
+  if type(lsp) ~= "table" then
+    return defaults
+  end
+  return {
+    hover = lsp.hover ~= false,
+    resolve = lsp.resolve ~= false,
   }
 end
 
@@ -366,12 +399,16 @@ end
 --- Create an in-process LSP RPC client.
 --- Returns a function suitable for vim.lsp.start({ cmd = ... }).
 ---@param cache SchemaCache
+---@param opts? table
 ---@return fun(dispatchers: table, config: table): table
-function M.create(cache)
+function M.create(cache, opts)
   local closing = false
   local msg_id = 0
   local diagnostic_timers = {}
   local diagnostic_buffers = {}
+  local feature_config = get_lsp_feature_config(opts)
+  local resolve_memo = {}
+  local client_capabilities = nil
 
   return function(dispatchers, config)
     local diagnostic_refresh_scheduled = false
@@ -488,11 +525,13 @@ function M.create(cache)
         local current_id = msg_id
 
         if method == "initialize" then
+          client_capabilities = params and params.capabilities or nil
           callback(nil, {
             capabilities = {
+              hoverProvider = feature_config.hover and true or nil,
               completionProvider = {
                 triggerCharacters = { ".", " " },
-                resolveProvider = false,
+                resolveProvider = feature_config.resolve == true,
               },
               textDocumentSync = {
                 openClose = true,
@@ -507,6 +546,15 @@ function M.create(cache)
         elseif method == "shutdown" then
           closing = true
           callback(nil, nil)
+        elseif method == "textDocument/hover" then
+          local ok, result = pcall(hover.handle, params, cache, {
+            enabled = feature_config.hover,
+            client_capabilities = client_capabilities,
+          })
+          if not ok then
+            result = nil
+          end
+          callback(nil, result)
         elseif method == "textDocument/completion" then
           -- Completion must stay cache/async-only; sync column misses are not
           -- allowed on the request path.
@@ -518,6 +566,16 @@ function M.create(cache)
             items = result.items or {},
             isIncomplete = result.isIncomplete == true,
           })
+        elseif method == "completionItem/resolve" then
+          local ok, result = pcall(resolve.handle, params, cache, {
+            enabled = feature_config.resolve,
+            client_capabilities = client_capabilities,
+            memo = resolve_memo,
+          })
+          if not ok then
+            result = params
+          end
+          callback(nil, result)
         else
           callback(nil, nil)
         end

@@ -431,9 +431,14 @@ end
 ---@param conn_id connection_id
 ---@return boolean
 function M._start_lsp(cache, conn_id)
+  local cfg = {}
+  local ok_config, current_config = pcall(state.config)
+  if ok_config and current_config and type(current_config.lsp) == "table" then
+    cfg.lsp = current_config.lsp
+  end
   local client_id = vim.lsp.start({
     name = "dbee-lsp",
-    cmd = server.create(cache),
+    cmd = server.create(cache, cfg),
     root_dir = vim.fn.getcwd(),
   })
 

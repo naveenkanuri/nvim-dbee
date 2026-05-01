@@ -23,6 +23,7 @@ LSP01_PERF_STATE_HOME ?= $(LSP01_PERF_ARTIFACT_DIR)/state-home
 UX13_ROLLUP_SCRIPT ?= $(CURDIR)/ci/headless/check_ux13_rollup.lua
 UX13_ROLLUP_ARTIFACT_DIR ?= $(LSP01_PERF_ARTIFACT_DIR)
 UX13_ROLLUP_LOG ?= $(UX13_ROLLUP_ARTIFACT_DIR)/ux13-rollup-stdout.log
+LSP12_ROLLUP_SCRIPT ?= $(CURDIR)/ci/headless/check_lsp12_rollup.lua
 ARCH14_ROLLUP_SCRIPT ?= $(CURDIR)/ci/headless/check_arch14_rollup.lua
 ARCH14_ROLLUP_LOG ?= $(UX13_ROLLUP_LOG)
 
@@ -107,6 +108,7 @@ perf-lsp: perf-bootstrap
 	  check_lsp_disk_cache_safety.lua \
 	  check_lsp_async_completion.lua \
 	  check_lsp_completion_refresh.lua \
+	  check_lsp12_hover_resolve.lua \
 	  check_lsp_diagnostics_correctness.lua \
 	  check_lsp_diagnostics_debounce.lua \
 	  check_lsp_schema_filter_lazy.lua \
@@ -133,6 +135,8 @@ perf-lsp: perf-bootstrap
 	  DRAW01_PERF_THRESHOLD_FILE="$(DRAW01_PERF_THRESHOLD_FILE)" \
 	  NVIM_BIN="$(NVIM_BIN)" \
 	  PERF_PLUGIN_ROOT="$(PERF_PLUGIN_ROOT)"; \
+	run_logged "lsp12-rollup" env LSP12_ROLLUP_LOG="$(UX13_ROLLUP_LOG)" \
+	  $(PERF_NVIM_HEADLESS) -c "luafile $(LSP12_ROLLUP_SCRIPT)"; \
 	run_logged "ux13-rollup" env UX13_ROLLUP_LOG="$(UX13_ROLLUP_LOG)" \
 	  $(PERF_NVIM_HEADLESS) -c "luafile $(UX13_ROLLUP_SCRIPT)"; \
 	run_logged "arch14-rollup" env ARCH14_ROLLUP_LOG="$(ARCH14_ROLLUP_LOG)" \

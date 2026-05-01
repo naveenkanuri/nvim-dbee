@@ -20,6 +20,8 @@
 ---@field private async_chains table<string, table>
 ---@field private async_failed table<string, boolean>
 ---@field private next_async_request_id integer
+---@field private metadata_generation integer
+---@field private cache_identity_value string
 ---@field private cache_dir string directory for disk cache
 local SchemaCache = {}
 
@@ -178,6 +180,7 @@ function SchemaCache:new(handler, conn_id)
     completion_refresh_pending = {},
     completion_refresh_notifier = nil,
     next_async_request_id = 0,
+    metadata_generation = 0,
     cache_dir = cache_dir,
     fold_id = normalized_scope.fold,
     schema_scope = normalized_scope,
@@ -192,7 +195,14 @@ function SchemaCache:new(handler, conn_id)
   }
   setmetatable(o, self)
   self.__index = self
+  o.cache_identity_value = tostring(conn_id or "") .. "|" .. tostring(o)
   return o
+end
+
+---@private
+---@param _reason string?
+function SchemaCache:_bump_metadata_generation(_reason)
+  self.metadata_generation = (self.metadata_generation or 0) + 1
 end
 
 ---@private
@@ -216,6 +226,7 @@ function SchemaCache:refresh_schema_scope()
   self.schema_scope = normalized_scope
   self.schema_filter_signature = normalized_scope.schema_filter_signature
   if normalized_scope.fail_closed == true then
+    self:_bump_metadata_generation("refresh_schema_scope_fail_closed")
     self:cancel_async("schema-filter-authority-unavailable", { conn_id = self.conn_id })
     self.schemas = {}
     self.tables = {}
@@ -225,7 +236,11 @@ function SchemaCache:refresh_schema_scope()
     self.root_mode = "full"
     self:_reset_indexes()
   end
-  return previous_signature ~= nil and previous_signature ~= self.schema_filter_signature
+  local changed = previous_signature ~= nil and previous_signature ~= self.schema_filter_signature
+  if changed and normalized_scope.fail_closed ~= true then
+    self:_bump_metadata_generation("refresh_schema_scope")
+  end
+  return changed
 end
 
 ---@param notifier? fun(payload: table)
@@ -325,6 +340,7 @@ end
 --- Each row is a map with schema_name, table_name, obj_type keys (case-insensitive).
 ---@param rows table[] array of {schema_name: string, table_name: string, obj_type: string}
 function SchemaCache:build_from_metadata_rows(rows)
+  self:_bump_metadata_generation("build_from_metadata_rows")
   self.schemas = {}
   self.tables = {}
   self.columns = {}
@@ -369,6 +385,7 @@ end
 --- NEVER calls connection_get_structure() — structure must be provided.
 ---@param structs DBStructure[]
 function SchemaCache:build_from_structure(structs)
+  self:_bump_metadata_generation("build_from_structure")
   self.schemas = {}
   self.tables = {}
   self.columns = {}
@@ -390,6 +407,7 @@ end
 ---@param schemas table[] array of {name: string}
 ---@param opts? { preserve_loaded?: boolean }
 function SchemaCache:build_from_schemas(schemas, opts)
+  self:_bump_metadata_generation("build_from_schemas")
   opts = opts or {}
   local preserve_loaded = opts.preserve_loaded ~= false
   local previous_tables = self.tables or {}
@@ -736,6 +754,7 @@ end
 ---@param name string
 ---@param table_type string
 function SchemaCache:_upsert_table_index(schema, name, table_type)
+  self:_bump_metadata_generation("_upsert_table_index")
   table_type = table_type or "table"
   local new_schema = not self.schemas[schema]
   self.schemas[schema] = true
@@ -818,6 +837,7 @@ end
 ---@param key string
 ---@param cols Column[]
 function SchemaCache:_store_columns(key, cols)
+  self:_bump_metadata_generation("_store_columns")
   self.columns[key] = cols
   self:_touch_column(key)
 
@@ -1705,6 +1725,7 @@ function SchemaCache:load_from_disk()
     return false
   end
 
+  self:_bump_metadata_generation("load_from_disk")
   self.schemas = {}
   self.tables = {}
   self.columns = {}
@@ -1938,6 +1959,227 @@ local function quoted_option(opts, primary, fallback)
   return nil
 end
 
+---@private
+---@param column_name string?
+---@param candidate string?
+---@param quoted boolean?
+---@return boolean
+function SchemaCache:_column_name_matches(column_name, candidate, quoted)
+  if type(column_name) ~= "string" or type(candidate) ~= "string" then
+    return false
+  end
+  if self.fold_id == "case_insensitive" then
+    return schema_name_canonical.equivalent(column_name, quoted == true, candidate, quoted == true, self.fold_id)
+  end
+  if quoted == true then
+    return column_name == candidate
+  end
+  if quoted == false then
+    if not self:_can_fold_alias(column_name) then
+      return false
+    end
+    return schema_name_canonical.equivalent(column_name, false, candidate, false, self.fold_id)
+  end
+  if column_name == candidate then
+    return true
+  end
+  if not self:_can_fold_alias(column_name) then
+    return false
+  end
+  return schema_name_canonical.equivalent(column_name, false, candidate, false, self.fold_id)
+end
+
+---@private
+---@param key string
+---@param column_name string
+---@param quoted boolean?
+---@return Column?
+function SchemaCache:_find_cached_column(key, column_name, quoted)
+  for _, col in ipairs(self.columns[key] or {}) do
+    if self:_column_name_matches(col.name, column_name, quoted) then
+      return col
+    end
+  end
+  return nil
+end
+
+---@private
+---@param kind "schema"|"table"|"column"
+---@param identity table
+---@return table
+function SchemaCache:_completion_data(kind, identity)
+  return {
+    source = "dbee",
+    version = 1,
+    kind = kind,
+    schema = identity.schema,
+    table = identity.table,
+    column = identity.column,
+    schema_quoted = identity.schema ~= nil and true or nil,
+    table_quoted = identity.table ~= nil and true or nil,
+    column_quoted = identity.column ~= nil and true or nil,
+    schema_exact = identity.schema,
+    table_exact = identity.table,
+    column_exact = identity.column,
+    canonical_path = table.concat({
+      tostring(identity.schema or ""),
+      tostring(identity.table or ""),
+      tostring(identity.column or ""),
+    }, "."),
+    cache_identity = self:cache_identity(),
+    cache_generation = self:generation(),
+    root_epoch = self:_authoritative_root_epoch(),
+  }
+end
+
+---@private
+---@param items lsp.CompletionItem[]
+---@param kind "schema"|"table"|"column"
+---@param identity_for_item fun(item: lsp.CompletionItem): table?
+---@return lsp.CompletionItem[]
+function SchemaCache:_copy_items_with_data(items, kind, identity_for_item)
+  local copied = copy_items(items)
+  for _, item in ipairs(copied) do
+    local identity = identity_for_item(item)
+    if identity then
+      item.data = self:_completion_data(kind, identity)
+    end
+  end
+  return copied
+end
+
+---@return integer
+function SchemaCache:generation()
+  return self.metadata_generation or 0
+end
+
+---@return string
+function SchemaCache:cache_identity()
+  return self.cache_identity_value or tostring(self.conn_id or "")
+end
+
+---@return SchemaFilterAuthority
+function SchemaCache:read_lsp_authority()
+  return schema_filter_authority.read(self.handler, self.conn_id)
+end
+
+---@param schema string?
+---@param scope table?
+---@return boolean
+function SchemaCache:schema_in_current_scope(schema, scope)
+  if not schema or schema == "" then
+    return false
+  end
+  local active_scope = scope or self.schema_scope
+  return schema_filter.matches(schema, active_scope)
+end
+
+---@private
+---@return table?
+function SchemaCache:_fresh_lsp_scope()
+  local authority = self:read_lsp_authority()
+  if authority.status == "authority_unavailable" then
+    return nil, "authority_unavailable"
+  end
+  if authority.status == "api_absent_legacy" then
+    return schema_filter_authority.legacy_implicit_all(), nil
+  end
+  return authority.scope, nil
+end
+
+---@param schema string
+---@param opts? { schema_quoted?: boolean, quoted?: boolean }
+---@return table? metadata, string? reason
+function SchemaCache:get_schema_metadata(schema, opts)
+  opts = opts or {}
+  local scope, reason = self:_fresh_lsp_scope()
+  if not scope then
+    return nil, reason
+  end
+  local actual_schema = self:find_schema(schema, {
+    quoted = quoted_option(opts, "schema_quoted", "quoted"),
+  })
+  if not actual_schema or not self:schema_in_current_scope(actual_schema, scope) then
+    return nil, "missing_or_filtered"
+  end
+
+  local table_names = vim.tbl_keys(self.tables[actual_schema] or {})
+  table.sort(table_names)
+  return {
+    kind = "schema",
+    schema = actual_schema,
+    tables = table_names,
+    table_count = #table_names,
+    loaded = self.root_mode ~= "schemas_only" or self:_schema_loaded_in(actual_schema, self.loaded_schemas),
+  }
+end
+
+---@param schema string?
+---@param table_name string
+---@param opts? { schema_quoted?: boolean, table_quoted?: boolean }
+---@return table? metadata, string? reason
+function SchemaCache:get_table_metadata(schema, table_name, opts)
+  opts = opts or {}
+  local scope, reason = self:_fresh_lsp_scope()
+  if not scope then
+    return nil, reason
+  end
+
+  local actual_schema, actual_table
+  if schema and schema ~= "" then
+    actual_table, actual_schema = self:find_table_in_schema(schema, table_name, opts)
+  else
+    actual_table, actual_schema = self:find_table(table_name, { table_quoted = opts.table_quoted })
+  end
+  if not actual_schema or not actual_table or not self:schema_in_current_scope(actual_schema, scope) then
+    return nil, "missing_or_filtered"
+  end
+
+  local info = (self.tables[actual_schema] or {})[actual_table]
+  if not info then
+    return nil, "missing"
+  end
+
+  local key = table_key(actual_schema, actual_table)
+  local columns = self.columns[key]
+  return {
+    kind = "table",
+    schema = actual_schema,
+    table = actual_table,
+    table_type = info.type or "table",
+    columns = columns and vim.deepcopy(columns) or nil,
+    column_count = columns and #columns or nil,
+    columns_loaded = columns ~= nil,
+  }
+end
+
+---@param schema string?
+---@param table_name string
+---@param column_name string
+---@param opts? { schema_quoted?: boolean, table_quoted?: boolean, column_quoted?: boolean }
+---@return table? metadata, string? reason
+function SchemaCache:get_column_metadata(schema, table_name, column_name, opts)
+  opts = opts or {}
+  local table_meta, reason = self:get_table_metadata(schema, table_name, opts)
+  if not table_meta then
+    return nil, reason
+  end
+
+  local key = table_key(table_meta.schema, table_meta.table)
+  local col = self:_find_cached_column(key, column_name, opts.column_quoted)
+  if not col then
+    return nil, "missing_column"
+  end
+
+  local meta = vim.deepcopy(col)
+  meta.kind = "column"
+  meta.schema = table_meta.schema
+  meta.table = table_meta.table
+  meta.column = col.name
+  meta.type = col.type
+  return meta
+end
+
 --- Get all schema names.
 ---@return string[]
 function SchemaCache:get_schemas()
@@ -1960,9 +2202,15 @@ function SchemaCache:get_all_table_names()
 end
 
 --- Get precomputed schema completion items.
+---@param opts? { include_data?: boolean }
 ---@return lsp.CompletionItem[]
-function SchemaCache:get_schema_completion_items()
-  return copy_items(self.schema_items)
+function SchemaCache:get_schema_completion_items(opts)
+  if not (opts and opts.include_data == true) then
+    return copy_items(self.schema_items)
+  end
+  return self:_copy_items_with_data(self.schema_items, "schema", function(item)
+    return { schema = item.label }
+  end)
 end
 
 --- Get precomputed table completion items for a schema.
@@ -1972,7 +2220,15 @@ end
 function SchemaCache:get_table_completion_items(schema, opts)
   opts = opts or {}
   local actual_schema = self:find_schema(schema, { quoted = quoted_option(opts, "schema_quoted", "quoted") }) or schema
-  return copy_items(self.table_items_by_schema[actual_schema])
+  if opts.include_data ~= true then
+    return copy_items(self.table_items_by_schema[actual_schema])
+  end
+  return self:_copy_items_with_data(self.table_items_by_schema[actual_schema], "table", function(item)
+    return {
+      schema = actual_schema,
+      table = item.label,
+    }
+  end)
 end
 
 ---@param schema string
@@ -2010,7 +2266,10 @@ function SchemaCache:get_schema_table_completion_async(schema, opts)
   local status, actual_schema = self:schema_status(schema, opts)
   if status == "loaded" then
     return {
-      items = self:get_table_completion_items(actual_schema, { schema_quoted = true }),
+      items = self:get_table_completion_items(actual_schema, {
+        schema_quoted = true,
+        include_data = opts and opts.include_data == true,
+      }),
       is_incomplete = false,
     }
   end
@@ -2059,9 +2318,22 @@ function SchemaCache:get_schema_table_completion_async(schema, opts)
 end
 
 --- Get precomputed table completion items across all schemas.
+---@param opts? { include_data?: boolean }
 ---@return lsp.CompletionItem[]
-function SchemaCache:get_all_table_completion_items()
-  return copy_items(self.all_table_items)
+function SchemaCache:get_all_table_completion_items(opts)
+  if not (opts and opts.include_data == true) then
+    return copy_items(self.all_table_items)
+  end
+  return self:_copy_items_with_data(self.all_table_items, "table", function(item)
+    local schema = self.all_table_item_source_by_label[item.label]
+    if not schema then
+      return nil
+    end
+    return {
+      schema = schema,
+      table = item.label,
+    }
+  end)
 end
 
 --- Get precomputed column completion items for a table.
@@ -2076,7 +2348,16 @@ function SchemaCache:get_column_completion_items(schema, table_name, opts)
     schema_quoted = true,
     table_quoted = opts.table_quoted,
   }) or table_name
-  return copy_items(self.column_items_by_key[table_key(actual_schema, actual_table)])
+  if opts.include_data ~= true then
+    return copy_items(self.column_items_by_key[table_key(actual_schema, actual_table)])
+  end
+  return self:_copy_items_with_data(self.column_items_by_key[table_key(actual_schema, actual_table)], "column", function(item)
+    return {
+      schema = actual_schema,
+      table = actual_table,
+      column = item.label,
+    }
+  end)
 end
 
 --- Find a schema name using exact or folded semantics.
@@ -2327,6 +2608,7 @@ function SchemaCache:on_schema_objects_loaded(data)
     return false
   end
 
+  self:_bump_metadata_generation("on_schema_objects_loaded")
   self.schemas[schema] = true
   self.tables[schema] = self.tables[schema] or {}
   local filtered_objects = schema_filter.filter_structures(data.objects or {}, self.schema_scope)
@@ -2583,6 +2865,7 @@ end
 
 --- Invalidate in-memory cache (disk cache remains for next session).
 function SchemaCache:invalidate()
+  self:_bump_metadata_generation("invalidate")
   self:cancel_async("invalidate")
   self.schemas = {}
   self.tables = {}

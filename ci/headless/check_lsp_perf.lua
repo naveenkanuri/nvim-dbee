@@ -2294,6 +2294,245 @@ for _, entry in ipairs(LARGE_DISK_STARTUP_SCENARIOS) do
   register_large_disk_startup(entry)
 end
 
+local LSP12_SCENARIOS = {}
+
+local function lsp12_register(spec)
+  LSP12_SCENARIOS[#LSP12_SCENARIOS + 1] = spec
+end
+
+local function lsp12_request(client, bufnr, method, params)
+  local done = false
+  local response = nil
+  local start_ns = uv.hrtime()
+  client:request(method, params, function(err, result)
+    response = {
+      err = err,
+      result = result,
+      elapsed_ns = uv.hrtime() - start_ns,
+    }
+    done = true
+  end, bufnr)
+  local ok = vim.wait(1000, function()
+    return done
+  end, 5)
+  if not ok or not response then
+    error(method .. " timeout")
+  end
+  if response.err then
+    error(method .. " error: " .. tostring(response.err))
+  end
+  return response.result, response.elapsed_ns
+end
+
+local function lsp12_before(line)
+  local cache = make_cache(100, DEFAULT_COLUMNS_PER_TABLE, {
+    preload_columns = true,
+  })
+  local bufnr, uri = make_buffer({ line or "SELECT COL_001 FROM SCHEMA_001.TABLE_000001" })
+  local client, client_id = start_lsp(cache, bufnr)
+  return {
+    cache = cache,
+    bufnr = bufnr,
+    uri = uri,
+    client = client,
+    client_id = client_id,
+  }
+end
+
+local function lsp12_after(state)
+  completion_after(state)
+end
+
+local function lsp12_hover(state, line, needle)
+  vim.api.nvim_buf_set_lines(state.bufnr, 0, -1, false, { line })
+  local start_pos = assert(line:find(needle, 1, true), "missing hover needle " .. tostring(needle)) - 1
+  return lsp12_request(state.client, state.bufnr, "textDocument/hover", {
+    textDocument = { uri = state.uri },
+    position = { line = 0, character = start_pos },
+  })
+end
+
+local function lsp12_resolve(state, item)
+  return lsp12_request(state.client, state.bufnr, "completionItem/resolve", item)
+end
+
+local function lsp12_find_item(items, label)
+  for _, item in ipairs(items or {}) do
+    if item.label == label then
+      return item
+    end
+  end
+  return nil
+end
+
+lsp12_register({
+  slug = "HOVER_TABLE_HIT",
+  kind = "hover",
+  run = function(state)
+    local result, elapsed = lsp12_hover(state, "SELECT * FROM SCHEMA_001.TABLE_000001", "TABLE_000001")
+    if not (result and result.contents and result.contents.value:find("Table", 1, true)) then
+      error("hover table hit missing docs")
+    end
+    return elapsed
+  end,
+})
+
+lsp12_register({
+  slug = "HOVER_COLUMN_HIT",
+  kind = "hover",
+  run = function(state)
+    local result, elapsed = lsp12_hover(state, "SELECT COL_001 FROM SCHEMA_001.TABLE_000001", "COL_001")
+    if not (result and result.contents and result.contents.value:find("Column", 1, true)) then
+      error("hover column hit missing docs")
+    end
+    return elapsed
+  end,
+})
+
+lsp12_register({
+  slug = "HOVER_UNKNOWN_NIL",
+  kind = "hover",
+  run = function(state)
+    local result, elapsed = lsp12_hover(state, "SELECT MISSING_COL", "MISSING_COL")
+    if result ~= nil then
+      error("hover unknown returned docs")
+    end
+    return elapsed
+  end,
+})
+
+lsp12_register({
+  slug = "HOVER_LONG_BUFFER_CAPPED",
+  kind = "hover",
+  before = function()
+    local lines = {}
+    for i = 1, 250 do
+      lines[i] = "SELECT COL_001"
+    end
+    return lsp12_before(lines[1])
+  end,
+  run = function(state)
+    local lines = {}
+    for i = 1, 250 do
+      lines[i] = "SELECT COL_001"
+    end
+    vim.api.nvim_buf_set_lines(state.bufnr, 0, -1, false, lines)
+    local result, elapsed = lsp12_request(state.client, state.bufnr, "textDocument/hover", {
+      textDocument = { uri = state.uri },
+      position = { line = 125, character = 8 },
+    })
+    if result ~= nil then
+      error("hover long buffer cap returned docs")
+    end
+    return elapsed
+  end,
+})
+
+lsp12_register({
+  slug = "RESOLVE_TABLE_HIT",
+  kind = "resolve",
+  run = function(state)
+    local item = assert(lsp12_find_item(state.cache:get_table_completion_items("SCHEMA_001", { schema_quoted = true, include_data = true }), "TABLE_000001"))
+    local result, elapsed = lsp12_resolve(state, item)
+    if not (result and result.documentation and result.documentation.value:find("Table", 1, true)) then
+      error("resolve table hit missing docs")
+    end
+    return elapsed
+  end,
+})
+
+lsp12_register({
+  slug = "RESOLVE_COLUMN_HIT",
+  kind = "resolve",
+  run = function(state)
+    local item = assert(lsp12_find_item(state.cache:get_column_completion_items("SCHEMA_001", "TABLE_000001", {
+      schema_quoted = true,
+      table_quoted = true,
+      include_data = true,
+    }), "COL_001"))
+    local result, elapsed = lsp12_resolve(state, item)
+    if not (result and result.documentation and result.documentation.value:find("Column", 1, true)) then
+      error("resolve column hit missing docs")
+    end
+    return elapsed
+  end,
+})
+
+lsp12_register({
+  slug = "RESOLVE_STALE_INCOMPLETE",
+  kind = "resolve",
+  run = function(state)
+    local item = assert(lsp12_find_item(state.cache:get_table_completion_items("SCHEMA_001", { schema_quoted = true, include_data = true }), "TABLE_000001"))
+    state.cache:_store_columns("SCHEMA_001.TABLE_000001", make_columns("SCHEMA_001", "TABLE_000001"))
+    local result, elapsed = lsp12_resolve(state, item)
+    if not (result and result.data and result.data.dbee_resolve_status == "incomplete" and result.documentation == nil) then
+      error("resolve stale did not return incomplete")
+    end
+    return elapsed
+  end,
+})
+
+lsp12_register({
+  slug = "RESOLVE_REPEATED_MEMO",
+  kind = "resolve",
+  run = function(state)
+    local item = assert(lsp12_find_item(state.cache:get_table_completion_items("SCHEMA_001", { schema_quoted = true, include_data = true }), "TABLE_000001"))
+    local first = lsp12_resolve(state, item)
+    if not (first and first.documentation) then
+      error("resolve memo first missing docs")
+    end
+    local result, elapsed = lsp12_resolve(state, item)
+    if not (result and result.documentation and result.documentation.value == first.documentation.value) then
+      error("resolve memo second mismatch")
+    end
+    return elapsed
+  end,
+})
+
+local function run_lsp12_perf_section()
+  emit("LSP12_PERF_SCENARIOS_COUNT", #LSP12_SCENARIOS)
+  local hover_samples = {}
+  local resolve_samples = {}
+
+  for _, spec in ipairs(LSP12_SCENARIOS) do
+    local samples = {}
+    for iteration = 1, WARMUP_COUNT + MEASURED_COUNT do
+      local state = spec.before and spec.before() or lsp12_before()
+      local ok, elapsed_or_err = xpcall(function()
+        return spec.run(state)
+      end, debug.traceback)
+      lsp12_after(state)
+      if not ok then
+        fail("LSP12 " .. spec.slug .. " failed: " .. tostring(elapsed_or_err))
+      end
+      if iteration > WARMUP_COUNT then
+        samples[#samples + 1] = elapsed_or_err
+        if spec.kind == "hover" then
+          hover_samples[#hover_samples + 1] = elapsed_or_err
+        elseif spec.kind == "resolve" then
+          resolve_samples[#resolve_samples + 1] = elapsed_or_err
+        end
+      end
+    end
+    local p95 = ns_to_ms(percentile(samples, 0.95))
+    emit("LSP12_" .. spec.slug .. "_P95_MS", format_float(p95))
+    emit("LSP12_" .. spec.slug .. "_SENTINEL_OK", "true")
+  end
+
+  local hover_p95 = ns_to_ms(percentile(hover_samples, 0.95))
+  local resolve_p95 = ns_to_ms(percentile(resolve_samples, 0.95))
+  emit("LSP12_HOVER_P95_MS", format_float(hover_p95))
+  emit("LSP12_RESOLVE_P95_MS", format_float(resolve_p95))
+  emit("LSP12_HOVER_PERF_BUDGET_50MS", hover_p95 <= 50 and "true" or "unfrozen")
+  emit("LSP12_RESOLVE_PERF_BUDGET_100MS", resolve_p95 <= 100 and "true" or "unfrozen")
+  summary_rows[#summary_rows + 1] = string.format(
+    "LSP12 hover_p95_ms=%s resolve_p95_ms=%s scenarios=%d",
+    format_float(hover_p95),
+    format_float(resolve_p95),
+    #LSP12_SCENARIOS
+  )
+end
+
 run_representative_trace_workload = function()
   emit("LSP01_TRACE_WORKLOAD", "startup_cold+completion+diagnostics_didchange")
 
@@ -2364,6 +2603,8 @@ emit("LSP01_SCENARIOS_COUNT", #SCENARIOS)
 for _, spec in ipairs(SCENARIOS) do
   run_scenario(spec)
 end
+
+run_lsp12_perf_section()
 
 run_flame_trace_subprocess()
 

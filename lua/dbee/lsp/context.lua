@@ -151,6 +151,9 @@ function M.parse_table_ref(ref)
   }
 end
 
+M.parse_identifier = parse_identifier
+M.split_identifier_ref = split_identifier_ref
+
 ---@param text string
 ---@return { name: string, quoted: boolean, raw: string }?
 local function identifier_before_dot(text)
@@ -448,6 +451,337 @@ function M.analyze(params)
   end
 
   return "keyword", nil, nil
+end
+
+---@param keyword string
+---@return string
+local function keyword_pattern(keyword)
+  local parts = {}
+  for i = 1, #keyword do
+    local ch = keyword:sub(i, i)
+    if ch:match("%a") then
+      parts[#parts + 1] = "[" .. ch:lower() .. ch:upper() .. "]"
+    else
+      parts[#parts + 1] = ch
+    end
+  end
+  return table.concat(parts)
+end
+
+---@param line string
+---@return table[]
+local function scan_identifier_tokens(line)
+  local tokens = {}
+  local index = 1
+  while index <= #line do
+    local ch = line:sub(index, index)
+    if ch == '"' then
+      local start_index = index
+      local raw = { ch }
+      index = index + 1
+      local closed = false
+      while index <= #line do
+        local current = line:sub(index, index)
+        raw[#raw + 1] = current
+        if current == '"' then
+          if line:sub(index + 1, index + 1) == '"' then
+            index = index + 1
+            raw[#raw + 1] = '"'
+          else
+            closed = true
+            index = index + 1
+            break
+          end
+        else
+          index = index + 1
+        end
+      end
+      if closed then
+        local raw_text = table.concat(raw)
+        local parsed = parse_identifier(raw_text)
+        if parsed then
+          tokens[#tokens + 1] = {
+            raw = raw_text,
+            name = parsed.name,
+            quoted = true,
+            start_col = start_index - 1,
+            end_col = index - 1,
+          }
+        end
+      end
+    elseif ch:match("[%w_]") then
+      local start_index = index
+      while index <= #line and line:sub(index, index):match("[%w_]") do
+        index = index + 1
+      end
+      local raw_text = line:sub(start_index, index - 1)
+      local parsed = parse_identifier(raw_text)
+      if parsed then
+        tokens[#tokens + 1] = {
+          raw = raw_text,
+          name = parsed.name,
+          quoted = false,
+          start_col = start_index - 1,
+          end_col = index - 1,
+        }
+      end
+    else
+      index = index + 1
+    end
+  end
+  return tokens
+end
+
+---@param params table
+---@return table?
+function M.token_at_position(params)
+  if type(params) ~= "table" or not params.textDocument or not params.position then
+    return nil
+  end
+  local bufnr = vim.uri_to_bufnr(params.textDocument.uri)
+  local line_nr = params.position.line or 0
+  local col = params.position.character or 0
+  local lines = vim.api.nvim_buf_get_lines(bufnr, line_nr, line_nr + 1, false)
+  local line = lines and lines[1] or ""
+
+  for _, token in ipairs(scan_identifier_tokens(line)) do
+    if token.start_col <= col and col < token.end_col then
+      local keyword = token.quoted ~= true and sql_keywords_set[token.name:lower()]
+      if keyword then
+        return nil
+      end
+      token.range = {
+        start = { line = line_nr, character = token.start_col },
+        ["end"] = { line = line_nr, character = token.end_col },
+      }
+      return token
+    end
+    if col == token.end_col and token.end_col > token.start_col then
+      local keyword = token.quoted ~= true and sql_keywords_set[token.name:lower()]
+      if not keyword then
+        token.range = {
+          start = { line = line_nr, character = token.start_col },
+          ["end"] = { line = line_nr, character = token.end_col },
+        }
+        return token
+      end
+    end
+  end
+  return nil
+end
+
+---@param statement table
+---@param line integer
+---@param col integer
+---@return integer
+local function position_to_statement_offset(statement, line, col)
+  local offset = 1
+  local current_line = statement.start.line
+  local current_col = statement.start.character
+  while offset <= #statement.text do
+    if current_line == line and current_col == col then
+      return offset
+    end
+    local ch = statement.text:sub(offset, offset)
+    offset = offset + 1
+    if ch == "\n" then
+      current_line = current_line + 1
+      current_col = 0
+    else
+      current_col = current_col + 1
+    end
+  end
+  return #statement.text + 1
+end
+
+---@param params table
+---@param opts? { max_scan_lines?: integer }
+---@return table?
+function M.extract_hover_statement(params, opts)
+  opts = opts or {}
+  local max_scan_lines = opts.max_scan_lines or 200
+  local bufnr = vim.uri_to_bufnr(params.textDocument.uri)
+  local cursor_line = params.position.line or 0
+  local line_count = vim.api.nvim_buf_line_count(bufnr)
+  local start_line = cursor_line
+  local end_line = cursor_line
+  local scanned = 1
+  local hit_start = false
+  local hit_end = false
+
+  while start_line > 0 and scanned < max_scan_lines do
+    local prev = vim.api.nvim_buf_get_lines(bufnr, start_line - 1, start_line, false)[1] or ""
+    if prev:match("^%s*$") or prev:find(";") then
+      hit_start = true
+      break
+    end
+    start_line = start_line - 1
+    scanned = scanned + 1
+  end
+  if start_line == 0 then
+    hit_start = true
+  end
+
+  while end_line < line_count - 1 and scanned < max_scan_lines do
+    local current = vim.api.nvim_buf_get_lines(bufnr, end_line, end_line + 1, false)[1] or ""
+    if end_line > cursor_line and (current:match("^%s*$") or current:find(";")) then
+      hit_end = true
+      break
+    end
+    if end_line == cursor_line and current:sub((params.position.character or 0) + 1):find(";") then
+      hit_end = true
+      break
+    end
+    end_line = end_line + 1
+    scanned = scanned + 1
+  end
+  if end_line >= line_count - 1 then
+    hit_end = true
+  end
+
+  if not hit_start or not hit_end then
+    return nil
+  end
+
+  local lines = vim.api.nvim_buf_get_lines(bufnr, start_line, end_line + 1, false)
+  local text = table.concat(lines, "\n")
+  return {
+    text = text,
+    start = { line = start_line, character = 0 },
+    scanned_lines = scanned,
+  }
+end
+
+---@param statement table
+---@return table[]
+local function parse_statement_table_refs(statement)
+  local refs = {}
+  local matches = {}
+
+  local function add_matches(keyword, specificity)
+    local pattern = "()%f[%a]" .. keyword_pattern(keyword) .. "%f[%A]%s+()([^%s,;%(%)]+)%s*([%w_]*)"
+    local init = 1
+    while true do
+      local match_start, match_end, _, ref_start, ref, alias = statement.text:find(pattern, init)
+      if not match_start then
+        break
+      end
+      local parsed = M.parse_table_ref(ref)
+      if parsed then
+        local alias_lower = alias and alias:lower() or ""
+        if sql_keywords_set[alias_lower] then
+          alias = nil
+          alias_lower = ""
+        end
+        matches[#matches + 1] = {
+          pos = match_start,
+          specificity = specificity,
+          ref_start = ref_start,
+          ref_end = ref_start + #ref,
+          ref = ref,
+          alias = alias and alias ~= "" and alias or nil,
+          alias_key = alias_lower ~= "" and alias_lower or nil,
+          schema = parsed.schema,
+          schema_quoted = parsed.schema_quoted,
+          table = parsed.table,
+          table_quoted = parsed.table_quoted,
+        }
+      end
+      init = match_end + 1
+    end
+  end
+
+  for _, keyword in ipairs({ "from", "join", "update", "into" }) do
+    add_matches(keyword, 1)
+  end
+
+  table.sort(matches, function(a, b)
+    if a.pos == b.pos then
+      return a.specificity < b.specificity
+    end
+    return a.pos < b.pos
+  end)
+
+  for _, ref in ipairs(matches) do
+    refs[#refs + 1] = ref
+  end
+  return refs
+end
+
+---@param statement table
+---@param token table
+---@return table?
+local function component_for_token(statement, token)
+  local offset = position_to_statement_offset(statement, token.range.start.line, token.range.start.character)
+  for _, ref in ipairs(parse_statement_table_refs(statement)) do
+    if ref.ref_start <= offset and offset < ref.ref_end then
+      local parts = split_identifier_ref(ref.ref)
+      if parts and #parts == 2 then
+        local schema_raw = parts[1]
+        local table_raw = parts[2]
+        local schema_start = ref.ref_start
+        local schema_end = schema_start + #schema_raw
+        local table_start = schema_end + 1
+        local table_end = table_start + #table_raw
+        if schema_start <= offset and offset < schema_end then
+          return vim.tbl_extend("force", ref, { component = "schema" })
+        end
+        if table_start <= offset and offset < table_end then
+          return vim.tbl_extend("force", ref, { component = "table" })
+        end
+      else
+        return vim.tbl_extend("force", ref, { component = "table" })
+      end
+    end
+  end
+  return nil
+end
+
+---@param statement table
+---@return table<string, table>
+local function alias_map(statement)
+  local aliases = {}
+  for _, ref in ipairs(parse_statement_table_refs(statement)) do
+    if ref.alias_key then
+      aliases[ref.alias_key] = ref
+    end
+  end
+  return aliases
+end
+
+---@param params table
+---@param opts? { max_scan_lines?: integer }
+---@return table?
+function M.hover_context(params, opts)
+  local token = M.token_at_position(params)
+  if not token then
+    return nil
+  end
+  local statement = M.extract_hover_statement(params, opts)
+  if not statement then
+    return {
+      token = token,
+      capped = true,
+    }
+  end
+  local table_refs = parse_statement_table_refs(statement)
+  local selected_ref = component_for_token(statement, token)
+  local aliases = alias_map(statement)
+
+  local line = vim.api.nvim_buf_get_lines(vim.uri_to_bufnr(params.textDocument.uri), token.range.start.line, token.range.start.line + 1, false)[1] or ""
+  local before = line:sub(1, token.range.start.character)
+  local prefix_raw = before:match('("[^"]*")%.$') or before:match("([%w_]+)%.$")
+  local prefix = parse_identifier(prefix_raw)
+
+  return {
+    token = token,
+    statement = statement,
+    table_refs = table_refs,
+    selected_ref = selected_ref,
+    aliases = aliases,
+    prefix = prefix,
+    single_table_ref = (#table_refs == 1) and table_refs[1] or nil,
+  }
 end
 
 --- Common SQL keywords for fallback completion.

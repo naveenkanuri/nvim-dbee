@@ -1,0 +1,532 @@
+-- Headless Phase 12.1 checks for LSP hover and completionItem/resolve.
+
+vim.env.XDG_STATE_HOME = vim.fn.tempname()
+vim.fn.mkdir(vim.env.XDG_STATE_HOME, "p")
+
+package.preload["nio"] = package.preload["nio"] or function()
+  return {}
+end
+
+local SchemaCache = require("dbee.lsp.schema_cache")
+local server = require("dbee.lsp.server")
+local hover = require("dbee.lsp.hover")
+local resolve = require("dbee.lsp.resolve")
+local docs = require("dbee.lsp.object_docs")
+local schema_filter = require("dbee.schema_filter")
+
+local function fail(msg)
+  print("LSP12_FAIL=" .. tostring(msg))
+  vim.cmd("cquit 1")
+end
+
+local function emit(label, value)
+  print(label .. "=" .. tostring(value))
+end
+
+local function assert_true(label, value)
+  if not value then
+    fail(label .. ": expected true")
+  end
+end
+
+local function assert_false(label, value)
+  if value then
+    fail(label .. ": expected false")
+  end
+end
+
+local function assert_eq(label, actual, expected)
+  if actual ~= expected then
+    fail(label .. ": expected " .. vim.inspect(expected) .. " got " .. vim.inspect(actual))
+  end
+end
+
+local scope_ref = { value = schema_filter.normalize(nil, "postgres") }
+local epoch_ref = { value = 1 }
+
+local function make_handler()
+  local handler = {
+    counters = {
+      sync = 0,
+      async = 0,
+    },
+  }
+  function handler:get_schema_filter_normalized()
+    return scope_ref.value
+  end
+  function handler:get_authoritative_root_epoch()
+    return epoch_ref.value
+  end
+  function handler:connection_get_columns()
+    handler.counters.sync = handler.counters.sync + 1
+    return {}
+  end
+  function handler:connection_get_columns_async()
+    handler.counters.async = handler.counters.async + 1
+  end
+  function handler:connection_get_schema_objects_singleflight()
+    handler.counters.async = handler.counters.async + 1
+    return {}
+  end
+  function handler:connection_get_structure_singleflight()
+    handler.counters.async = handler.counters.async + 1
+    return {}
+  end
+  return handler
+end
+
+local function rows()
+  return {
+    { schema_name = "public", table_name = "users", obj_type = "table" },
+    { schema_name = "public", table_name = "orders", obj_type = "table" },
+    { schema_name = "Public", table_name = "users", obj_type = "table" },
+  }
+end
+
+local function make_cache(conn_id)
+  scope_ref.value = schema_filter.normalize(nil, "postgres")
+  epoch_ref.value = 1
+  local handler = make_handler()
+  local cache = SchemaCache:new(handler, conn_id or "lsp12")
+  cache:build_from_metadata_rows(rows())
+  cache:_store_columns("public.users", {
+    { name = "id", type = "integer", nullable = false, primary_key = true },
+    { name = "email", type = "text", nullable = true, default = "''" },
+  })
+  cache:_store_columns("public.orders", {
+    { name = "id", type = "integer" },
+    { name = "user_id", type = "integer", foreign_key = "public.users.id" },
+  })
+  cache:_store_columns("Public.users", {
+    { name = "id", type = "text" },
+  })
+  return cache, handler
+end
+
+local function make_buffer(lines)
+  local bufnr = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_name(bufnr, "/tmp/dbee-lsp12-" .. tostring(math.random(1000000)) .. ".sql")
+  vim.api.nvim_buf_set_option(bufnr, "filetype", "sql")
+  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+  return bufnr, vim.uri_from_bufnr(bufnr)
+end
+
+local function position_of(line, needle, occurrence)
+  occurrence = occurrence or 1
+  local init = 1
+  local start_pos
+  for _ = 1, occurrence do
+    start_pos = line:find(needle, init, true)
+    if not start_pos then
+      fail("missing needle " .. tostring(needle) .. " in " .. tostring(line))
+    end
+    init = start_pos + #needle
+  end
+  return start_pos - 1
+end
+
+local function request(client, method, params)
+  local done = false
+  local response
+  client.request(method, params, function(err, result)
+    response = { err = err, result = result }
+    done = true
+  end)
+  vim.wait(1000, function()
+    return done
+  end, 10)
+  if not response then
+    fail(method .. " timeout")
+  end
+  if response.err then
+    fail(method .. " error: " .. tostring(response.err))
+  end
+  return response.result
+end
+
+local function request_hover(client, uri, line, character)
+  return request(client, "textDocument/hover", {
+    textDocument = { uri = uri },
+    position = { line = line, character = character },
+  })
+end
+
+local function request_resolve(client, item)
+  return request(client, "completionItem/resolve", item)
+end
+
+local function first_label(items, label)
+  for _, item in ipairs(items or {}) do
+    if item.label == label then
+      return item
+    end
+  end
+  return nil
+end
+
+local cache, handler = make_cache("lsp12-main")
+local client = server.create(cache)({}, {})
+local init = request(client, "initialize", {
+  capabilities = {
+    textDocument = {
+      hover = { contentFormat = { "markdown", "plaintext" } },
+      completion = {
+        completionItem = {
+          documentationFormat = { "markdown", "plaintext" },
+        },
+      },
+    },
+  },
+})
+assert_eq("hover capability", init.capabilities.hoverProvider, true)
+assert_eq("resolve capability", init.capabilities.completionProvider.resolveProvider, true)
+
+handler.counters.sync = 0
+handler.counters.async = 0
+
+local table_line = "select * from public.users u where u.id = 1"
+local bufnr, uri = make_buffer({ table_line })
+local table_hover = request_hover(client, uri, 0, position_of(table_line, "users"))
+assert_true("table hover", table_hover and table_hover.contents and table_hover.contents.value:find("public", 1, true))
+emit("LSP12_HOVER_TABLE_OK", "true")
+
+local column_hover = request_hover(client, uri, 0, position_of(table_line, "id"))
+assert_true("column hover", column_hover and column_hover.contents.value:find("integer", 1, true))
+emit("LSP12_HOVER_COLUMN_OK", "true")
+
+local schema_hover = request_hover(client, uri, 0, position_of(table_line, "public"))
+assert_true("schema hover", schema_hover and schema_hover.contents.value:find("Schema", 1, true))
+emit("LSP12_HOVER_SCHEMA_OK", "true")
+
+local keyword_hover = request_hover(client, uri, 0, position_of(table_line, "select"))
+assert_eq("keyword hover", keyword_hover, nil)
+emit("LSP12_HOVER_NIL_ON_KEYWORD", "true")
+
+local unknown_buf, unknown_uri = make_buffer({ "select missing_col" })
+local unknown_hover = request_hover(client, unknown_uri, 0, position_of("select missing_col", "missing_col"))
+assert_eq("unknown hover", unknown_hover, nil)
+emit("LSP12_HOVER_NIL_ON_UNKNOWN", "true")
+
+scope_ref.value = nil
+local denied_hover = request_hover(client, uri, 0, position_of(table_line, "users"))
+assert_eq("authority hover", denied_hover, nil)
+emit("LSP12_HOVER_AUTHORITY_FAIL_CLOSED", "true")
+scope_ref.value = schema_filter.normalize(nil, "postgres")
+
+local upper_line = "select * from PUBLIC.USERS"
+local upper_buf, upper_uri = make_buffer({ upper_line })
+local upper_hover = request_hover(client, upper_uri, 0, position_of(upper_line, "USERS"))
+assert_true("canonical hover", upper_hover and upper_hover.contents.value:find("public", 1, true))
+emit("LSP12_HOVER_CANONICAL_LOOKUP_OK", "true")
+
+local quoted_line = 'select * from "Public".users'
+local quoted_buf, quoted_uri = make_buffer({ quoted_line })
+local quoted_hover = request_hover(client, quoted_uri, 0, position_of(quoted_line, "users"))
+assert_true("quoted hover", quoted_hover and quoted_hover.contents.value:find("Public", 1, true))
+emit("LSP12_HOVER_QUOTED_CASE_PRESERVED", "true")
+
+local markdown = docs.format_hover({
+  kind = "column",
+  schema = "public",
+  table = "bad|`name",
+  column = "id*",
+  type = "text",
+}, {})
+assert_eq("markdown kind", markdown.kind, "markdown")
+assert_true("markdown escaped pipe", markdown.value:find("\\|", 1, true) ~= nil)
+assert_true("markdown escaped star", markdown.value:find("\\*", 1, true) ~= nil)
+local resolve_plain = docs.format_resolve({
+  kind = "table",
+  schema = "public",
+  table = "users",
+  table_type = "table",
+}, nil, {
+  client_capabilities = {
+    textDocument = {
+      completion = {
+        completionItem = {
+          documentationFormat = { "plaintext" },
+        },
+      },
+    },
+  },
+})
+assert_eq("resolve plaintext fallback", resolve_plain.documentation.kind, "plaintext")
+emit("LSP12_HOVER_MARKDOWN_FORMAT_OK", "true")
+
+local long_lines = {}
+for i = 1, 6 do
+  long_lines[i] = "select id"
+end
+local long_buf, long_uri = make_buffer(long_lines)
+local bounded = hover.handle({
+  textDocument = { uri = long_uri },
+  position = { line = 3, character = 7 },
+}, cache, { max_scan_lines = 2 })
+assert_eq("bounded scan", bounded, nil)
+emit("LSP12_HOVER_CONTEXT_SCAN_BOUNDED", "true")
+
+local select_line = "SELECT id FROM public.users"
+local select_buf, select_uri = make_buffer({ select_line })
+local select_hover = request_hover(client, select_uri, 0, position_of(select_line, "id"))
+assert_true("select-list single table", select_hover and select_hover.contents.value:find("integer", 1, true))
+emit("LSP12_HOVER_SELECT_LIST_SINGLE_TABLE_OK", "true")
+
+local ambiguous_line = "SELECT id FROM public.users u JOIN public.orders o ON u.id = o.id"
+local ambiguous_buf, ambiguous_uri = make_buffer({ ambiguous_line })
+local ambiguous_hover = request_hover(client, ambiguous_uri, 0, position_of(ambiguous_line, "id"))
+assert_eq("ambiguous select-list", ambiguous_hover, nil)
+emit("LSP12_HOVER_SELECT_LIST_AMBIGUOUS_NIL", "true")
+
+assert_eq("hover sync db calls", handler.counters.sync, 0)
+assert_eq("hover async db calls", handler.counters.async, 0)
+emit("LSP12_HOVER_NO_SYNC_DB", "true")
+emit("LSP12_HOVER_NO_ASYNC_DB", "true")
+
+handler.counters.sync = 0
+handler.counters.async = 0
+
+local schema_item = first_label(cache:get_schema_completion_items({ include_data = true }), "public")
+local table_item = first_label(cache:get_table_completion_items("public", { schema_quoted = true, include_data = true }), "users")
+local column_item = first_label(cache:get_column_completion_items("public", "users", {
+  schema_quoted = true,
+  table_quoted = true,
+  include_data = true,
+}), "id")
+assert_true("schema item data", schema_item and schema_item.data)
+assert_true("table item data", table_item and table_item.data)
+assert_true("column item data", column_item and column_item.data)
+
+local resolved_schema = request_resolve(client, schema_item)
+assert_true("schema docs", resolved_schema.documentation and resolved_schema.documentation.value:find("Schema", 1, true))
+emit("LSP12_RESOLVE_SCHEMA_DOCS_OK", "true")
+
+local resolved_table = request_resolve(client, table_item)
+assert_true("table docs", resolved_table.documentation and resolved_table.documentation.value:find("users", 1, true))
+emit("LSP12_RESOLVE_TABLE_DOCS_OK", "true")
+
+local resolved_column = request_resolve(client, column_item)
+assert_true("column docs", resolved_column.documentation and resolved_column.documentation.value:find("integer", 1, true))
+emit("LSP12_RESOLVE_COLUMN_DOCS_OK", "true")
+
+local non_dbee = { label = "SELECT", kind = 14, detail = "keyword" }
+local non_dbee_resolved = request_resolve(client, non_dbee)
+assert_eq("non dbee passthrough detail", non_dbee_resolved.detail, "keyword")
+assert_eq("non dbee passthrough docs", non_dbee_resolved.documentation, nil)
+emit("LSP12_RESOLVE_NON_DBEE_ITEM_PASSTHROUGH", "true")
+
+local stale_item = vim.deepcopy(table_item)
+cache:_store_columns("public.users", {
+  { name = "id", type = "integer" },
+  { name = "email", type = "text" },
+  { name = "extra_col", type = "text" },
+})
+local stale_resolved = request_resolve(client, stale_item)
+assert_eq("stale no docs", stale_resolved.documentation, nil)
+assert_eq("stale incomplete", stale_resolved.data.dbee_resolve_status, "incomplete")
+emit("LSP12_RESOLVE_STALE_RETURNS_INCOMPLETE", "true")
+
+local fresh_table_item = first_label(cache:get_table_completion_items("public", { schema_quoted = true, include_data = true }), "users")
+local fresh_resolved = request_resolve(client, fresh_table_item)
+assert_true("fresh generation docs", fresh_resolved.documentation ~= nil)
+emit("LSP12_RESOLVE_FRESH_ITEM_GENERATION_OK", "true")
+
+scope_ref.value = nil
+local denied_resolve = request_resolve(client, fresh_table_item)
+assert_eq("authority resolve docs", denied_resolve.documentation, nil)
+assert_eq("authority resolve incomplete", denied_resolve.data.dbee_resolve_status, "incomplete")
+emit("LSP12_RESOLVE_AUTHORITY_FAIL_CLOSED", "true")
+scope_ref.value = schema_filter.normalize(nil, "postgres")
+
+local completion_line = "SELECT i"
+local comp_buf, comp_uri = make_buffer({ completion_line })
+local completion_result = request(client, "textDocument/completion", {
+  textDocument = { uri = comp_uri },
+  position = { line = 0, character = #completion_line },
+})
+local global_id = first_label(completion_result.items, "id")
+assert_true("global id exists", global_id ~= nil)
+assert_eq("global id ambiguous no data", global_id.data, nil)
+local global_resolved = request_resolve(client, global_id)
+assert_eq("global id passthrough docs", global_resolved.documentation, nil)
+emit("LSP12_RESOLVE_GLOBAL_COLUMN_AMBIGUOUS_PASSTHROUGH", "true")
+
+local public_item = first_label(cache:get_table_completion_items("public", { schema_quoted = true, include_data = true }), "users")
+local mixed_item = first_label(cache:get_table_completion_items("Public", { schema_quoted = true, include_data = true }), "users")
+local public_doc = resolve.handle(public_item, cache, { memo = {} })
+local mixed_doc = resolve.handle(mixed_item, cache, { memo = {} })
+assert_true("exact docs differ", public_doc.documentation.value ~= mixed_doc.documentation.value)
+emit("LSP12_RESOLVE_EXACT_CASE_PRESERVED", "true")
+
+local memo = {}
+local first_public = resolve.handle(public_item, cache, { memo = memo })
+local first_mixed = resolve.handle(mixed_item, cache, { memo = memo })
+local second_mixed = resolve.handle(mixed_item, cache, { memo = memo })
+local second_public = resolve.handle(public_item, cache, { memo = memo })
+assert_eq("memo public stable", first_public.documentation.value, second_public.documentation.value)
+assert_eq("memo mixed stable", first_mixed.documentation.value, second_mixed.documentation.value)
+assert_true("memo exact distinct", first_public.documentation.value ~= first_mixed.documentation.value)
+emit("LSP12_RESOLVE_MEMO_EXACT_DISTINCT", "true")
+
+local prior_resolved = resolve.handle(public_item, cache, { memo = {} })
+scope_ref.value = nil
+local scrubbed_authority = resolve.handle(prior_resolved, cache, { memo = {} })
+assert_eq("authority scrub docs", scrubbed_authority.documentation, nil)
+assert_eq("authority scrub detail", scrubbed_authority.detail, nil)
+emit("LSP12_RESOLVE_AUTHORITY_SCRUBS_PRIOR_DOCS", "true")
+scope_ref.value = schema_filter.normalize(nil, "postgres")
+
+local prior_resolved_gen = resolve.handle(first_label(cache:get_table_completion_items("public", { schema_quoted = true, include_data = true }), "users"), cache, { memo = {} })
+cache:_store_columns("public.users", {
+  { name = "id", type = "integer" },
+  { name = "email", type = "text" },
+})
+local scrubbed_gen = resolve.handle(prior_resolved_gen, cache, { memo = {} })
+assert_eq("generation scrub docs", scrubbed_gen.documentation, nil)
+assert_eq("generation scrub detail", scrubbed_gen.detail, nil)
+emit("LSP12_RESOLVE_GEN_BUMP_SCRUBS_PRIOR_DOCS", "true")
+
+local function synthetic_table_item(test_cache, generation, schema, table_name)
+  return {
+    label = table_name,
+    data = {
+      source = "dbee",
+      version = 1,
+      kind = "table",
+      schema = schema,
+      table = table_name,
+      schema_exact = schema,
+      table_exact = table_name,
+      schema_quoted = true,
+      table_quoted = true,
+      cache_identity = test_cache:cache_identity(),
+      cache_generation = generation,
+      root_epoch = test_cache:_authoritative_root_epoch(),
+    },
+  }
+end
+
+local function assert_path_generation(label, before_cache, mutate, fresh_item, destructive)
+  local old_item = synthetic_table_item(before_cache, before_cache:generation(), "public", "users")
+  mutate(before_cache)
+  local old_result = resolve.handle(old_item, before_cache, { memo = {} })
+  assert_eq(label .. " old incomplete", old_result.data.dbee_resolve_status, "incomplete")
+  if destructive then
+    local fresh = fresh_item(before_cache)
+    assert_true(label .. " no fresh docs", not fresh)
+    return
+  end
+  local fresh = fresh_item(before_cache)
+  assert_true(label .. " fresh item", fresh and fresh.data)
+  local fresh_result = resolve.handle(fresh, before_cache, { memo = {} })
+  assert_true(label .. " fresh docs", fresh_result.documentation ~= nil)
+end
+
+do
+  local c = SchemaCache:new(make_handler(), "lsp12-gen-initial")
+  assert_path_generation("initial_load", c, function(target)
+    target:build_from_metadata_rows({ { schema_name = "public", table_name = "users", obj_type = "table" } })
+  end, function(target)
+    return first_label(target:get_table_completion_items("public", { schema_quoted = true, include_data = true }), "users")
+  end)
+
+  local c2 = make_cache("lsp12-gen-structure")
+  assert_path_generation("structure_refresh", c2, function(target)
+    target:build_from_structure({
+      { type = "schema", name = "public", schema = "public", children = {
+        { type = "table", schema = "public", name = "users" },
+      } },
+    })
+  end, function(target)
+    return first_label(target:get_table_completion_items("public", { schema_quoted = true, include_data = true }), "users")
+  end)
+
+  local c3 = make_cache("lsp12-gen-schema-list")
+  assert_path_generation("schema_list_reload", c3, function(target)
+    target:build_from_schemas({ "public" }, { preserve_loaded = false })
+    target:on_schema_objects_loaded({
+      conn_id = "lsp12-gen-schema-list",
+      schema = "public",
+      objects = {
+        { type = "table", schema = "public", name = "users" },
+      },
+    })
+  end, function(target)
+    return first_label(target:get_table_completion_items("public", { schema_quoted = true, include_data = true }), "users")
+  end)
+
+  local c4 = make_cache("lsp12-gen-columns")
+  local async_result = c4:get_columns_async("public", "users", {
+    schema_quoted = true,
+    table_quoted = true,
+  })
+  assert_false("columns warm should not be incomplete", async_result.is_incomplete)
+  assert_path_generation("on_columns_loaded", c4, function(target)
+    target:_store_columns("public.users", { { name = "id", type = "integer" } })
+  end, function(target)
+    return first_label(target:get_column_completion_items("public", "users", {
+      schema_quoted = true,
+      table_quoted = true,
+      include_data = true,
+    }), "id")
+  end)
+
+  local c5 = make_cache("lsp12-gen-schema-objects")
+  assert_path_generation("on_schema_objects_loaded", c5, function(target)
+    target:on_schema_objects_loaded({
+      conn_id = "lsp12-gen-schema-objects",
+      schema = "public",
+      objects = {
+        { type = "table", schema = "public", name = "users" },
+      },
+    })
+  end, function(target)
+    return first_label(target:get_table_completion_items("public", { schema_quoted = true, include_data = true }), "users")
+  end)
+
+  local c6 = make_cache("lsp12-gen-disk")
+  c6:save_to_disk()
+  local c6_loaded = SchemaCache:new(make_handler(), "lsp12-gen-disk")
+  assert_path_generation("load_from_disk", c6_loaded, function(target)
+    assert_true("disk load", target:load_from_disk())
+  end, function(target)
+    return first_label(target:get_table_completion_items("public", { schema_quoted = true, include_data = true }), "users")
+  end)
+
+  local c7 = make_cache("lsp12-gen-invalidate")
+  assert_path_generation("invalidate", c7, function(target)
+    target:invalidate()
+  end, function(target)
+    return first_label(target:get_table_completion_items("public", { schema_quoted = true, include_data = true }), "users")
+  end, true)
+
+  local c8 = make_cache("lsp12-gen-fail-closed")
+  assert_path_generation("refresh_schema_scope_fail_closed", c8, function(target)
+    scope_ref.value = nil
+    target:refresh_schema_scope()
+    scope_ref.value = schema_filter.normalize(nil, "postgres")
+  end, function(target)
+    return first_label(target:get_table_completion_items("public", { schema_quoted = true, include_data = true }), "users")
+  end, true)
+end
+emit("LSP12_RESOLVE_GENERATION_PROOF_ALL_PATHS", "true")
+
+local memo_gen_item = first_label(cache:get_table_completion_items("public", { schema_quoted = true, include_data = true }), "users")
+local memo_gen = resolve.handle(memo_gen_item, cache, { memo = {} })
+local memo_gen_again = resolve.handle(memo_gen_item, cache, { memo = {} })
+assert_eq("memo generation stable", memo_gen.documentation.value, memo_gen_again.documentation.value)
+cache:_store_columns("public.users", {
+  { name = "id", type = "integer" },
+  { name = "email", type = "text" },
+  { name = "last_gen", type = "text" },
+})
+local memo_stale = resolve.handle(memo_gen_item, cache, { memo = {} })
+assert_eq("memo generation stale", memo_stale.data.dbee_resolve_status, "incomplete")
+emit("LSP12_RESOLVE_MEMO_PER_GENERATION_OK", "true")
+
+assert_eq("resolve sync db calls", handler.counters.sync, 0)
+assert_eq("resolve async db calls", handler.counters.async, 0)
+emit("LSP12_RESOLVE_NO_SYNC_DB", "true")
+emit("LSP12_RESOLVE_NO_ASYNC_DB", "true")
+
+vim.cmd("qa!")
