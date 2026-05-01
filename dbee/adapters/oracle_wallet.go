@@ -67,8 +67,49 @@ func ClearOracleWalletCache() error {
 	if err != nil {
 		return err
 	}
-	if err := os.RemoveAll(root); err != nil {
-		return fmt.Errorf("remove wallet cache: %w", err)
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read wallet cache: %w", err)
+	}
+
+	activeLocks := false
+	for _, entry := range entries {
+		if entry.IsDir() && strings.HasSuffix(entry.Name(), ".lock") {
+			activeLocks = true
+			break
+		}
+	}
+
+	for _, entry := range entries {
+		name := entry.Name()
+		p := filepath.Join(root, name)
+		if entry.IsDir() && strings.HasSuffix(name, ".lock") {
+			continue
+		}
+		if entry.IsDir() && strings.HasPrefix(name, ".extract-") && activeLocks {
+			continue
+		}
+		if entry.IsDir() && isOracleWalletHashPrefix(name) {
+			unlock, acquired, err := tryAcquireOracleWalletHashLock(root, name)
+			if err != nil {
+				return err
+			}
+			if !acquired {
+				continue
+			}
+			removeErr := os.RemoveAll(p)
+			unlock()
+			if removeErr != nil {
+				return fmt.Errorf("remove wallet cache entry %s: %w", name, removeErr)
+			}
+			continue
+		}
+		if err := os.RemoveAll(p); err != nil {
+			return fmt.Errorf("remove wallet cache entry %s: %w", name, err)
+		}
 	}
 	return nil
 }
@@ -318,12 +359,39 @@ func acquireOracleWalletHashLock(root, prefix string) (func(), error) {
 	}
 }
 
+func tryAcquireOracleWalletHashLock(root, prefix string) (func(), bool, error) {
+	lockDir := filepath.Join(root, prefix+".lock")
+	if err := os.Mkdir(lockDir, 0o700); err == nil {
+		_ = os.Chmod(lockDir, 0o700)
+		return func() {
+			_ = os.Remove(lockDir)
+		}, true, nil
+	} else if os.IsExist(err) {
+		return nil, false, nil
+	} else {
+		return nil, false, fmt.Errorf("acquire wallet cache lock: %w", err)
+	}
+}
+
 func oracleWalletLockIsStale(lockDir string, now time.Time) bool {
 	info, err := os.Stat(lockDir)
 	if err != nil {
 		return false
 	}
 	return now.Sub(info.ModTime()) > oracleWalletLockStaleAfter
+}
+
+func isOracleWalletHashPrefix(name string) bool {
+	if len(name) != oracleWalletHashPrefix {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 func hashFileSHA256(p string) (string, error) {

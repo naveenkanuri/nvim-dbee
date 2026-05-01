@@ -2,6 +2,7 @@ package adapters
 
 import (
 	"archive/zip"
+	"bytes"
 	"fmt"
 	"net/url"
 	"os"
@@ -280,6 +281,9 @@ func TestOracleWalletZipMarkers(t *testing.T) {
 	assertCrossProcessResolve(t, zipPath)
 	emit.True("WALLET_ZIP_CROSS_PROCESS_LOCK_OK")
 
+	assertCacheClearLockSafe(t, zipPath)
+	emit.True("WALLET_ZIP_CACHE_CLEAR_LOCK_SAFE")
+
 	emit.True("WALLET_ZIP_NO_LIVE_ORACLE_DEPENDENCY")
 }
 
@@ -516,6 +520,165 @@ func TestOracleWalletCrossProcessLockHelper(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	fmt.Printf("WALLET_CROSS_PROCESS_DIR=%s\n", dir)
+}
+
+func assertCacheClearLockSafe(t *testing.T, zipPath string) {
+	t.Helper()
+	if err := ClearOracleWalletCache(); err != nil {
+		t.Fatalf("clear cache before lock-safe test: %v", err)
+	}
+	fullHash, err := hashFileSHA256(zipPath)
+	if err != nil {
+		t.Fatalf("hash zip for lock-safe clear: %v", err)
+	}
+	root, err := oracleWalletCacheRoot()
+	if err != nil {
+		t.Fatalf("cache root for lock-safe clear: %v", err)
+	}
+	prefix := fullHash[:oracleWalletHashPrefix]
+	expectedDir := filepath.Join(root, prefix)
+	readyFile := filepath.Join(t.TempDir(), "ready")
+	releaseFile := filepath.Join(t.TempDir(), "release")
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestOracleWalletCacheClearLockHelper$", "-test.v")
+	cmd.Env = append(os.Environ(),
+		"NVIM_DBEE_WALLET_CACHE_CLEAR_HELPER=1",
+		"NVIM_DBEE_WALLET_CACHE_CLEAR_ZIP="+zipPath,
+		"NVIM_DBEE_WALLET_CACHE_CLEAR_EXPECTED="+expectedDir,
+		"NVIM_DBEE_WALLET_CACHE_CLEAR_READY="+readyFile,
+		"NVIM_DBEE_WALLET_CACHE_CLEAR_RELEASE="+releaseFile,
+	)
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start cache clear helper: %v", err)
+	}
+	done := make(chan struct{})
+	var waitErr error
+	go func() {
+		waitErr = cmd.Wait()
+		close(done)
+	}()
+
+	tmpDir := waitForHelperReady(t, readyFile)
+	if err := ClearOracleWalletCache(); err != nil {
+		t.Fatalf("clear cache while lock held: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, prefix+".lock")); err != nil {
+		t.Fatalf("active hash lock was not preserved by clear: %v", err)
+	}
+	if _, err := os.Stat(tmpDir); err != nil {
+		t.Fatalf("active extraction temp dir was not preserved by clear: %v", err)
+	}
+	if err := os.WriteFile(releaseFile, []byte("release"), 0o600); err != nil {
+		t.Fatalf("release cache clear helper: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatalf("cache clear helper timed out")
+	}
+	if waitErr != nil {
+		t.Fatalf("cache clear helper failed: %v\n%s", waitErr, output.String())
+	}
+	if !strings.Contains(output.String(), "WALLET_CACHE_CLEAR_LOCK_DIR="+expectedDir) {
+		t.Fatalf("helper did not report expected dir %s\n%s", expectedDir, output.String())
+	}
+	assertRequiredFiles(t, expectedDir)
+}
+
+func waitForHelperReady(t *testing.T, readyFile string) string {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		content, err := os.ReadFile(readyFile)
+		if err == nil {
+			tmpDir := strings.TrimSpace(string(content))
+			if tmpDir == "" {
+				t.Fatalf("helper ready file was empty")
+			}
+			return tmpDir
+		}
+		if !os.IsNotExist(err) {
+			t.Fatalf("read helper ready file: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("helper did not become ready")
+	return ""
+}
+
+func TestOracleWalletCacheClearLockHelper(t *testing.T) {
+	if os.Getenv("NVIM_DBEE_WALLET_CACHE_CLEAR_HELPER") != "1" {
+		t.Skip("helper process only")
+	}
+	SetOracleWalletAutoExtract(true)
+	zipPath := os.Getenv("NVIM_DBEE_WALLET_CACHE_CLEAR_ZIP")
+	expectedDir := os.Getenv("NVIM_DBEE_WALLET_CACHE_CLEAR_EXPECTED")
+	readyFile := os.Getenv("NVIM_DBEE_WALLET_CACHE_CLEAR_READY")
+	releaseFile := os.Getenv("NVIM_DBEE_WALLET_CACHE_CLEAR_RELEASE")
+	if zipPath == "" || expectedDir == "" || readyFile == "" || releaseFile == "" {
+		t.Fatalf("missing helper env")
+	}
+	fullHash, err := hashFileSHA256(zipPath)
+	if err != nil {
+		t.Fatalf("hash zip: %v", err)
+	}
+	root, err := oracleWalletCacheRoot()
+	if err != nil {
+		t.Fatalf("cache root: %v", err)
+	}
+	prefix := fullHash[:oracleWalletHashPrefix]
+	unlock, err := acquireOracleWalletHashLock(root, prefix)
+	if err != nil {
+		t.Fatalf("acquire hash lock: %v", err)
+	}
+	tmpDir, err := os.MkdirTemp(root, ".extract-")
+	if err != nil {
+		unlock()
+		t.Fatalf("create active temp dir: %v", err)
+	}
+	if err := os.WriteFile(readyFile, []byte(tmpDir), 0o600); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		unlock()
+		t.Fatalf("write ready file: %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(releaseFile); err == nil {
+			break
+		} else if !os.IsNotExist(err) {
+			_ = os.RemoveAll(tmpDir)
+			unlock()
+			t.Fatalf("stat release file: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(root, prefix+".lock")); err != nil {
+			_ = os.RemoveAll(tmpDir)
+			unlock()
+			t.Fatalf("hash lock disappeared while helper held it: %v", err)
+		}
+		if _, err := os.Stat(tmpDir); err != nil {
+			unlock()
+			t.Fatalf("active temp dir disappeared while helper held lock: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := os.Stat(releaseFile); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		unlock()
+		t.Fatalf("release file not observed: %v", err)
+	}
+	_ = os.RemoveAll(tmpDir)
+	unlock()
+
+	dir, _ := requirePreparedWallet(t, zipPath)
+	if dir != expectedDir {
+		t.Fatalf("unexpected helper dir %s != %s", dir, expectedDir)
+	}
+	fmt.Printf("WALLET_CACHE_CLEAR_LOCK_DIR=%s\n", dir)
 }
 
 func TestOracleWalletPerfMarkers(t *testing.T) {

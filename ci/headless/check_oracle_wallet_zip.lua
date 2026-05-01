@@ -394,6 +394,7 @@ local required_true_markers = {
   "WALLET_ZIP_ATOMIC_RENAME_OK",
   "WALLET_ZIP_CONCURRENT_RESOLVE_OK",
   "WALLET_ZIP_CROSS_PROCESS_LOCK_OK",
+  "WALLET_ZIP_CACHE_CLEAR_LOCK_SAFE",
   "WALLET_ZIP_CONN_URL_REWRITTEN",
   "WALLET_ZIP_DUPLICATE_WALLET_KEYS_NORMALIZED",
   "WALLET_ZIP_TEST_SUCCESS_MESSAGE_OK",
@@ -490,6 +491,6 @@ if #final_failures > 0 then
   fail(table.concat(final_failures, "; "))
 end
 
-record("WALLET_ZIP_ROLLUP_MARKERS_CHECKED", "46")
+record("WALLET_ZIP_ROLLUP_MARKERS_CHECKED", "47")
 record("WALLET_ZIP_ALL_PASS", "true")
 vim.cmd("qa!")
