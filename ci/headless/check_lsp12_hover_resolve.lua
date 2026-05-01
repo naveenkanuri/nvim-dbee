@@ -57,6 +57,9 @@ local function make_handler()
   function handler:get_authoritative_root_epoch()
     return epoch_ref.value
   end
+  function handler:get_current_connection()
+    return { id = "lsp12", type = "postgres" }
+  end
   function handler:connection_get_columns()
     handler.counters.sync = handler.counters.sync + 1
     return {}
@@ -404,6 +407,46 @@ local function synthetic_table_item(test_cache, generation, schema, table_name)
       root_epoch = test_cache:_authoritative_root_epoch(),
     },
   }
+end
+
+do
+  local invalid_cache, invalid_handler = make_cache("lsp12-invalid")
+  function invalid_handler:get_current_connection()
+    return { id = "lsp12-invalid", type = "postgres" }
+  end
+  local invalid_item = first_label(invalid_cache:get_table_completion_items("public", {
+    schema_quoted = true,
+    include_data = true,
+  }), "users")
+  local before_generation = invalid_cache:generation()
+  local old_state = package.loaded["dbee.api.state"]
+  local old_lsp_init = package.loaded["dbee.lsp.init"]
+  package.loaded["dbee.lsp.init"] = nil
+  package.loaded["dbee.api.state"] = {
+    is_core_loaded = function()
+      return true
+    end,
+    handler = function()
+      return invalid_handler
+    end,
+    config = function()
+      return { lsp = {} }
+    end,
+  }
+  local lsp_init = require("dbee.lsp.init")
+  lsp_init._cache = invalid_cache
+  lsp_init._conn_id = "lsp12-invalid"
+  lsp_init._connection_invalidated_consumer_live = true
+  lsp_init._pending_connection_invalidations = {
+    { current_conn_id_after = "lsp12-invalid" },
+  }
+  lsp_init._flush_connection_invalidations()
+  package.loaded["dbee.api.state"] = old_state
+  package.loaded["dbee.lsp.init"] = old_lsp_init
+  assert_true("invalidation generation bump", invalid_cache:generation() > before_generation)
+  local invalid_resolved = resolve.handle(invalid_item, invalid_cache, { memo = {} })
+  assert_eq("invalidation old item incomplete", invalid_resolved.data.dbee_resolve_status, "incomplete")
+  emit("LSP12_RESOLVE_INVALIDATION_BUMPS_GENERATION", "true")
 end
 
 local function assert_path_generation(label, before_cache, mutate, fresh_item, destructive)

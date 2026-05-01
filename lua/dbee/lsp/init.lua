@@ -973,6 +973,9 @@ function M._flush_connection_invalidations()
   if should_rewarm then
     cancel_active_async("connection_invalidated")
     clear_lsp_diagnostics()
+    if M._cache and M._conn_id == current.id and type(M._cache.invalidate) == "function" then
+      M._cache:invalidate()
+    end
     M._request_root_refresh(handler, current.id)
   end
 end
