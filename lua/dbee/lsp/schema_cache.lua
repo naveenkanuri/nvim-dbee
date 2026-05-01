@@ -21,6 +21,7 @@ local SchemaCache = {}
 
 local nio = require("nio")
 local schema_filter = require("dbee.schema_filter")
+local schema_filter_authority = require("dbee.schema_filter_authority")
 
 local MAX_COLUMNS_IN_MEMORY = 500
 local SYNC_COLUMN_FILE_LOAD_LIMIT = 100
@@ -140,39 +141,15 @@ local function warn(message)
   vim.notify(message, vim.log.levels.WARN)
 end
 
-local function fail_closed_scope()
-  return {
-    schema_filter = { include = {}, exclude = {}, lazy_per_schema = false },
-    schema_filter_signature = "schema-filter-v1|fail-closed",
-    fold = "case_insensitive",
-    connection_type = "",
-    include = {},
-    exclude = {},
-    implicit_all = false,
-    active = true,
-    lazy_per_schema = false,
-    fail_closed = true,
-  }
-end
-
-local function read_authoritative_scope(handler, conn_id)
-  if handler and type(handler.get_schema_filter_normalized) == "function" then
-    local ok, scope = pcall(handler.get_schema_filter_normalized, handler, conn_id)
-    if ok and scope then
-      return scope, true
-    end
-    return nil, true
-  end
-  return schema_filter.normalize(nil, nil), false
-end
-
 ---@param handler Handler
 ---@param conn_id connection_id
 ---@return SchemaCache
 function SchemaCache:new(handler, conn_id)
   local cache_dir = vim.fn.stdpath("state") .. "/dbee/lsp_cache"
-  local normalized_scope = read_authoritative_scope(handler, conn_id)
-  normalized_scope = normalized_scope or fail_closed_scope()
+  local authority = schema_filter_authority.read(handler, conn_id)
+  local normalized_scope = authority.status == "ok" and authority.scope
+    or authority.status == "api_absent_legacy" and schema_filter_authority.legacy_implicit_all()
+    or schema_filter_authority.fail_closed_scope()
   local o = {
     handler = handler,
     conn_id = conn_id,
@@ -230,14 +207,14 @@ end
 ---@private
 ---@return table
 function SchemaCache:_read_normalized_scope()
-  local scope, authority_attempted = read_authoritative_scope(self.handler, self.conn_id)
-  if scope then
-    return scope
+  local authority = schema_filter_authority.read(self.handler, self.conn_id)
+  if authority.status == "ok" then
+    return authority.scope
   end
-  if authority_attempted then
-    return fail_closed_scope()
+  if authority.status == "api_absent_legacy" then
+    return schema_filter_authority.legacy_implicit_all()
   end
-  return self.schema_scope or schema_filter.normalize(nil, nil)
+  return schema_filter_authority.fail_closed_scope()
 end
 
 ---@return boolean changed

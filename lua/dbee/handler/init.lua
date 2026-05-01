@@ -1,5 +1,6 @@
 local event_bus = require("dbee.handler.__events")
 local schema_filter = require("dbee.schema_filter")
+local schema_filter_authority = require("dbee.schema_filter_authority")
 local utils = require("dbee.utils")
 local register_remote_plugin = require("dbee.api.__register")
 
@@ -123,6 +124,45 @@ local function same_schema_scope(previous, current)
   return tostring(previous.type or "") == tostring(current.type or "")
     and schema_filter_signature(previous.type, previous.schema_filter)
       == schema_filter_signature(current.type, current.schema_filter)
+end
+
+local function structure_options_from_scope(scope)
+  if scope and scope.fail_closed == true then
+    return {
+      schema_filter = {
+        include = { "__DBEE_FAIL_CLOSED_SCHEMA_SCOPE__" },
+        exclude = {},
+        lazy_per_schema = false,
+      },
+      schema_filter_signature = scope.schema_filter_signature,
+      fold = scope.fold,
+      connection_type = scope.connection_type,
+    }
+  end
+  return {
+    schema_filter = vim.deepcopy(scope.schema_filter),
+    schema_filter_signature = scope.schema_filter_signature,
+    fold = scope.fold,
+    connection_type = scope.connection_type,
+  }
+end
+
+local function filter_schema_rows(schemas, scope)
+  if scope and scope.fail_closed == true then
+    return {}
+  end
+  if not scope or scope.active ~= true then
+    return vim.deepcopy(schemas or {})
+  end
+
+  local out = {}
+  for _, schema in ipairs(schemas or {}) do
+    local name = type(schema) == "table" and (schema.name or schema.schema) or schema
+    if type(name) == "string" and name ~= "" and schema_filter.matches(name, scope) then
+      out[#out + 1] = vim.deepcopy(schema)
+    end
+  end
+  return out
 end
 
 ---@param previous ConnectionParams[]
@@ -716,24 +756,17 @@ end
 ---@param schema string
 ---@return string
 function Handler:_fold_schema_name(conn_id, schema)
-  local params = self:connection_get_params(conn_id)
-  local normalized = schema_filter.normalize(params and params.schema_filter or nil, params and params.type or nil)
-  return schema_filter.fold(schema, normalized and normalized.fold or nil)
+  local authority = schema_filter_authority.read(self, conn_id)
+  local scope = authority.status == "ok" and authority.scope
+    or authority.status == "api_absent_legacy" and schema_filter_authority.legacy_implicit_all()
+    or schema_filter_authority.fail_closed_scope()
+  return schema_filter.fold(schema, scope.fold)
 end
 
 ---@private
 ---@return table
 function Handler:_fail_closed_schema_filter_options()
-  return {
-    schema_filter = {
-      include = { "__DBEE_FAIL_CLOSED_SCHEMA_SCOPE__" },
-      exclude = {},
-      lazy_per_schema = false,
-    },
-    schema_filter_signature = "schema-filter-v1|fail-closed",
-    fold = "case_insensitive",
-    connection_type = "",
-  }
+  return structure_options_from_scope(schema_filter_authority.fail_closed_scope())
 end
 
 ---@private
@@ -741,15 +774,14 @@ end
 ---@param structures DBStructure[]?
 ---@return DBStructure[]
 function Handler:_filter_structures_for_connection(conn_id, structures)
-  local params = self:connection_get_params(conn_id)
-  if not params then
+  local authority = schema_filter_authority.read(self, conn_id)
+  if authority.status == "authority_unavailable" then
     return {}
   end
-  local normalized, err = schema_filter.normalize(params and params.schema_filter or nil, params and params.type or nil)
-  if not normalized then
-    error(err or "invalid schema_filter")
+  if authority.status == "api_absent_legacy" then
+    return vim.deepcopy(structures or {})
   end
-  return schema_filter.filter_structures(structures or {}, normalized)
+  return schema_filter.filter_structures(structures or {}, authority.scope)
 end
 
 ---@private
@@ -895,6 +927,21 @@ local function schema_queue_insert(queue, entry)
 end
 
 function Handler:_start_schema_object_entry(entry)
+  local authority = schema_filter_authority.read(self, entry.conn_id)
+  if schema_filter_authority.is_fail_closed(authority) then
+    for _, waiter in ipairs(entry.waiters or {}) do
+      self:_notify_schema_waiter(waiter, {
+        conn_id = entry.conn_id,
+        request_id = waiter.request_id,
+        root_epoch = entry.epoch,
+        schema = entry.schema,
+        caller_token = waiter.caller_token,
+        error_kind = "authority_unavailable",
+      })
+    end
+    return false, "authority_unavailable"
+  end
+
   local queue = self:_schema_object_queue(entry.conn_id)
   queue.active = (queue.active or 0) + 1
   self._schema_object_flights[entry.key] = entry
@@ -1005,6 +1052,19 @@ function Handler:connection_get_structure_singleflight(opts)
     caller_token = opts.caller_token,
     callback = opts.callback,
   }
+  local authority = schema_filter_authority.read(self, opts.conn_id)
+  if schema_filter_authority.is_fail_closed(authority) then
+    self:_notify_structure_waiter(waiter, {
+      conn_id = opts.conn_id,
+      request_id = waiter.request_id,
+      root_epoch = epoch,
+      caller_token = waiter.caller_token,
+      error_kind = "authority_unavailable",
+    })
+    return { epoch = epoch, request_id = waiter.request_id, joined = false, error_kind = "authority_unavailable" }
+  end
+  local structure_opts = authority.status == "ok" and structure_options_from_scope(authority.scope)
+    or schema_filter.to_structure_options(nil, nil)
 
   local flight = self._structure_flights[key]
   if flight and #(flight.waiters or {}) == 0 then
@@ -1039,7 +1099,7 @@ function Handler:connection_get_structure_singleflight(opts)
     conn_id = opts.conn_id,
     epoch = epoch,
     request_id = internal_request_id,
-    schema_filter_signature = self:get_schema_filter(opts.conn_id).schema_filter_signature,
+    schema_filter_signature = structure_opts.schema_filter_signature,
     waiters = { waiter },
     consumer_slots = {
       [opts.consumer] = true,
@@ -1053,7 +1113,7 @@ function Handler:connection_get_structure_singleflight(opts)
     internal_request_id,
     epoch,
     SINGLEFLIGHT_CALLER_TOKEN,
-    self:get_schema_filter(opts.conn_id)
+    structure_opts
   )
 
   return {
@@ -1082,6 +1142,21 @@ function Handler:connection_list_schemas_singleflight(opts)
     caller_token = opts.caller_token,
     callback = opts.callback,
   }
+  local authority = schema_filter_authority.read(self, opts.conn_id)
+  if schema_filter_authority.is_fail_closed(authority) then
+    self:_notify_schema_waiter(waiter, {
+      conn_id = opts.conn_id,
+      request_id = waiter.request_id,
+      root_epoch = epoch,
+      caller_token = waiter.caller_token,
+      schemas = {},
+      error_kind = "authority_unavailable",
+    })
+    return { epoch = epoch, request_id = waiter.request_id, joined = false, error_kind = "authority_unavailable" }
+  end
+  local schema_filter_signature = authority.status == "ok"
+    and authority.scope.schema_filter_signature
+    or schema_filter_authority.legacy_implicit_all().schema_filter_signature
 
   local flight = self._schema_list_flights[key]
   if flight then
@@ -1104,7 +1179,7 @@ function Handler:connection_list_schemas_singleflight(opts)
     epoch = epoch,
     purpose = purpose,
     request_id = internal_request_id,
-    schema_filter_signature = self:get_schema_filter(opts.conn_id).schema_filter_signature,
+    schema_filter_signature = schema_filter_signature,
     waiters = { waiter },
   }
   self._schema_list_flights[key] = flight
@@ -1135,6 +1210,24 @@ function Handler:connection_get_schema_objects_singleflight(opts)
     caller_token = opts.caller_token,
     callback = opts.callback,
   }
+  local authority = schema_filter_authority.read(self, opts.conn_id)
+  if schema_filter_authority.is_fail_closed(authority) then
+    self:_notify_schema_waiter(waiter, {
+      conn_id = opts.conn_id,
+      request_id = waiter.request_id,
+      root_epoch = epoch,
+      schema = opts.schema,
+      caller_token = waiter.caller_token,
+      error_kind = "authority_unavailable",
+    })
+    return {
+      epoch = epoch,
+      request_id = waiter.request_id,
+      joined = false,
+      queued = false,
+      error_kind = "authority_unavailable",
+    }
+  end
 
   local active = self._schema_object_flights[key]
   if active then
@@ -1151,7 +1244,8 @@ function Handler:connection_get_schema_objects_singleflight(opts)
 
   self._next_singleflight_request_id = self._next_singleflight_request_id + 1
   local internal_request_id = self._next_singleflight_request_id
-  local entry_opts = self:get_schema_filter(opts.conn_id)
+  local entry_opts = authority.status == "ok" and structure_options_from_scope(authority.scope)
+    or schema_filter.to_structure_options(nil, nil)
   local entry = {
     key = key,
     conn_id = opts.conn_id,
@@ -1495,14 +1589,29 @@ function Handler:_on_schema_list_loaded(data)
     return
   end
 
+  local authority = schema_filter_authority.read(self, flight.conn_id)
+  local schemas = nil
+  local error_kind = nil
+  if data.error then
+    schemas = nil
+  elseif schema_filter_authority.is_fail_closed(authority) then
+    schemas = {}
+    error_kind = "authority_unavailable"
+  elseif authority.status == "ok" then
+    schemas = filter_schema_rows(data.schemas, authority.scope)
+  else
+    schemas = copy_payload(data.schemas)
+  end
+
   for _, waiter in ipairs(flight.waiters or {}) do
     self:_notify_schema_waiter(waiter, {
       conn_id = flight.conn_id,
       request_id = waiter.request_id,
       root_epoch = payload_epoch,
       caller_token = waiter.caller_token,
-      schemas = data.error and nil or copy_payload(data.schemas),
+      schemas = schemas,
       error = data.error,
+      error_kind = error_kind,
     })
   end
 end
@@ -2220,15 +2329,15 @@ end
 ---@param id connection_id
 ---@return table
 function Handler:get_schema_filter(id)
-  local params = self:connection_get_params(id)
-  if not params then
+  local authority = schema_filter_authority.read(self, id)
+  if authority.status == "authority_unavailable" then
     return self:_fail_closed_schema_filter_options()
   end
-  local opts, err = schema_filter.to_structure_options(params and params.schema_filter or nil, params and params.type or nil)
-  if not opts then
-    error(err or "invalid schema_filter")
+  if authority.status == "api_absent_legacy" then
+    local opts = schema_filter.to_structure_options(nil, nil)
+    return opts
   end
-  return opts
+  return structure_options_from_scope(authority.scope)
 end
 
 ---@param id connection_id
@@ -2249,6 +2358,9 @@ end
 ---@param opts? table
 ---@return DBStructure[]
 function Handler:connection_get_structure(id, opts)
+  if not opts and schema_filter_authority.is_fail_closed(schema_filter_authority.read(self, id)) then
+    return {}
+  end
   local ret = vim.fn.DbeeConnectionGetStructure(id, opts or self:get_schema_filter(id))
   if not ret or ret == vim.NIL then
     return {}
@@ -2262,6 +2374,9 @@ end
 ---@param caller_token? string
 ---@param opts? table
 function Handler:connection_get_structure_async(id, request_id, root_epoch, caller_token, opts)
+  if not opts and schema_filter_authority.is_fail_closed(schema_filter_authority.read(self, id)) then
+    return
+  end
   if request_id == nil and root_epoch == nil and caller_token == nil then
     vim.fn.DbeeConnectionGetStructureAsync(id, 0, 0, "", opts or self:get_schema_filter(id))
     return
@@ -2272,9 +2387,16 @@ end
 ---@param id connection_id
 ---@return table[]
 function Handler:connection_list_schemas(id)
+  local authority = schema_filter_authority.read(self, id)
+  if authority.status == "authority_unavailable" then
+    return {}
+  end
   local ret = vim.fn.DbeeConnectionListSchemas(id)
   if not ret or ret == vim.NIL then
     return {}
+  end
+  if authority.status == "ok" then
+    return filter_schema_rows(ret, authority.scope)
   end
   return ret
 end
@@ -2284,6 +2406,9 @@ end
 ---@param root_epoch integer
 ---@param caller_token? string
 function Handler:connection_list_schemas_async(id, request_id, root_epoch, caller_token)
+  if schema_filter_authority.is_fail_closed(schema_filter_authority.read(self, id)) then
+    return
+  end
   vim.fn.DbeeConnectionListSchemasAsync(id, request_id or 0, root_epoch or 0, caller_token or "")
 end
 
@@ -2317,6 +2442,9 @@ end
 ---@param opts? table
 ---@return DBStructure[]
 function Handler:connection_get_schema_objects(id, schema, opts)
+  if not opts and schema_filter_authority.is_fail_closed(schema_filter_authority.read(self, id)) then
+    return {}
+  end
   local ret = vim.fn.DbeeStructureForSchema(id, schema, opts or self:get_schema_filter(id))
   if not ret or ret == vim.NIL then
     return {}
@@ -2331,6 +2459,9 @@ end
 ---@param opts? table
 ---@param caller_token? string
 function Handler:connection_get_schema_objects_async(id, request_id, root_epoch, schema, opts, caller_token)
+  if not opts and schema_filter_authority.is_fail_closed(schema_filter_authority.read(self, id)) then
+    return
+  end
   vim.fn.DbeeStructureForSchemaAsync(
     id,
     request_id or 0,
@@ -2345,6 +2476,13 @@ end
 ---@param opts { table: string, schema: string, materialization: string }
 ---@return Column[]
 function Handler:connection_get_columns(id, opts)
+  local authority = schema_filter_authority.read(self, id)
+  if schema_filter_authority.is_fail_closed(authority) then
+    return {}
+  end
+  if authority.status == "ok" and not schema_filter.matches(opts and opts.schema or "", authority.scope) then
+    return {}
+  end
   local out = vim.fn.DbeeConnectionGetColumns(id, opts)
   if not out or out == vim.NIL then
     return {}
@@ -2359,6 +2497,13 @@ end
 ---@param root_epoch integer
 ---@param opts { table: string, schema: string, materialization: string, kind?: string }
 function Handler:connection_get_columns_async(id, request_id, branch_id, root_epoch, opts)
+  local authority = schema_filter_authority.read(self, id)
+  if schema_filter_authority.is_fail_closed(authority) then
+    return
+  end
+  if authority.status == "ok" and not schema_filter.matches(opts and opts.schema or "", authority.scope) then
+    return
+  end
   vim.fn.DbeeConnectionGetColumnsAsync(id, request_id, branch_id, root_epoch, {
     table = opts.table,
     schema = opts.schema,

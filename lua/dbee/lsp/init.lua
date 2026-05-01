@@ -3,6 +3,7 @@ local context = require("dbee.lsp.context")
 local SchemaCache = require("dbee.lsp.schema_cache")
 local server = require("dbee.lsp.server")
 local schema_filter = require("dbee.schema_filter")
+local schema_filter_authority = require("dbee.schema_filter_authority")
 local utils = require("dbee.utils")
 
 -- Metadata SQL queries per connection type.
@@ -139,11 +140,11 @@ local function clear_connection_tracking(conn_id)
 end
 
 local function read_startup_schema_scope(handler, conn_id)
-  if handler and type(handler.get_schema_filter_normalized) == "function" and conn_id then
-    local ok, scope = pcall(handler.get_schema_filter_normalized, handler, conn_id)
-    if ok and scope then
-      return scope, false
-    end
+  local authority = schema_filter_authority.read(handler, conn_id)
+  if authority.status == "ok" then
+    return authority.scope, false
+  end
+  if authority.status == "authority_unavailable" then
     return nil, true
   end
   return nil, false

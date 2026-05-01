@@ -80,6 +80,71 @@ local function run_schema_list_singleflight()
   print("ARCH14_SCHEMA_LIST_SINGLEFLIGHT_OK=true")
 end
 
+local function run_schema_list_authority_fail_closed()
+  local handler = Handler:new({})
+  vim.fn.DbeeConnectionGetParams = function()
+    return vim.NIL
+  end
+  local sync_calls = 0
+  local async_calls = 0
+  local column_calls = 0
+  local column_async_calls = 0
+  vim.fn.DbeeConnectionListSchemas = function()
+    sync_calls = sync_calls + 1
+    return { { name = "leaked" } }
+  end
+  vim.fn.DbeeConnectionListSchemasAsync = function()
+    async_calls = async_calls + 1
+  end
+  vim.fn.DbeeConnectionGetColumns = function()
+    column_calls = column_calls + 1
+    return { { name = "leaked_col", type = "text" } }
+  end
+  vim.fn.DbeeConnectionGetColumnsAsync = function()
+    column_async_calls = column_async_calls + 1
+  end
+
+  local sync_result = handler:connection_list_schemas("conn-missing-params")
+  assert_eq("sync list fail closed empty", #sync_result, 0)
+  assert_eq("sync list skipped db", sync_calls, 0)
+
+  handler:connection_list_schemas_async("conn-missing-params", 7, 0, "drawer")
+  assert_eq("direct async list skipped db", async_calls, 0)
+
+  local callback_payload = nil
+  local result = handler:connection_list_schemas_singleflight({
+    conn_id = "conn-missing-params",
+    purpose = "drawer",
+    consumer = "drawer",
+    request_id = 8,
+    caller_token = "drawer",
+    callback = function(payload)
+      callback_payload = payload
+    end,
+  })
+  assert_eq("singleflight fail closed error", result.error_kind, "authority_unavailable")
+  assert_true("singleflight callback fail closed", callback_payload ~= nil)
+  assert_eq("singleflight callback error", callback_payload.error_kind, "authority_unavailable")
+  assert_eq("singleflight callback empty schemas", #callback_payload.schemas, 0)
+  assert_eq("singleflight list skipped db", async_calls, 0)
+
+  local columns = handler:connection_get_columns("conn-missing-params", {
+    schema = "app",
+    table = "accounts",
+    materialization = "table",
+  })
+  assert_eq("columns fail closed empty", #columns, 0)
+  assert_eq("columns skipped db", column_calls, 0)
+  handler:connection_get_columns_async("conn-missing-params", 9, "branch", 0, {
+    schema = "app",
+    table = "accounts",
+    materialization = "table",
+  })
+  assert_eq("async columns skipped db", column_async_calls, 0)
+
+  print("ARCH14_LIST_SCHEMAS_FAIL_CLOSED_ON_AUTHORITY_NIL=true")
+end
+
 local function run_schema_object_singleflight_and_backpressure()
   install_connection_params_stub()
   local handler = Handler:new({})
@@ -482,6 +547,7 @@ local function run_schema_spec_non_mutating_contract()
 end
 
 run_schema_list_singleflight()
+run_schema_list_authority_fail_closed()
 run_schema_object_singleflight_and_backpressure()
 run_manifest_contract()
 run_reconnect_schema_flight_migration()

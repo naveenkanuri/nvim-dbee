@@ -24,6 +24,7 @@ local function assert_eq(label, actual, expected)
 end
 
 local schema_filter = require("dbee.schema_filter")
+local schema_filter_authority = require("dbee.schema_filter_authority")
 
 local function run_normalization_contract()
   local opts, err = schema_filter.to_structure_options({
@@ -192,11 +193,71 @@ local function run_handler_authority_contract()
   print("ARCH14_LAZY_PER_SCHEMA_FLAG_GATED=true")
 end
 
+local function run_authority_helper_contract()
+  assert_true("helper present", type(schema_filter_authority.read) == "function")
+  assert_true("helper fail closed predicate", type(schema_filter_authority.is_fail_closed) == "function")
+  assert_true("helper legacy scope", schema_filter_authority.legacy_implicit_all().implicit_all == true)
+  print("ARCH14_AUTHORITY_HELPER_PRESENT=true")
+
+  local missing = schema_filter_authority.read(nil, "conn")
+  assert_eq("missing handler unavailable", missing.status, "authority_unavailable")
+
+  local nil_handler = {
+    get_schema_filter_normalized = function()
+      return nil
+    end,
+  }
+  assert_eq("nil scope unavailable", schema_filter_authority.read(nil_handler, "conn").status, "authority_unavailable")
+  local error_handler = {
+    get_schema_filter_normalized = function()
+      error("params unavailable")
+    end,
+  }
+  assert_eq("error scope unavailable", schema_filter_authority.read(error_handler, "conn").status, "authority_unavailable")
+  print("ARCH14_AUTHORITY_HELPER_FAIL_CLOSED_API=true")
+
+  local legacy = schema_filter_authority.read({}, "conn")
+  assert_eq("legacy status", legacy.status, "api_absent_legacy")
+  print("ARCH14_AUTHORITY_HELPER_LEGACY_API=true")
+
+  local ok_scope = assert(schema_filter.normalize({ include = { "APP%" } }, "postgres"))
+  local ok_handler = {
+    get_schema_filter_normalized = function(_, conn_id)
+      assert_eq("ok conn id", conn_id, "conn-ok")
+      return ok_scope
+    end,
+  }
+  local ok = schema_filter_authority.read(ok_handler, "conn-ok")
+  assert_eq("ok status", ok.status, "ok")
+  assert_eq("ok scope", ok.scope.schema_filter_signature, ok_scope.schema_filter_signature)
+  print("ARCH14_AUTHORITY_HELPER_OK_API=true")
+
+  local root = vim.fn.getcwd()
+  local files = vim.fn.systemlist({ "rg", "--files", root .. "/lua/dbee" })
+  assert_true("rg files", vim.v.shell_error == 0 and #files > 0)
+  local offenders = {}
+  for _, file in ipairs(files) do
+    if file:sub(-4) == ".lua" and not file:find("/schema_filter_authority%.lua$") then
+      local lines = vim.fn.readfile(file)
+      for line_no, line in ipairs(lines) do
+        if line:find("get_schema_filter_normalized", 1, true)
+          and not line:find("function Handler:get_schema_filter_normalized", 1, true)
+        then
+          offenders[#offenders + 1] = file .. ":" .. tostring(line_no)
+        end
+      end
+    end
+  end
+  assert_eq("all consumers routed", table.concat(offenders, ","), "")
+  print("ARCH14_AUTHORITY_HELPER_ALL_CONSUMERS_ROUTED=true")
+end
+
 run_normalization_contract()
 run_fail_closed_structure_contract()
 run_invalid_pattern_contract()
 run_sources_preserve_filter_contract()
 run_handler_authority_contract()
+run_authority_helper_contract()
 
 print("ARCH14_SCHEMA_FILTER_ALL_PASS=true")
 vim.cmd("qa")

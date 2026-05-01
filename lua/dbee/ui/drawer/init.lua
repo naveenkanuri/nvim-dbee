@@ -7,6 +7,7 @@ local drawer_model = require("dbee.ui.drawer.model")
 local expansion = require("dbee.ui.drawer.expansion")
 local reconnect = require("dbee.reconnect")
 local schema_filter = require("dbee.schema_filter")
+local schema_filter_authority = require("dbee.schema_filter_authority")
 local utils = require("dbee.utils")
 
 local connection_wizard = nil
@@ -259,33 +260,18 @@ local function handler_bump_root_epoch(ui, conn_ids)
   return next_epoch + 1
 end
 
----@return table normalized
-local function fail_closed_schema_scope()
-  return {
-    schema_filter = { include = {}, exclude = {}, lazy_per_schema = false },
-    schema_filter_signature = "schema-filter-v1|fail-closed",
-    fold = "case_insensitive",
-    connection_type = "",
-    implicit_all = false,
-    include = {},
-    exclude = {},
-    lazy_per_schema = false,
-    active = true,
-    fail_closed = true,
-  }
-end
-
 ---@param ui DrawerUI
 ---@param conn_id connection_id
 ---@return table normalized
 local function normalized_schema_scope(ui, conn_id)
-  if ui and ui.handler and type(ui.handler.get_schema_filter_normalized) == "function" then
-    local ok, normalized = pcall(ui.handler.get_schema_filter_normalized, ui.handler, conn_id)
-    if ok and normalized then
-      return normalized
-    end
+  local authority = schema_filter_authority.read(ui and ui.handler or nil, conn_id)
+  if authority.status == "ok" then
+    return authority.scope
   end
-  return fail_closed_schema_scope()
+  if authority.status == "api_absent_legacy" then
+    return schema_filter_authority.legacy_implicit_all()
+  end
+  return schema_filter_authority.fail_closed_scope()
 end
 
 ---@param ui DrawerUI
