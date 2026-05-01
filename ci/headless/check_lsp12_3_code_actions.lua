@@ -416,6 +416,31 @@ do
   check_derived_table_alias_no_action()
 end
 
+do
+  local function check_mixed_derived_physical_no_expand()
+    local mixed_line = "select * from (select id from public.users) u join public.orders o on true"
+    local _, mixed_uri = make_buffer({ mixed_line })
+    did_open(client, mixed_uri, 1, mixed_line)
+    local mixed_lookup_count = 0
+    cache.get_code_action_table_columns = function()
+      mixed_lookup_count = mixed_lookup_count + 1
+      fail("mixed derived/physical source reached cached column lookup")
+    end
+    local mixed_star = position_of(mixed_line, "*")
+    local mixed_expand = code_action(client, mixed_uri, 0, mixed_star, mixed_star + 1, { "refactor.rewrite" })
+    cache.get_code_action_table_columns = original_columns
+    assert_eq("mixed derived physical expand omitted", #mixed_expand, 0)
+    assert_eq("mixed derived physical lookup count", mixed_lookup_count, 0)
+
+    local mixed_orders_pos = position_of(mixed_line, "orders")
+    local mixed_source = code_action(client, mixed_uri, 0, mixed_orders_pos, mixed_orders_pos, { "source" })
+    assert_true("mixed physical reload retained", first_command(mixed_source, "dbee/reload_table") ~= nil)
+    assert_true("mixed refresh retained", first_command(mixed_source, "dbee/refresh_schema") ~= nil)
+    emit("LSP12_3_EXPAND_MIXED_DERIVED_PHYSICAL_NO_ACTION", "true")
+  end
+  check_mixed_derived_physical_no_expand()
+end
+
 local qualify_line = "select id from orders"
 local qualify_buf, qualify_uri = make_buffer({ qualify_line })
 did_open(client, qualify_uri, 1, qualify_line)

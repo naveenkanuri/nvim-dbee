@@ -986,6 +986,7 @@ local function parse_statement_table_refs(statement, opts)
   opts = opts or {}
   local refs = {}
   local matches = {}
+  local derived_source_count = 0
 
   local tokens = scan_statement_tokens(statement)
   local from_boundaries = {
@@ -1228,14 +1229,14 @@ local function parse_statement_table_refs(statement, opts)
       while tokens[cursor] and tokens[cursor].depth ~= 0 do
         cursor = cursor + 1
       end
-      return skip_optional_derived_alias(cursor, tokens[cursor - 1] and tokens[cursor - 1].offset_end or token.offset_end)
+      return skip_optional_derived_alias(cursor, tokens[cursor - 1] and tokens[cursor - 1].offset_end or token.offset_end), true
     end
 
     local cursor = index
     while tokens[cursor] and tokens[cursor].offset_start < close_offset do
       cursor = cursor + 1
     end
-    return skip_optional_derived_alias(cursor, close_offset)
+    return skip_optional_derived_alias(cursor, close_offset), true
   end
 
   local function add_match(ref)
@@ -1250,8 +1251,11 @@ local function parse_statement_table_refs(statement, opts)
       if from_boundary(tokens[index]) then
         break
       end
-      local skipped = skip_derived_source(index, tokens[index - 1] and tokens[index - 1].offset_end or 1)
+      local skipped, derived = skip_derived_source(index, tokens[index - 1] and tokens[index - 1].offset_end or 1)
       if skipped and skipped > index then
+        if derived == true then
+          derived_source_count = derived_source_count + 1
+        end
         index = skipped
       else
         local ref
@@ -1269,8 +1273,11 @@ local function parse_statement_table_refs(statement, opts)
     while tokens[index] and token_lower(tokens[index]) == "as" do
       index = index + 1
     end
-    local skipped = skip_derived_source(index, tokens[index - 1] and tokens[index - 1].offset_end or 1)
+    local skipped, derived = skip_derived_source(index, tokens[index - 1] and tokens[index - 1].offset_end or 1)
     if skipped and skipped > index then
+      if derived == true then
+        derived_source_count = derived_source_count + 1
+      end
       return
     end
     local ref
@@ -1305,6 +1312,7 @@ local function parse_statement_table_refs(statement, opts)
   for _, ref in ipairs(matches) do
     refs[#refs + 1] = ref
   end
+  refs.derived_source_count = derived_source_count
   return refs
 end
 
@@ -1359,9 +1367,11 @@ end
 ---@return table[]
 function M.code_action_table_refs(statement)
   local refs = {}
-  for _, ref in ipairs(parse_statement_table_refs(statement, { top_level_only = true })) do
+  local parsed = parse_statement_table_refs(statement, { top_level_only = true })
+  for _, ref in ipairs(parsed) do
     refs[#refs + 1] = ref_with_ranges(statement, ref)
   end
+  refs.derived_source_count = parsed.derived_source_count or 0
   return refs
 end
 
@@ -1531,7 +1541,7 @@ end
 ---@return table?
 function M.single_code_action_table_ref(statement)
   local refs = M.code_action_table_refs(statement)
-  if #refs ~= 1 then
+  if #refs ~= 1 or (refs.derived_source_count or 0) ~= 0 then
     return nil
   end
   return refs[1]
