@@ -433,6 +433,21 @@ local wide_col = cache:get_column_metadata("public", "wide_table", "col_250", {
 assert_eq("wide column direct lookup", wide_col and wide_col.column, "col_250")
 emit("LSP12_HOVER_WIDE_TABLE_BOUNDED_COPY", "true")
 
+do
+  local schema_bound_cache = make_cache("lsp12-schema-bounded")
+  for i = 1, 250 do
+    schema_bound_cache:_upsert_table_index("wide_schema", string.format("table_%03d", i), "table")
+  end
+  local schema_bound_meta = schema_bound_cache:get_schema_metadata("wide_schema", { schema_quoted = true })
+  assert_eq("schema bounded total count", schema_bound_meta and schema_bound_meta.table_count, 250)
+  assert_true("schema bounded preview", schema_bound_meta and #schema_bound_meta.tables <= 20)
+  assert_eq("schema bounded first sorted", schema_bound_meta.tables[1], "table_001")
+  assert_eq("schema bounded last copied", schema_bound_meta.tables[#schema_bound_meta.tables], "table_020")
+  local schema_bound_docs = docs.format_hover(schema_bound_meta, {})
+  assert_true("schema bounded docs truncate", schema_bound_docs.value:find("%+230 more") ~= nil)
+  emit("LSP12_SCHEMA_HOVER_BOUNDED", "true")
+end
+
 handler.counters.sync = 0
 handler.counters.async = 0
 
@@ -974,6 +989,30 @@ local prune_stale = resolve.handle(prune_item, prune_cache, { memo = prune_memo 
 assert_eq("memo prune stale", prune_stale.data.dbee_resolve_status, "incomplete")
 assert_eq("memo pruned", memo_entry_count(prune_memo), 0)
 emit("LSP12_RESOLVE_MEMO_PRUNED_ON_GEN_BUMP", "true")
+
+do
+  local old_export = vim.env.LSP12_ROLLUP_EXPORT
+  vim.env.LSP12_ROLLUP_EXPORT = "1"
+  local rollup = dofile(vim.fn.getcwd() .. "/ci/headless/check_lsp12_rollup.lua")
+  vim.env.LSP12_ROLLUP_EXPORT = old_export
+
+  local lines = {}
+  for _, marker in ipairs(rollup.required_true_markers) do
+    lines[#lines + 1] = marker .. "=true"
+  end
+  for _, marker in ipairs(rollup.required_advisory_markers) do
+    lines[#lines + 1] = marker .. "=true"
+  end
+  lines[#lines + 1] = "LSP12_PERF_SCENARIOS_COUNT=10"
+
+  local valid = rollup.evaluate(lines)
+  assert_true("rollup exact once valid", valid.ok)
+  local duplicate_lines = vim.deepcopy(lines)
+  duplicate_lines[#duplicate_lines + 1] = rollup.required_true_markers[1] .. "=true"
+  local duplicate = rollup.evaluate(duplicate_lines)
+  assert_false("rollup exact once duplicate rejected", duplicate.ok)
+  emit("LSP12_ROLLUP_EXACTLY_ONCE_OK", "true")
+end
 
 do
   local root = vim.fn.getcwd()

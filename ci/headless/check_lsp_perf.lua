@@ -2380,6 +2380,18 @@ lsp12_register({
 })
 
 lsp12_register({
+  slug = "HOVER_SCHEMA_HIT",
+  kind = "hover",
+  run = function(state)
+    local result, elapsed = lsp12_hover(state, "SELECT * FROM SCHEMA_001.TABLE_000001", "SCHEMA_001")
+    if not (result and result.contents and result.contents.value:find("Schema", 1, true)) then
+      error("hover schema hit missing docs")
+    end
+    return elapsed
+  end,
+})
+
+lsp12_register({
   slug = "HOVER_COLUMN_HIT",
   kind = "hover",
   run = function(state)
@@ -2425,6 +2437,19 @@ lsp12_register({
     })
     if result ~= nil then
       error("hover long buffer cap returned docs")
+    end
+    return elapsed
+  end,
+})
+
+lsp12_register({
+  slug = "RESOLVE_SCHEMA_HIT",
+  kind = "resolve",
+  run = function(state)
+    local item = assert(lsp12_find_item(state.cache:get_schema_completion_items({ include_data = true }), "SCHEMA_001"))
+    local result, elapsed = lsp12_resolve(state, item)
+    if not (result and result.documentation and result.documentation.value:find("Schema", 1, true)) then
+      error("resolve schema hit missing docs")
     end
     return elapsed
   end,

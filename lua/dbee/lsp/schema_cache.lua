@@ -7,6 +7,8 @@
 ---@field private all_table_names string[] flat list for unqualified completion
 ---@field private schema_items lsp.CompletionItem[]
 ---@field private table_items_by_schema table<string, lsp.CompletionItem[]>
+---@field private schema_table_preview_by_schema table<string, string[]>
+---@field private schema_table_count_by_schema table<string, integer>
 ---@field private all_table_items lsp.CompletionItem[]
 ---@field private all_table_item_source_by_label table<string, string>
 ---@field private all_table_item_ambiguous_by_label table<string, boolean>
@@ -41,6 +43,7 @@ local FILTER_DELETE_SYNC_DELETE_LIMIT = 100
 local COLUMN_CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
 local SCHEMA_CACHE_VERSION = 3
 local MATERIALIZATIONS = { "table", "view" }
+local SCHEMA_TABLE_PREVIEW_LIMIT = 20
 
 local CompletionItemKind = {
   Field = 5,
@@ -681,6 +684,8 @@ function SchemaCache:_reset_indexes()
   self.all_table_names = {}
   self.schema_items = {}
   self.table_items_by_schema = {}
+  self.schema_table_preview_by_schema = {}
+  self.schema_table_count_by_schema = {}
   self.all_table_items = {}
   self.all_table_item_source_by_label = {}
   self.all_table_item_ambiguous_by_label = {}
@@ -706,6 +711,8 @@ function SchemaCache:_rebuild_structure_indexes()
   self.all_table_items = {}
   self.all_table_item_source_by_label = {}
   self.all_table_item_ambiguous_by_label = {}
+  self.schema_table_preview_by_schema = {}
+  self.schema_table_count_by_schema = {}
   self.schema_lookup_exact = {}
   self.schema_lookup = {}
   self.table_lookup_exact_by_schema = {}
@@ -731,15 +738,21 @@ function SchemaCache:_rebuild_structure_indexes()
     local table_names = vim.tbl_keys(self.tables[schema] or {})
     table.sort(table_names)
     local schema_items = {}
+    local schema_preview = {}
+    self.schema_table_count_by_schema[schema] = #table_names
 
     for _, name in ipairs(table_names) do
       local info = self.tables[schema][name] or { type = "table" }
       self:_upsert_table_lookup(schema, name)
+      if #schema_preview < SCHEMA_TABLE_PREVIEW_LIMIT then
+        schema_preview[#schema_preview + 1] = name
+      end
 
       schema_items[#schema_items + 1] = table_completion_item(schema, name, info.type)
     end
 
     self.table_items_by_schema[schema] = schema_items
+    self.schema_table_preview_by_schema[schema] = schema_preview
   end
 
   self:_refresh_global_table_index()
@@ -820,6 +833,7 @@ function SchemaCache:_upsert_table_index(schema, name, table_type, opts)
   end
   table_type = table_type or "table"
   local new_schema = not self.schemas[schema]
+  local table_existed = self.tables[schema] and self.tables[schema][name] ~= nil
   self.schemas[schema] = true
   self:_upsert_schema_lookup(schema)
 
@@ -827,6 +841,13 @@ function SchemaCache:_upsert_table_index(schema, name, table_type, opts)
     self.tables[schema] = {}
   end
   self.tables[schema][name] = { type = table_type }
+  self.schema_table_count_by_schema[schema] = (self.schema_table_count_by_schema[schema] or 0)
+    + (table_existed and 0 or 1)
+  self.schema_table_preview_by_schema[schema] = self.schema_table_preview_by_schema[schema] or {}
+  upsert_sorted_value(self.schema_table_preview_by_schema[schema], name)
+  while #self.schema_table_preview_by_schema[schema] > SCHEMA_TABLE_PREVIEW_LIMIT do
+    table.remove(self.schema_table_preview_by_schema[schema])
+  end
 
   if new_schema and schema ~= "_default" then
     upsert_sorted_item(self.schema_items, {
@@ -2205,13 +2226,13 @@ function SchemaCache:get_schema_metadata(schema, opts)
     return nil, "missing_or_filtered"
   end
 
-  local table_names = vim.tbl_keys(self.tables[actual_schema] or {})
-  table.sort(table_names)
+  local table_names = vim.deepcopy(self.schema_table_preview_by_schema[actual_schema] or {})
+  local table_count = self.schema_table_count_by_schema[actual_schema] or #table_names
   return {
     kind = "schema",
     schema = actual_schema,
     tables = table_names,
-    table_count = #table_names,
+    table_count = table_count,
     loaded = self.root_mode ~= "schemas_only" or self:_schema_loaded_in(actual_schema, self.loaded_schemas),
   }
 end

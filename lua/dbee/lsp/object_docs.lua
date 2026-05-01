@@ -89,6 +89,7 @@ local function format_schema(metadata, markdown)
     "Tables: " .. tostring(metadata.table_count or 0),
   }
   local tables = metadata.tables or {}
+  local total_tables = tonumber(metadata.table_count) or #tables
   local limit = math.min(#tables, 20)
   if limit > 0 then
     lines[#lines + 1] = ""
@@ -96,8 +97,8 @@ local function format_schema(metadata, markdown)
     for i = 1, limit do
       lines[#lines + 1] = "- " .. (markdown and inline_code(tables[i]) or tostring(tables[i]))
     end
-    if #tables > limit then
-      lines[#lines + 1] = "- +" .. tostring(#tables - limit) .. " more"
+    if total_tables > limit then
+      lines[#lines + 1] = "- +" .. tostring(total_tables - limit) .. " more"
     end
   end
   return join_lines(lines)

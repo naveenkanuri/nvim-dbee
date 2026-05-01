@@ -25,6 +25,7 @@ local required_true_markers = {
   "LSP12_HOVER_MARKDOWN_BACKTICK_SAFE",
   "LSP12_HOVER_CONTEXT_SCAN_BOUNDED",
   "LSP12_HOVER_WIDE_TABLE_BOUNDED_COPY",
+  "LSP12_SCHEMA_HOVER_BOUNDED",
   "LSP12_HOVER_SELECT_LIST_SINGLE_TABLE_OK",
   "LSP12_HOVER_SELECT_LIST_AMBIGUOUS_NIL",
   "LSP12_HOVER_COMMA_FROM_AMBIGUOUS_NIL",
@@ -37,10 +38,13 @@ local required_true_markers = {
   "LSP12_EPOCH_HELPER_FRESH_FALSE",
   "LSP12_EPOCH_HELPER_ADMIT_OK",
   "LSP12_EPOCH_HELPER_ADMIT_REJECT",
+  "LSP12_EPOCH_HELPER_UNAVAILABLE_FAIL_CLOSED",
   "LSP12_EPOCH_HELPER_ALL_CONSUMERS_ROUTED",
   "LSP12_COLUMNS_CACHED_HIT_FAIL_CLOSED",
   "LSP12_SCHEMAS_REFRESH_PRESERVE_LOADED_ATOMIC",
   "LSP12_METADATA_ROWS_STALE_EPOCH_REJECTED",
+  "LSP12_DIAGNOSTICS_FAIL_CLOSED_ON_STALE_CACHE",
+  "LSP12_ROLLUP_EXACTLY_ONCE_OK",
   "LSP12_HOVER_NO_SYNC_DB",
   "LSP12_HOVER_NO_ASYNC_DB",
   "LSP12_RESOLVE_SCHEMA_DOCS_OK",
@@ -93,6 +97,9 @@ local function evaluate(lines)
       failures[#failures + 1] = "missing " .. label
       return
     end
+    if #values ~= 1 then
+      failures[#failures + 1] = label .. " must appear exactly once, found " .. tostring(#values)
+    end
     for _, value in ipairs(values) do
       if not allowed[value] then
         failures[#failures + 1] = label .. " has unsupported value " .. tostring(value)
@@ -106,12 +113,20 @@ local function evaluate(lines)
   for _, label in ipairs(required_advisory_markers) do
     require_marker(label, { ["true"] = true, unfrozen = true })
   end
-  require_marker("LSP12_PERF_SCENARIOS_COUNT", { ["8"] = true })
+  require_marker("LSP12_PERF_SCENARIOS_COUNT", { ["10"] = true })
 
   return {
     ok = #failures == 0,
     failures = failures,
     checked = #required_true_markers + #required_advisory_markers + 1,
+  }
+end
+
+if vim.env.LSP12_ROLLUP_EXPORT == "1" then
+  return {
+    evaluate = evaluate,
+    required_true_markers = required_true_markers,
+    required_advisory_markers = required_advisory_markers,
   }
 end
 
@@ -135,10 +150,16 @@ local function selftest()
   for _, marker in ipairs(required_advisory_markers) do
     lines[#lines + 1] = marker .. "=unfrozen"
   end
-  lines[#lines + 1] = "LSP12_PERF_SCENARIOS_COUNT=8"
+  lines[#lines + 1] = "LSP12_PERF_SCENARIOS_COUNT=10"
   local valid = evaluate(lines)
   if not valid.ok then
     fail({ "selftest valid log failed: " .. table.concat(valid.failures, "; ") })
+  end
+  local duplicate_lines = vim.deepcopy(lines)
+  duplicate_lines[#duplicate_lines + 1] = required_true_markers[1] .. "=true"
+  local duplicate = evaluate(duplicate_lines)
+  if duplicate.ok then
+    fail({ "selftest duplicate marker did not fail" })
   end
   table.remove(lines, 1)
   local invalid = evaluate(lines)
