@@ -60,6 +60,7 @@ local sql_keywords_set = {
   alter = true, drop = true, null = true, is = true, like = true,
   between = true, exists = true, case = true, when = true, ["then"] = true,
   ["else"] = true, ["end"] = true, values = true, asc = true, desc = true,
+  recursive = true,
 }
 
 ---@param raw string?
@@ -1340,6 +1341,10 @@ function M.statement_local_relations(statement)
 
   local names = {}
   local index = first_top + 1
+  local modifier = tokens[index]
+  if modifier and modifier.depth == 0 and token_lower_name(modifier) == "recursive" then
+    index = index + 1
+  end
   while index <= #tokens do
     local token = tokens[index]
     if token.depth ~= 0 then
