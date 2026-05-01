@@ -162,8 +162,10 @@ wallet-test: perf-bootstrap
 	  log="$$2"; \
 	  shift 2; \
 	  tmp="$$(mktemp)"; \
+	  set +e; \
 	  "$$@" >"$$tmp" 2>&1; \
 	  status="$$?"; \
+	  set -e; \
 	  cat "$$tmp"; \
 	  cat "$$tmp" >> "$$log"; \
 	  rm -f "$$tmp"; \
