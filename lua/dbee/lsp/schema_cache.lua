@@ -2375,6 +2375,10 @@ function SchemaCache:resolve_table_for_code_action(schema, table_name, opts)
     }
   end
 
+  if self:has_unloaded_active_schemas() then
+    return nil, "active_unloaded"
+  end
+
   local matches = {}
   local schemas = vim.tbl_keys(self.schemas or {})
   table.sort(schemas)
