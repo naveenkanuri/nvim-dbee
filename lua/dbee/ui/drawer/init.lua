@@ -324,6 +324,14 @@ local function root_request_pending(ui, conn_id)
   return requested > applied and ui._struct_cache.root[conn_id] == nil
 end
 
+local function root_load_error(data)
+  return data and (data.error or data.error_kind) or nil
+end
+
+local function root_load_retryable(data)
+  return data and data.error_kind == "authority_unavailable"
+end
+
 ---@param ui DrawerUI
 ---@param conn_id string
 ---@param branch_id string
@@ -995,8 +1003,12 @@ local function request_schema_root_reload(ui, conn_id, opts)
       request_id = request_id,
       caller_token = "drawer",
       callback = function(data)
-        if data.error_kind == "superseded" then
+        if not data or data.error_kind == "superseded" then
           return
+        end
+        local load_error = root_load_error(data)
+        if load_error and not data.error then
+          data = vim.tbl_extend("force", data, { error = load_error })
         end
         ui:on_schemas_loaded(data)
       end,
@@ -1949,7 +1961,7 @@ end
 
 -- event listener for async structure loading
 ---@private
----@param data { conn_id: string, request_id?: integer, root_epoch?: integer, caller_token?: string, structures?: DBStructure[], error?: any }
+---@param data { conn_id: string, request_id?: integer, root_epoch?: integer, caller_token?: string, structures?: DBStructure[], error?: any, error_kind?: string }
 function DrawerUI:on_structure_loaded(data)
   if not data or not data.conn_id then
     return
@@ -1980,6 +1992,7 @@ function DrawerUI:on_structure_loaded(data)
     self:interrupt_filter("Drawer data changed; closing filter before refresh")
   end
 
+  local load_error = root_load_error(data)
   self._struct_cache.root_applied[data.conn_id] = math.max(applied_request_id, request_id)
   invalidate_authoritative_caches(self)
 
@@ -1987,32 +2000,39 @@ function DrawerUI:on_structure_loaded(data)
     self._manual_refresh_conns[data.conn_id] = nil
     local ok_params, conn_params = pcall(self.handler.connection_get_params, self.handler, data.conn_id)
     local name = (ok_params and conn_params and conn_params.name) or data.conn_id
-    if data.error then
-      local reason = tostring(data.error):sub(1, 120)
+    if load_error then
+      local reason = tostring(load_error):sub(1, 120)
       utils.log("error", "Schema refresh failed: " .. name .. " (" .. reason .. ")")
     else
       utils.log("info", "Schema loaded: " .. name)
     end
   end
 
+  if root_load_retryable(data) then
+    self._struct_cache.root[data.conn_id] = nil
+    self._struct_cache.root_mode[data.conn_id] = nil
+    self._replay_container_expansions[data.conn_id] = nil
+    return
+  end
+
   local scope = normalized_schema_scope(self, data.conn_id)
   self._struct_cache.root[data.conn_id] = {
-    structures = schema_filter.filter_structures(data.structures or {}, scope),
-    error = data.error,
+    structures = load_error and {} or schema_filter.filter_structures(data.structures or {}, scope),
+    error = load_error,
   }
   self._struct_cache.root_mode[data.conn_id] = "full"
 
-  if data.error then
+  if load_error then
     self._replay_container_expansions[data.conn_id] = nil
   end
 
   self:_patch_connection_subtree(data.conn_id, {
-    restore_container_expansions = not data.error,
+    restore_container_expansions = not load_error,
   })
 end
 
 ---@private
----@param data { conn_id: string, request_id?: integer, root_epoch?: integer, caller_token?: string, schemas?: table[], error?: any }
+---@param data { conn_id: string, request_id?: integer, root_epoch?: integer, caller_token?: string, schemas?: table[], error?: any, error_kind?: string }
 function DrawerUI:on_schemas_loaded(data)
   if not data or not data.conn_id then
     return
@@ -2035,6 +2055,18 @@ function DrawerUI:on_schemas_loaded(data)
     return
   end
 
+  local load_error = root_load_error(data)
+  if root_load_retryable(data) then
+    self._struct_cache.root_applied[data.conn_id] = math.max(applied_request_id, request_id)
+    self._struct_cache.root[data.conn_id] = nil
+    self._struct_cache.root_mode[data.conn_id] = nil
+    self._struct_cache.root_filter_signature[data.conn_id] = nil
+    self._struct_cache.root_loaded_schemas[data.conn_id] = nil
+    self._replay_container_expansions[data.conn_id] = nil
+    invalidate_authoritative_caches(self)
+    return
+  end
+
   local ok_params, conn = pcall(self.handler.connection_get_params, self.handler, data.conn_id)
   if not ok_params or not conn then
     return
@@ -2051,17 +2083,17 @@ function DrawerUI:on_schemas_loaded(data)
   invalidate_authoritative_caches(self)
 
   self._struct_cache.root[data.conn_id] = {
-    structures = data.error and {} or schema_rows_for_connection(normalized, data.schemas or {}),
-    error = data.error,
+    structures = load_error and {} or schema_rows_for_connection(normalized, data.schemas or {}),
+    error = load_error,
     schemas_only = true,
   }
   self._struct_cache.root_loaded_schemas[data.conn_id] = {}
-  if data.error then
+  if load_error then
     self._replay_container_expansions[data.conn_id] = nil
   end
 
   self:_patch_connection_subtree(data.conn_id, {
-    restore_container_expansions = not data.error,
+    restore_container_expansions = not load_error,
   })
 end
 
@@ -2485,8 +2517,12 @@ function DrawerUI:request_structure_reload(conn_id, opts)
       request_id = request_id,
       caller_token = "drawer",
       callback = function(data)
-        if data.error_kind == "superseded" then
+        if not data or data.error_kind == "superseded" then
           return
+        end
+        local load_error = root_load_error(data)
+        if load_error and not data.error then
+          data = vim.tbl_extend("force", data, { error = load_error })
         end
         self:on_structure_loaded(data)
       end,

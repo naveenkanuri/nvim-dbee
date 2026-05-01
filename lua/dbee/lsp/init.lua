@@ -121,6 +121,10 @@ local function fail_close_active_cache(conn_id, reason)
   end
 end
 
+local function root_load_error(data)
+  return data and (data.error or data.error_kind) or nil
+end
+
 ---@param conn_id connection_id|nil
 local function clear_connection_tracking(conn_id)
   if conn_id and conn_id ~= "" then
@@ -461,7 +465,12 @@ function M._on_structure_loaded(handler, data)
     return
   end
 
-  if data.error then
+  local load_error = root_load_error(data)
+  if load_error then
+    M._async_requested[data.conn_id] = nil
+    if data.error_kind == "authority_unavailable" then
+      fail_close_active_cache(data.conn_id, "schema-filter-authority-unavailable")
+    end
     return
   end
 
@@ -504,7 +513,16 @@ function M._on_schemas_loaded(handler, data)
     return
   end
   local conn = handler:get_current_connection()
-  if not conn or conn.id ~= data.conn_id or data.error then
+  if not conn or conn.id ~= data.conn_id then
+    return
+  end
+
+  local load_error = root_load_error(data)
+  if load_error then
+    M._async_requested[data.conn_id] = nil
+    if data.error_kind == "authority_unavailable" then
+      fail_close_active_cache(data.conn_id, "schema-filter-authority-unavailable")
+    end
     return
   end
 

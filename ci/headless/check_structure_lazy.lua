@@ -1184,6 +1184,52 @@ do
   assert_eq("root_error_no_root_rpc_replay", root_error_fixture.counters.root_async, before_root_async)
   assert_eq("root_error_no_child_rpc_replay", root_error_fixture.counters.child_async, before_child_async)
 
+  local function assert_root_retries_after_recovery(fixture, before_count, label)
+    fixture.drawer:refresh()
+    if fixture.counters.root_async == before_count then
+      expand_source(fixture)
+      set_current_node(fixture.winid, fixture.drawer.tree, fixture.ids.conn_ready)
+      fixture.drawer:get_actions().collapse()
+      fixture.drawer:get_actions().expand()
+    end
+    assert_true(label, fixture.counters.root_async > before_count)
+  end
+
+  local authority_root_fixture = new_fixture()
+  expand_source(authority_root_fixture)
+  set_current_node(authority_root_fixture.winid, authority_root_fixture.drawer.tree, authority_root_fixture.ids.conn_ready)
+  authority_root_fixture.drawer:get_actions().expand()
+  local authority_root_request = authority_root_fixture:latest_root_request(authority_root_fixture.ids.conn_ready)
+  assert_not_nil("authority_root_request", authority_root_request)
+  authority_root_fixture:emit_root(authority_root_request, {
+    error_kind = "authority_unavailable",
+    structures = {},
+  })
+  assert_eq("authority_structure_not_cached_success", authority_root_fixture.drawer._struct_cache.root[authority_root_fixture.ids.conn_ready], nil)
+  assert_eq("authority_structure_request_applied", authority_root_fixture.drawer._struct_cache.root_applied[authority_root_fixture.ids.conn_ready], authority_root_request.request_id)
+  local before_authority_structure_retry = authority_root_fixture.counters.root_async
+  assert_root_retries_after_recovery(authority_root_fixture, before_authority_structure_retry, "authority_structure_retry_request")
+
+  local authority_schema_fixture = new_fixture()
+  expand_source(authority_schema_fixture)
+  set_current_node(authority_schema_fixture.winid, authority_schema_fixture.drawer.tree, authority_schema_fixture.ids.conn_ready)
+  authority_schema_fixture.drawer:get_actions().expand()
+  local authority_schema_request = authority_schema_fixture:latest_root_request(authority_schema_fixture.ids.conn_ready)
+  assert_not_nil("authority_schema_request", authority_schema_request)
+  authority_schema_fixture.drawer:on_schemas_loaded({
+    conn_id = authority_schema_request.conn_id,
+    request_id = authority_schema_request.request_id,
+    root_epoch = authority_schema_request.root_epoch,
+    caller_token = "drawer",
+    schemas = {},
+    error_kind = "authority_unavailable",
+  })
+  assert_eq("authority_schema_not_cached_success", authority_schema_fixture.drawer._struct_cache.root[authority_schema_fixture.ids.conn_ready], nil)
+  assert_eq("authority_schema_request_applied", authority_schema_fixture.drawer._struct_cache.root_applied[authority_schema_fixture.ids.conn_ready], authority_schema_request.request_id)
+  local before_authority_schema_retry = authority_schema_fixture.counters.root_async
+  assert_root_retries_after_recovery(authority_schema_fixture, before_authority_schema_retry, "authority_schema_retry_request")
+  print("ARCH14_DRAWER_AUTHORITY_UNAVAILABLE_NOT_CACHED_SUCCESS=true")
+
   local best_effort_fixture = new_fixture({
     seed_root = seed_root_cache(),
     list_database_errors = {
@@ -1202,6 +1248,8 @@ do
   print("STRUCT01_ERROR_CACHE_OK=true")
   branch_error_fixture:cleanup()
   root_error_fixture:cleanup()
+  authority_root_fixture:cleanup()
+  authority_schema_fixture:cleanup()
   best_effort_fixture:cleanup()
 end
 
