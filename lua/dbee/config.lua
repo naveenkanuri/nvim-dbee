@@ -38,7 +38,7 @@ local config = {}
 ---@alias drawer_config { disable_candies: boolean, candies: table<string, Candy>, mappings: key_mapping[], disable_help: boolean, window_options: table<string, any>, buffer_options: table<string, any> }
 
 ---Configuration for built-in LSP features.
----@alias lsp_config { diagnostics_mode: "debounce_didchange"|"save_only"|"off", diagnostics_debounce_ms: integer, hover: boolean, resolve: boolean }
+---@alias lsp_config { diagnostics_mode: "debounce_didchange"|"save_only"|"off", diagnostics_debounce_ms: integer, hover: boolean, resolve: boolean, document_symbols: boolean, workspace_symbols: boolean }
 
 ---@divider -
 
@@ -397,6 +397,8 @@ config.default = {
     diagnostics_debounce_ms = 250,
     hover = true,
     resolve = true,
+    document_symbols = true,
+    workspace_symbols = true,
   },
 
   -- window layout
@@ -427,6 +429,8 @@ function config.validate(cfg)
     lsp_diagnostics_debounce_ms = { cfg.lsp.diagnostics_debounce_ms, "number" },
     lsp_hover = { cfg.lsp.hover, "boolean" },
     lsp_resolve = { cfg.lsp.resolve, "boolean" },
+    lsp_document_symbols = { cfg.lsp.document_symbols, "boolean" },
+    lsp_workspace_symbols = { cfg.lsp.workspace_symbols, "boolean" },
 
     window_layout = { cfg.window_layout, "table" },
     window_layout_open = { cfg.window_layout.open, "function" },

@@ -44,6 +44,7 @@ local COLUMN_CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
 local SCHEMA_CACHE_VERSION = 3
 local MATERIALIZATIONS = { "table", "view" }
 local SCHEMA_TABLE_PREVIEW_LIMIT = 20
+local WORKSPACE_SYMBOL_LIMIT = 200
 
 local CompletionItemKind = {
   Field = 5,
@@ -2523,6 +2524,113 @@ function SchemaCache:get_column_completion_items(schema, table_name, opts)
       }
     end)
   end) or {}
+end
+
+--- Get a compact, capped snapshot for workspace/symbol.
+---@param opts? { query?: string, limit?: integer }
+---@return { items: table[], reason?: string, scanned?: integer, capped?: boolean, allocated?: integer }
+function SchemaCache:get_workspace_symbol_snapshot(opts)
+  opts = opts or {}
+  local limit = tonumber(opts.limit) or WORKSPACE_SYMBOL_LIMIT
+  limit = math.max(0, limit)
+  local query = tostring(opts.query or "")
+
+  local result, check = epoch_authority.read_with_freshness(self, self.handler, self.conn_id, function()
+    local scope, reason = self:_fresh_lsp_scope()
+    if not scope then
+      return {
+        items = {},
+        reason = reason or "scope_unavailable",
+        scanned = 0,
+        capped = false,
+        allocated = 0,
+      }
+    end
+
+    local query_key = schema_name_canonical.canonical(query, false, self.fold_id).canonical
+    local items = {}
+    local scanned = 0
+    local capped = false
+
+    local function matches(schema_key, table_key)
+      if query_key == "" then
+        return true
+      end
+      if schema_key:find(query_key, 1, true) then
+        return true
+      end
+      if table_key and table_key:find(query_key, 1, true) then
+        return true
+      end
+      return table_key and (schema_key .. "." .. table_key):find(query_key, 1, true) ~= nil
+    end
+
+    local function add_item(item)
+      if #items >= limit then
+        capped = true
+        return false
+      end
+      items[#items + 1] = item
+      return true
+    end
+
+    local schemas = vim.tbl_keys(self.schemas or {})
+    table.sort(schemas)
+    for _, schema in ipairs(schemas) do
+      if self:schema_in_current_scope(schema, scope) then
+        local schema_key = schema_name_canonical.canonical(schema, false, self.fold_id).canonical
+        scanned = scanned + 1
+        if matches(schema_key, nil) and not add_item({
+          kind = "schema",
+          schema_canonical = schema_key,
+          schema_exact = schema,
+          conn_id = self.conn_id,
+        }) then
+          break
+        end
+
+        local table_names = vim.tbl_keys(self.tables[schema] or {})
+        table.sort(table_names)
+        for _, table_name in ipairs(table_names) do
+          local table_key = schema_name_canonical.canonical(table_name, false, self.fold_id).canonical
+          scanned = scanned + 1
+          if matches(schema_key, table_key) and not add_item({
+            kind = "table",
+            schema_canonical = schema_key,
+            table_canonical = table_key,
+            schema_exact = schema,
+            table_exact = table_name,
+            table_type = (self.tables[schema][table_name] or {}).type or "table",
+            conn_id = self.conn_id,
+          }) then
+            break
+          end
+        end
+        if capped then
+          break
+        end
+      end
+    end
+
+    return {
+      items = items,
+      scanned = scanned,
+      capped = capped,
+      allocated = #items,
+    }
+  end)
+
+  if result then
+    return result
+  end
+
+  return {
+    items = {},
+    reason = check and "stale_root_epoch" or "epoch_unavailable",
+    scanned = 0,
+    capped = false,
+    allocated = 0,
+  }
 end
 
 --- Find a schema name using exact or folded semantics.

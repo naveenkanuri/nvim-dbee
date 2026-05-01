@@ -168,6 +168,8 @@ require("dbee").setup({
     diagnostics_debounce_ms = 250,
     hover = true,
     resolve = true,
+    document_symbols = true,
+    workspace_symbols = true,
   },
 })
 ```
@@ -177,11 +179,14 @@ columns warm asynchronously. Trigger completion again after warmup to receive
 the full column list. External completion stacks such as `cmp-dbee` remain
 supported for custom setups.
 
-The built-in LSP also advertises cache-backed hover and
-`completionItem/resolve` by default. Set `lsp.hover = false` or
-`lsp.resolve = false` to suppress those capabilities. Hover and resolve use
-already-loaded schema cache data only, so details may be minimal until table
-columns have warmed.
+The built-in LSP also advertises cache-backed hover,
+`completionItem/resolve`, `textDocument/documentSymbol`, and
+`workspace/symbol` by default. Set `lsp.hover = false`,
+`lsp.resolve = false`, `lsp.document_symbols = false`, or
+`lsp.workspace_symbols = false` to suppress those capabilities. Hover,
+resolve, and workspace symbols use already-loaded schema cache data only, so
+details may be minimal until table columns have warmed. Document symbols are
+source-text based and show SQL references from the current buffer.
 
 Here are the defaults:
 

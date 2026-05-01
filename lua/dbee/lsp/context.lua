@@ -532,6 +532,37 @@ local function scan_identifier_tokens(line)
   return tokens
 end
 
+---@param statement table
+---@return table[]
+local function scan_statement_tokens(statement)
+  local tokens = {}
+  local line = statement.start.line
+  local line_start = 1
+  local index = 1
+
+  while index <= #statement.text + 1 do
+    if index > #statement.text or statement.text:sub(index, index) == "\n" then
+      local line_text = statement.text:sub(line_start, index - 1)
+      local base_character = line == statement.start.line and statement.start.character or 0
+      for _, token in ipairs(scan_identifier_tokens(line_text)) do
+        token.line = line
+        token.offset_start = line_start + token.start_col
+        token.offset_end = line_start + token.end_col
+        token.range = {
+          start = { line = line, character = base_character + token.start_col },
+          ["end"] = { line = line, character = base_character + token.end_col },
+        }
+        tokens[#tokens + 1] = token
+      end
+      line = line + 1
+      line_start = index + 1
+    end
+    index = index + 1
+  end
+
+  return tokens
+end
+
 ---@param params table
 ---@return table?
 function M.token_at_position(params)
@@ -802,6 +833,187 @@ local function parse_statement_table_refs(statement)
     refs[#refs + 1] = ref
   end
   return refs
+end
+
+---@param statement table
+---@param ref table
+---@return table
+local function ref_with_ranges(statement, ref)
+  local enriched = vim.deepcopy(ref)
+  enriched.ref_range = {
+    start = M.statement_offset_to_position(statement, ref.ref_start),
+    ["end"] = M.statement_offset_to_position(statement, ref.ref_end),
+  }
+
+  local parts = split_identifier_ref(ref.ref)
+  if parts and #parts == 2 then
+    local schema_raw = parts[1]
+    local table_raw = parts[2]
+    local schema_start = ref.ref_start
+    local schema_end = schema_start + #schema_raw
+    local table_start = schema_end + 1
+    local table_end = table_start + #table_raw
+    enriched.schema_range = {
+      start = M.statement_offset_to_position(statement, schema_start),
+      ["end"] = M.statement_offset_to_position(statement, schema_end),
+    }
+    enriched.table_range = {
+      start = M.statement_offset_to_position(statement, table_start),
+      ["end"] = M.statement_offset_to_position(statement, table_end),
+    }
+  else
+    enriched.table_range = enriched.ref_range
+  end
+
+  return enriched
+end
+
+---@param statement table
+---@return table[]
+function M.statement_table_refs(statement)
+  local refs = {}
+  for _, ref in ipairs(parse_statement_table_refs(statement)) do
+    refs[#refs + 1] = ref_with_ranges(statement, ref)
+  end
+  return refs
+end
+
+---@param statement table
+---@param table_refs table[]
+---@return table[]
+local function statement_column_refs(statement, table_refs)
+  local columns = {}
+  local aliases = {}
+  for _, ref in ipairs(table_refs or {}) do
+    if ref.alias_key then
+      aliases[ref.alias_key] = ref
+    end
+  end
+  local tokens = scan_statement_tokens(statement)
+  local qualified_token_indexes = {}
+
+  local function token_keyword(token)
+    return token and token.quoted ~= true and sql_keywords_set[token.name:lower()]
+  end
+
+  local function ref_for_prefix(prefix)
+    if not prefix or prefix == "" then
+      return nil
+    end
+    local alias = aliases[prefix:lower()]
+    if alias then
+      return alias
+    end
+    for _, ref in ipairs(table_refs or {}) do
+      if ref.table == prefix or (not ref.table_quoted and ref.table:lower() == prefix:lower()) then
+        return ref
+      end
+    end
+    return nil
+  end
+
+  for index = 1, #tokens - 1 do
+    local left = tokens[index]
+    local right = tokens[index + 1]
+    local between = statement.text:sub(left.offset_end, right.offset_start - 1)
+    if between:match("^%s*%.%s*$") and not token_keyword(left) and not token_keyword(right) then
+      local ref = ref_for_prefix(left.name)
+      if ref then
+        qualified_token_indexes[index] = true
+        qualified_token_indexes[index + 1] = true
+        columns[#columns + 1] = {
+          schema = ref.schema,
+          schema_quoted = ref.schema_quoted,
+          table = ref.table,
+          table_quoted = ref.table_quoted,
+          column = right.name,
+          column_quoted = right.quoted,
+          range = right.range,
+        }
+      end
+    end
+  end
+
+  if #table_refs == 1 then
+    local single_ref = table_refs[1]
+    local from_offset = nil
+    local from_match = statement.text:find("%f[%a]" .. keyword_pattern("from") .. "%f[%A]")
+    if from_match then
+      from_offset = from_match
+    end
+
+    for index, token in ipairs(tokens) do
+      local next_char = statement.text:sub(token.offset_end):match("^%s*(.)")
+      if not qualified_token_indexes[index]
+        and not token_keyword(token)
+        and next_char ~= "("
+        and (not from_offset or token.offset_start < from_offset)
+      then
+        columns[#columns + 1] = {
+          schema = single_ref.schema,
+          schema_quoted = single_ref.schema_quoted,
+          table = single_ref.table,
+          table_quoted = single_ref.table_quoted,
+          column = token.name,
+          column_quoted = token.quoted,
+          range = token.range,
+        }
+      end
+    end
+  end
+
+  return columns
+end
+
+---@param text string
+---@return table[]
+local function extract_symbol_statements(text)
+  local statements = {}
+  local line_nr = 0
+  for line_text in ((text or "") .. "\n"):gmatch("([^\n]*)\n") do
+    local has_table_ref = false
+    for _, keyword in ipairs({ "from", "join", "update", "into" }) do
+      if line_text:find("%f[%a]" .. keyword_pattern(keyword) .. "%f[%A]") then
+        has_table_ref = true
+        break
+      end
+    end
+    if has_table_ref then
+      statements[#statements + 1] = {
+        text = line_text,
+        start = {
+          line = line_nr,
+          character = 0,
+        },
+      }
+    end
+    line_nr = line_nr + 1
+  end
+
+  if #statements > 0 then
+    return statements
+  end
+  return M.extract_statements(text or "")
+end
+
+---@param text string
+---@return { tables: table[], columns: table[] }
+function M.extract_symbol_references(text)
+  local tables = {}
+  local columns = {}
+  for _, statement in ipairs(extract_symbol_statements(text or "")) do
+    local statement_tables = M.statement_table_refs(statement)
+    for _, ref in ipairs(statement_tables) do
+      tables[#tables + 1] = ref
+    end
+    for _, col in ipairs(statement_column_refs(statement, statement_tables)) do
+      columns[#columns + 1] = col
+    end
+  end
+  return {
+    tables = tables,
+    columns = columns,
+  }
 end
 
 ---@param statement table

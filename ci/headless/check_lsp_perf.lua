@@ -2560,6 +2560,184 @@ local function run_lsp12_perf_section()
   )
 end
 
+local LSP12_2_SCENARIOS = {}
+
+local function lsp12_2_register(spec)
+  LSP12_2_SCENARIOS[#LSP12_2_SCENARIOS + 1] = spec
+end
+
+local function lsp12_2_large_lines()
+  local lines = {}
+  for i = 1, 10000 do
+    if i == 1 then
+      lines[i] = "SELECT COL_001 FROM SCHEMA_001.TABLE_000001"
+    elseif i == 250 then
+      lines[i] = "SELECT COL_001 FROM SCHEMA_002.TABLE_000002"
+    elseif i == 5000 then
+      lines[i] = "SELECT COL_001 FROM SCHEMA_003.TABLE_000003"
+    elseif i == 9999 then
+      lines[i] = "SELECT COL_001 FROM SCHEMA_004.TABLE_000004"
+    else
+      lines[i] = "SELECT 1"
+    end
+  end
+  return lines
+end
+
+local function lsp12_2_before_document()
+  local cache = make_cache(100, DEFAULT_COLUMNS_PER_TABLE, {
+    preload_columns = false,
+  })
+  local bufnr, uri = make_buffer(lsp12_2_large_lines())
+  local client, client_id = start_lsp(cache, bufnr)
+  return {
+    cache = cache,
+    bufnr = bufnr,
+    uri = uri,
+    client = client,
+    client_id = client_id,
+  }
+end
+
+local function lsp12_2_before_workspace()
+  local cache = make_cache(10000, DEFAULT_COLUMNS_PER_TABLE, {
+    preload_columns = false,
+  })
+  local bufnr, uri = make_buffer({ "SELECT * FROM SCHEMA_001.TABLE_000001" })
+  local client, client_id = start_lsp(cache, bufnr)
+  return {
+    cache = cache,
+    bufnr = bufnr,
+    uri = uri,
+    client = client,
+    client_id = client_id,
+  }
+end
+
+local function lsp12_2_after(state)
+  completion_after(state)
+end
+
+local function lsp12_2_document_symbol(state)
+  return lsp12_request(state.client, state.bufnr, "textDocument/documentSymbol", {
+    textDocument = { uri = state.uri },
+  })
+end
+
+local function lsp12_2_workspace_symbol(state, query)
+  return lsp12_request(state.client, state.bufnr, "workspace/symbol", {
+    query = query or "",
+  })
+end
+
+lsp12_2_register({
+  slug = "DOCSYMBOL_COLD_PARSE",
+  kind = "document",
+  before = lsp12_2_before_document,
+  before_iteration = function(state, iteration)
+    local marker_line = string.format("SELECT COL_001 FROM SCHEMA_005.TABLE_%06d", ((iteration - 1) % 100) + 1)
+    vim.api.nvim_buf_set_lines(state.bufnr, 9999, 10000, false, { marker_line })
+  end,
+  run = function(state)
+    local result, elapsed = lsp12_2_document_symbol(state)
+    if not (type(result) == "table" and #result > 0) then
+      error("documentSymbol cold parse returned no symbols")
+    end
+    return elapsed
+  end,
+})
+
+lsp12_2_register({
+  slug = "DOCSYMBOL_CACHED_PARSE",
+  kind = "document",
+  before = function()
+    local state = lsp12_2_before_document()
+    lsp12_2_document_symbol(state)
+    return state
+  end,
+  run = function(state)
+    local result, elapsed = lsp12_2_document_symbol(state)
+    if not (type(result) == "table" and #result > 0) then
+      error("documentSymbol cached parse returned no symbols")
+    end
+    return elapsed
+  end,
+})
+
+lsp12_2_register({
+  slug = "WORKSPACESYMBOL_ALL_MATCH",
+  kind = "workspace",
+  before = lsp12_2_before_workspace,
+  run = function(state)
+    local result, elapsed = lsp12_2_workspace_symbol(state, "")
+    if not (type(result) == "table" and #result > 0 and #result <= 200) then
+      error("workspace/symbol all-match returned invalid capped result")
+    end
+    return elapsed
+  end,
+})
+
+lsp12_2_register({
+  slug = "WORKSPACESYMBOL_SELECTIVE_QUERY",
+  kind = "workspace",
+  before = lsp12_2_before_workspace,
+  run = function(state)
+    local result, elapsed = lsp12_2_workspace_symbol(state, "TABLE_000123")
+    if not (type(result) == "table" and #result > 0) then
+      error("workspace/symbol selective query returned no symbols")
+    end
+    return elapsed
+  end,
+})
+
+local function run_lsp12_2_perf_section()
+  emit("LSP12_2_PERF_SCENARIOS_COUNT", #LSP12_2_SCENARIOS)
+  local document_samples = {}
+  local workspace_samples = {}
+
+  for _, spec in ipairs(LSP12_2_SCENARIOS) do
+    local samples = {}
+    local state = spec.before()
+    for iteration = 1, WARMUP_COUNT + MEASURED_COUNT do
+      if spec.before_iteration then
+        spec.before_iteration(state, iteration)
+      end
+      local ok, elapsed_or_err = xpcall(function()
+        return spec.run(state, iteration)
+      end, debug.traceback)
+      if not ok then
+        lsp12_2_after(state)
+        fail("LSP12.2 " .. spec.slug .. " failed: " .. tostring(elapsed_or_err))
+      end
+      if iteration > WARMUP_COUNT then
+        samples[#samples + 1] = elapsed_or_err
+        if spec.kind == "document" then
+          document_samples[#document_samples + 1] = elapsed_or_err
+        elseif spec.kind == "workspace" then
+          workspace_samples[#workspace_samples + 1] = elapsed_or_err
+        end
+      end
+    end
+    lsp12_2_after(state)
+    local p95 = ns_to_ms(percentile(samples, 0.95))
+    emit("LSP12_2_" .. spec.slug .. "_P95_MS", format_float(p95))
+    emit("LSP12_2_" .. spec.slug .. "_SENTINEL_OK", "true")
+  end
+
+  local document_p95 = ns_to_ms(percentile(document_samples, 0.95))
+  local workspace_p95 = ns_to_ms(percentile(workspace_samples, 0.95))
+  emit("LSP12_2_DOCSYMBOL_P95_MS", format_float(document_p95))
+  emit("LSP12_2_WORKSPACESYMBOL_P95_MS", format_float(workspace_p95))
+  emit("LSP12_2_DOCSYMBOL_PERF_BUDGET_50MS", document_p95 <= 50 and "true" or "false")
+  emit("LSP12_2_WORKSPACESYMBOL_PERF_BUDGET_100MS", workspace_p95 <= 100 and "true" or "false")
+  summary_rows[#summary_rows + 1] = string.format(
+    "LSP12.2 documentSymbol_p95_ms=%s workspaceSymbol_p95_ms=%s scenarios=%d",
+    format_float(document_p95),
+    format_float(workspace_p95),
+    #LSP12_2_SCENARIOS
+  )
+end
+
 run_representative_trace_workload = function()
   emit("LSP01_TRACE_WORKLOAD", "startup_cold+completion+diagnostics_didchange")
 
@@ -2632,6 +2810,7 @@ for _, spec in ipairs(SCENARIOS) do
 end
 
 run_lsp12_perf_section()
+run_lsp12_2_perf_section()
 
 run_flame_trace_subprocess()
 

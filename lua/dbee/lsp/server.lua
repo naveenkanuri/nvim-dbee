@@ -2,6 +2,7 @@ local context = require("dbee.lsp.context")
 local epoch_authority = require("dbee.lsp.epoch_authority")
 local hover = require("dbee.lsp.hover")
 local resolve = require("dbee.lsp.resolve")
+local symbols = require("dbee.lsp.symbols")
 
 local M = {}
 local DIAGNOSTIC_NS = vim.api.nvim_create_namespace("dbee/lsp")
@@ -260,11 +261,15 @@ local function get_lsp_feature_config(opts)
   local defaults = {
     hover = true,
     resolve = true,
+    document_symbols = true,
+    workspace_symbols = true,
   }
   if opts and type(opts.lsp) == "table" then
     return {
       hover = opts.lsp.hover ~= false,
       resolve = opts.lsp.resolve ~= false,
+      document_symbols = opts.lsp.document_symbols ~= false,
+      workspace_symbols = opts.lsp.workspace_symbols ~= false,
     }
   end
   local ok, state = pcall(require, "dbee.api.state")
@@ -279,6 +284,8 @@ local function get_lsp_feature_config(opts)
   return {
     hover = lsp.hover ~= false,
     resolve = lsp.resolve ~= false,
+    document_symbols = lsp.document_symbols ~= false,
+    workspace_symbols = lsp.workspace_symbols ~= false,
   }
 end
 
@@ -554,6 +561,8 @@ function M.create(cache, opts)
           callback(nil, {
             capabilities = {
               hoverProvider = feature_config.hover and true or nil,
+              documentSymbolProvider = feature_config.document_symbols and true or nil,
+              workspaceSymbolProvider = feature_config.workspace_symbols and true or nil,
               completionProvider = {
                 triggerCharacters = { ".", " " },
                 resolveProvider = feature_config.resolve == true,
@@ -601,6 +610,24 @@ function M.create(cache, opts)
             result = params
           end
           callback(nil, result)
+        elseif method == "textDocument/documentSymbol" then
+          local ok, result = pcall(symbols.handle_document_symbol, params, cache, {
+            enabled = feature_config.document_symbols,
+            client_capabilities = client_capabilities,
+          })
+          if not ok then
+            result = nil
+          end
+          callback(nil, result)
+        elseif method == "workspace/symbol" then
+          local ok, result = pcall(symbols.handle_workspace_symbol, params, cache, {
+            enabled = feature_config.workspace_symbols,
+            client_capabilities = client_capabilities,
+          })
+          if not ok then
+            result = {}
+          end
+          callback(nil, result)
         else
           callback(nil, nil)
         end
@@ -617,7 +644,14 @@ function M.create(cache, opts)
             dispatchers.on_exit(0, 0)
           end
         elseif method == "textDocument/didSave" or method == "textDocument/didChange" then
+          if method == "textDocument/didChange" and params and params.textDocument then
+            symbols.invalidate_document(params.textDocument.uri)
+          end
           handle_diagnostics(method, params)
+        elseif method == "textDocument/didClose" then
+          if params and params.textDocument then
+            symbols.invalidate_document(params.textDocument.uri)
+          end
         end
         return true
       end,

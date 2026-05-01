@@ -75,6 +75,45 @@ local required_advisory_markers = {
   "LSP12_RESOLVE_PERF_BUDGET_100MS",
 }
 
+local required_lsp12_2_true_markers = {
+  "LSP12_2_DOCSYMBOL_HIERARCHY_OK",
+  "LSP12_2_DOCSYMBOL_FLAT_FALLBACK_OK",
+  "LSP12_2_DOCSYMBOL_RANGES_VALID",
+  "LSP12_2_DOCSYMBOL_UNKNOWN_REF_OK",
+  "LSP12_2_DOCSYMBOL_UNQUALIFIED_FLAT",
+  "LSP12_2_DOCSYMBOL_UNKNOWN_QUALIFIED_FLAT",
+  "LSP12_2_DOCSYMBOL_AUTHORITY_NEUTRAL",
+  "LSP12_2_DOCSYMBOL_COLUMN_SCOPE_SAFE",
+  "LSP12_2_DOCSYMBOL_FULL_DOC_BOUNDED",
+  "LSP12_2_DOCSYMBOL_LARGE_BUFFER_BOUNDED",
+  "LSP12_2_DOCSYMBOL_BUFFER_CACHE_INVALIDATED",
+  "LSP12_2_DOCSYMBOL_DIDCLOSE_EVICTS",
+  "LSP12_2_DOCSYMBOL_INVALID_BUFFER_EVICTS",
+  "LSP12_2_DOCSYMBOL_DISABLED_NO_CAPABILITY",
+  "LSP12_2_WORKSPACESYMBOL_AUTHORITY_FAIL_CLOSED",
+  "LSP12_2_WORKSPACESYMBOL_AUTHORITY_LEGACY_IMPLICIT_ALL",
+  "LSP12_2_WORKSPACESYMBOL_AUTHORITY_OK_SCOPED",
+  "LSP12_2_WORKSPACESYMBOL_EPOCH_FAIL_CLOSED",
+  "LSP12_2_WORKSPACESYMBOL_CANONICAL_LOOKUP",
+  "LSP12_2_WORKSPACESYMBOL_QUERY_SUBSTRING",
+  "LSP12_2_WORKSPACESYMBOL_PAGINATION_OK",
+  "LSP12_2_WORKSPACESYMBOL_CAP_BEFORE_COPY",
+  "LSP12_2_WORKSPACESYMBOL_ACTIVE_CONNECTION_ONLY",
+  "LSP12_2_WORKSPACESYMBOL_DBEE_URI_PERCENT_ENCODED",
+  "LSP12_2_WORKSPACESYMBOL_LOCATION_FALLBACK_OK",
+  "LSP12_2_WORKSPACESYMBOL_DISABLED_NO_CAPABILITY",
+  "LSP12_2_WORKSPACESYMBOL_SHAPE_FALLBACK_OK",
+  "LSP12_2_DOCSYMBOL_NO_SYNC_DB",
+  "LSP12_2_DOCSYMBOL_NO_ASYNC_DB",
+  "LSP12_2_WORKSPACESYMBOL_NO_SYNC_DB",
+  "LSP12_2_WORKSPACESYMBOL_NO_ASYNC_DB",
+  "LSP12_2_NEW_SYMBOL_CODE_NO_HELPER_BYPASS",
+  "LSP12_2_MAKE_PERF_LSP_WIRED",
+  "LSP12_2_ROLLUP_EXACTLY_ONCE_OK",
+  "LSP12_2_DOCSYMBOL_PERF_BUDGET_50MS",
+  "LSP12_2_WORKSPACESYMBOL_PERF_BUDGET_100MS",
+}
+
 local function parse_markers(lines)
   local markers = {}
   for _, line in ipairs(lines) do
@@ -122,11 +161,45 @@ local function evaluate(lines)
   }
 end
 
+local function evaluate_lsp12_2(lines)
+  local markers = parse_markers(lines)
+  local failures = {}
+
+  local function require_marker(label, allowed)
+    local values = markers[label]
+    if not values or #values == 0 then
+      failures[#failures + 1] = "missing " .. label
+      return
+    end
+    if #values ~= 1 then
+      failures[#failures + 1] = label .. " must appear exactly once, found " .. tostring(#values)
+    end
+    for _, value in ipairs(values) do
+      if not allowed[value] then
+        failures[#failures + 1] = label .. " has unsupported value " .. tostring(value)
+      end
+    end
+  end
+
+  for _, label in ipairs(required_lsp12_2_true_markers) do
+    require_marker(label, { ["true"] = true })
+  end
+  require_marker("LSP12_2_PERF_SCENARIOS_COUNT", { ["4"] = true })
+
+  return {
+    ok = #failures == 0,
+    failures = failures,
+    checked = #required_lsp12_2_true_markers + 1,
+  }
+end
+
 if vim.env.LSP12_ROLLUP_EXPORT == "1" then
   return {
     evaluate = evaluate,
     required_true_markers = required_true_markers,
     required_advisory_markers = required_advisory_markers,
+    evaluate_lsp12_2 = evaluate_lsp12_2,
+    required_lsp12_2_true_markers = required_lsp12_2_true_markers,
   }
 end
 
@@ -166,6 +239,20 @@ local function selftest()
   if invalid.ok then
     fail({ "selftest missing marker did not fail" })
   end
+  local lsp12_2_lines = {}
+  for _, marker in ipairs(required_lsp12_2_true_markers) do
+    lsp12_2_lines[#lsp12_2_lines + 1] = marker .. "=true"
+  end
+  lsp12_2_lines[#lsp12_2_lines + 1] = "LSP12_2_PERF_SCENARIOS_COUNT=4"
+  local lsp12_2_valid = evaluate_lsp12_2(lsp12_2_lines)
+  if not lsp12_2_valid.ok then
+    fail({ "selftest valid LSP12.2 log failed: " .. table.concat(lsp12_2_valid.failures, "; ") })
+  end
+  lsp12_2_lines[#lsp12_2_lines + 1] = required_lsp12_2_true_markers[1] .. "=true"
+  local lsp12_2_duplicate = evaluate_lsp12_2(lsp12_2_lines)
+  if lsp12_2_duplicate.ok then
+    fail({ "selftest duplicate LSP12.2 marker did not fail" })
+  end
   emit("LSP12_ROLLUP_SELFTEST_ALL_PASS", "true")
   vim.cmd("qa!")
 end
@@ -174,11 +261,22 @@ if vim.env.LSP12_ROLLUP_SELFTEST == "1" then
   selftest()
 end
 
-local result = evaluate(read_lines())
-if not result.ok then
-  fail(result.failures)
+local lines = read_lines()
+local result = evaluate(lines)
+local lsp12_2_result = evaluate_lsp12_2(lines)
+local failures = {}
+for _, failure in ipairs(result.failures) do
+  failures[#failures + 1] = failure
+end
+for _, failure in ipairs(lsp12_2_result.failures) do
+  failures[#failures + 1] = failure
+end
+if #failures > 0 then
+  fail(failures)
 end
 
 emit("LSP12_ROLLUP_MARKERS_CHECKED", result.checked)
 emit("LSP12_HOVER_RESOLVE_ALL_PASS", "true")
+emit("LSP12_2_ROLLUP_MARKERS_CHECKED", lsp12_2_result.checked)
+emit("LSP12_2_ALL_PASS", "true")
 vim.cmd("qa!")
