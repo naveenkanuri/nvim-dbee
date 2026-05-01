@@ -1799,6 +1799,10 @@ function Handler:_emit_connection_invalidated(reason, result, opts)
   event_bus.trigger("connection_invalidated", {
     reason = reason,
     source_id = result.source_id,
+    folder_id = result.folder_id,
+    conn_id = result.conn_id,
+    target_folder_id = result.target_folder_id,
+    op = result.op,
     retired_conn_ids = vim.deepcopy(result.retired_conn_ids or {}),
     new_conn_ids = vim.deepcopy(result.new_conn_ids or {}),
     current_conn_id_before = result.current_conn_id_before,
@@ -2018,6 +2022,11 @@ end
 ---@param id source_id
 function Handler:source_reload(id)
   local result = self:_source_reload_silent(id, { eventful = true })
+  local source = self.sources[id]
+  if source and type(source.supports_folders) == "function" and source:supports_folders()
+      and type(source.reload_folders) == "function" then
+    source:reload_folders()
+  end
   self:_emit_connection_invalidated("source_reload", result)
 
   if result.reload_error then
@@ -2186,6 +2195,75 @@ end
 ---@param details ConnectionParams
 function Handler:source_update_connection(id, conn_id, details)
   self:_source_update_connection(id, conn_id, details)
+end
+
+---@param source_id source_id
+---@return Folder[]
+function Handler:source_get_folders(source_id)
+  local source = self.sources[source_id]
+  if not source or type(source.supports_folders) ~= "function" or not source:supports_folders() then
+    return {}
+  end
+
+  local ok, folders = pcall(source.load_folders, source)
+  if not ok then
+    utils.log("warn", "source_get_folders failed: " .. tostring(folders))
+    return {}
+  end
+
+  return folders or {}
+end
+
+---@private
+---@param source_id source_id
+---@return Source
+function Handler:_require_folder_capable_source(source_id)
+  local source = self.sources[source_id] or error("unknown source: " .. tostring(source_id))
+  if type(source.supports_folders) ~= "function" or not source:supports_folders() then
+    error("source does not support folders: " .. tostring(source_id))
+  end
+  return source
+end
+
+---@param source_id source_id
+---@param name string
+---@return string
+function Handler:source_add_folder(source_id, name)
+  local source = self:_require_folder_capable_source(source_id)
+  local id = source:add_folder(name)
+  self:_emit_connection_invalidated("folder_mutation", { source_id = source_id, folder_id = id, op = "add" })
+  return id
+end
+
+---@param source_id source_id
+---@param folder_id string
+---@param new_name string
+function Handler:source_rename_folder(source_id, folder_id, new_name)
+  local source = self:_require_folder_capable_source(source_id)
+  source:rename_folder(folder_id, new_name)
+  self:_emit_connection_invalidated("folder_mutation", { source_id = source_id, folder_id = folder_id, op = "rename" })
+end
+
+---@param source_id source_id
+---@param folder_id string
+function Handler:source_remove_folder(source_id, folder_id)
+  local source = self:_require_folder_capable_source(source_id)
+  source:remove_folder(folder_id)
+  self:_emit_connection_invalidated("folder_mutation", { source_id = source_id, folder_id = folder_id, op = "remove" })
+end
+
+---@param source_id source_id
+---@param conn_id connection_id
+---@param target_folder_id? string
+function Handler:source_move_connection(source_id, conn_id, target_folder_id)
+  local source = self:_require_folder_capable_source(source_id)
+  source:move_connection(conn_id, target_folder_id)
+  self:_emit_connection_invalidated("folder_mutation", {
+    source_id = source_id,
+    conn_id = conn_id,
+    target_folder_id = target_folder_id,
+    op = "move",
+  })
 end
 
 ---@param id source_id
