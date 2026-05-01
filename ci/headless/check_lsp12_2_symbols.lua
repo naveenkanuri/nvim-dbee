@@ -8,6 +8,7 @@ package.preload["nio"] = package.preload["nio"] or function()
 end
 
 local SchemaCache = require("dbee.lsp.schema_cache")
+local context = require("dbee.lsp.context")
 local server = require("dbee.lsp.server")
 local symbols = require("dbee.lsp.symbols")
 local schema_filter = require("dbee.schema_filter")
@@ -53,7 +54,7 @@ local function make_handler(opts)
     end
   end
   function handler:get_current_connection()
-    return { id = opts.conn_id or "lsp12-2", type = "postgres" }
+    return { id = opts.conn_id or "lsp12-2", type = opts.conn_type or "postgres" }
   end
   function handler:connection_get_columns()
     handler.counters.sync = handler.counters.sync + 1
@@ -347,6 +348,47 @@ client.notify("textDocument/didSave", {
 local diagnostic_text = vim.diagnostic.get(diagnostic_text_buf, { namespace = diag_ns })
 assert_eq("diagnostic comments/strings omitted", #diagnostic_text, 0)
 emit("LSP12_2_DIAGNOSTICS_IGNORES_COMMENTS_AND_STRINGS", "true")
+
+local oracle_function_sql = "SELECT USER, SYS_CONTEXT('USERENV', 'SERVICE_NAME') AS SERVICE FROM DUAL"
+local oracle_function_refs = context.statement_table_refs({
+  text = oracle_function_sql,
+  start = { line = 0, character = 0 },
+})
+assert_eq("oracle function table ref count", #oracle_function_refs, 1)
+assert_eq("oracle function table ref", oracle_function_refs[1].ref, "DUAL")
+
+local function_select_refs = context.statement_table_refs({
+  text = "SELECT count(*), upper(name) FROM users",
+  start = { line = 0, character = 0 },
+})
+assert_eq("select-list function table ref count", #function_select_refs, 1)
+assert_eq("select-list function table ref", function_select_refs[1].ref, "users")
+
+local extract_function_refs = context.statement_table_refs({
+  text = "SELECT extract(year from created_at) AS y FROM users",
+  start = { line = 0, character = 0 },
+})
+assert_eq("extract function table ref count", #extract_function_refs, 1)
+assert_eq("extract function table ref", extract_function_refs[1].ref, "users")
+
+local prior_scope = scope_ref.value
+scope_ref.value = schema_filter.normalize(nil, "oracle")
+local oracle_handler = make_handler({ conn_id = "lsp12-2-oracle", conn_type = "oracle" })
+local oracle_cache = SchemaCache:new(oracle_handler, "lsp12-2-oracle")
+oracle_cache:build_from_metadata_rows({
+  { schema_name = "SYS", table_name = "DUAL", obj_type = "table" },
+}, { root_epoch = epoch_ref.value })
+local oracle_client = server.create(oracle_cache)({}, {})
+local oracle_diag_buf, oracle_diag_uri = make_buffer({ oracle_function_sql })
+vim.diagnostic.set(diag_ns, oracle_diag_buf, {})
+oracle_client.notify("textDocument/didSave", {
+  textDocument = { uri = oracle_diag_uri },
+})
+local oracle_function_diagnostics = vim.diagnostic.get(oracle_diag_buf, { namespace = diag_ns })
+assert_eq("oracle function diagnostics omitted", #oracle_function_diagnostics, 0)
+oracle_client.terminate()
+scope_ref.value = prior_scope
+emit("LSP12_2_DIAGNOSTICS_FUNCTION_CALL_NOT_TABLE_REF", "true")
 
 local dedupe_buf, dedupe_uri = make_buffer({ "select * from public.users; select * from PUBLIC.USERS" })
 local dedupe = request(client, "textDocument/documentSymbol", {

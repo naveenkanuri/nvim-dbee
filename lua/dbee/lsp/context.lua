@@ -1030,6 +1030,30 @@ local function parse_statement_table_refs(statement, opts)
     return lower and from_boundaries[lower] == true
   end
 
+  local function source_keyword_allowed(index)
+    local token = tokens[index]
+    if not token then
+      return false
+    end
+    if token.depth == 0 then
+      return true
+    end
+    if opts.top_level_only == true then
+      return false
+    end
+
+    for cursor = index - 1, 1, -1 do
+      local candidate = tokens[cursor]
+      if candidate.depth < token.depth then
+        return false
+      end
+      if candidate.depth == token.depth and token_lower(candidate) == "select" then
+        return true
+      end
+    end
+    return false
+  end
+
   local function separator_between(left_end, right_start)
     if not left_end or not right_start or right_start <= left_end then
       return ""
@@ -1184,9 +1208,10 @@ local function parse_statement_table_refs(statement, opts)
     return index
   end
 
-  local function skip_optional_derived_alias(index, close_offset)
+  local function skip_optional_derived_alias(index, close_offset, alias_depth)
+    alias_depth = alias_depth or 0
     local token = tokens[index]
-    if not token or token.depth ~= 0 then
+    if not token or token.depth ~= alias_depth then
       return index
     end
     if separator_between(close_offset, token.offset_start):find(",", 1, true) then
@@ -1196,7 +1221,7 @@ local function parse_statement_table_refs(statement, opts)
     local lower = token_lower(token)
     if lower == "as" then
       local candidate = tokens[index + 1]
-      if not candidate or candidate.depth ~= 0 then
+      if not candidate or candidate.depth ~= alias_depth then
         return index + 1
       end
       if separator_between(token.offset_end, candidate.offset_start):find(",", 1, true) then
@@ -1212,6 +1237,23 @@ local function parse_statement_table_refs(statement, opts)
       return index
     end
     return index + 1
+  end
+
+  local function skip_nested_source_segment(index, source_depth)
+    local token = tokens[index]
+    if not token or source_depth == nil or token.depth <= source_depth then
+      return nil
+    end
+
+    local cursor = index
+    while tokens[cursor] and tokens[cursor].depth > source_depth do
+      cursor = cursor + 1
+    end
+    return skip_optional_derived_alias(
+      cursor,
+      tokens[cursor - 1] and tokens[cursor - 1].offset_end or token.offset_end,
+      source_depth
+    ), true
   end
 
   local function skip_derived_source(index, source_start_offset)
@@ -1245,13 +1287,20 @@ local function parse_statement_table_refs(statement, opts)
     end
   end
 
-  local function parse_from_list(start_index)
+  local function parse_from_list(start_index, source_depth)
     local index = start_index
     while index <= #tokens do
-      if from_boundary(tokens[index]) then
+      local token = tokens[index]
+      if source_depth and token and token.depth < source_depth then
         break
       end
-      local skipped, derived = skip_derived_source(index, tokens[index - 1] and tokens[index - 1].offset_end or 1)
+      if token and token.depth == source_depth and from_boundary(token) then
+        break
+      end
+      local skipped, derived = skip_nested_source_segment(index, source_depth)
+      if not skipped then
+        skipped, derived = skip_derived_source(index, tokens[index - 1] and tokens[index - 1].offset_end or 1)
+      end
       if skipped and skipped > index then
         if derived == true then
           derived_source_count = derived_source_count + 1
@@ -1268,12 +1317,15 @@ local function parse_statement_table_refs(statement, opts)
     end
   end
 
-  local function parse_single_after(keyword, start_index, specificity)
+  local function parse_single_after(keyword, start_index, specificity, source_depth)
     local index = start_index
     while tokens[index] and token_lower(tokens[index]) == "as" do
       index = index + 1
     end
-    local skipped, derived = skip_derived_source(index, tokens[index - 1] and tokens[index - 1].offset_end or 1)
+    local skipped, derived = skip_nested_source_segment(index, source_depth)
+    if not skipped then
+      skipped, derived = skip_derived_source(index, tokens[index - 1] and tokens[index - 1].offset_end or 1)
+    end
     if skipped and skipped > index then
       if derived == true then
         derived_source_count = derived_source_count + 1
@@ -1291,10 +1343,10 @@ local function parse_statement_table_refs(statement, opts)
   local index = 1
   while index <= #tokens do
     local lower = token_lower(tokens[index])
-    if lower == "from" then
-      parse_from_list(index + 1)
-    elseif lower == "join" or lower == "update" or lower == "into" then
-      parse_single_after(lower, index + 1, 1)
+    if lower == "from" and source_keyword_allowed(index) then
+      parse_from_list(index + 1, tokens[index].depth)
+    elseif (lower == "join" or lower == "update" or lower == "into") and source_keyword_allowed(index) then
+      parse_single_after(lower, index + 1, 1, tokens[index].depth)
     end
     index = index + 1
   end
