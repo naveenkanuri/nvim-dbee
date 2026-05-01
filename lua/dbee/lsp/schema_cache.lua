@@ -217,7 +217,7 @@ function SchemaCache:new(handler, conn_id)
   setmetatable(o, self)
   self.__index = self
   o.cache_identity_value = tostring(conn_id or "") .. "|" .. tostring(o)
-  o.metadata_root_epoch_value = o:_authoritative_root_epoch()
+  o.metadata_root_epoch_value = o:authoritative_root_epoch()
   return o
 end
 
@@ -229,7 +229,7 @@ function SchemaCache:_bump_metadata_generation(_reason, root_epoch)
   if root_epoch ~= nil then
     self.metadata_root_epoch_value = tonumber(root_epoch) or 0
   else
-    self.metadata_root_epoch_value = self:_authoritative_root_epoch()
+    self.metadata_root_epoch_value = self:authoritative_root_epoch()
   end
 end
 
@@ -280,9 +280,10 @@ function SchemaCache:set_completion_refresh_notifier(notifier)
   end
 end
 
----@private
+--- Return the handler's authoritative root epoch for this cache's connection.
+--- Hover/resolve use this to fail closed when cache metadata lags connection invalidation.
 ---@return integer
-function SchemaCache:_authoritative_root_epoch()
+function SchemaCache:authoritative_root_epoch()
   if self.handler and type(self.handler.get_authoritative_root_epoch) == "function" then
     local ok, epoch = pcall(self.handler.get_authoritative_root_epoch, self.handler, self.conn_id)
     if ok then
@@ -322,7 +323,7 @@ function SchemaCache:_queue_completion_refresh_notification(probe, request_id, r
   if type(self.completion_refresh_notifier) ~= "function" then
     return
   end
-  if root_epoch < self:_authoritative_root_epoch() then
+  if root_epoch < self:authoritative_root_epoch() then
     return
   end
   if not schema_filter.matches(probe.schema, self.schema_scope) then
@@ -357,7 +358,7 @@ function SchemaCache:_queue_completion_refresh_notification(probe, request_id, r
     if type(self.completion_refresh_notifier) ~= "function" then
       return
     end
-    if root_epoch < self:_authoritative_root_epoch() then
+    if root_epoch < self:authoritative_root_epoch() then
       return
     end
     self.completion_refresh_notifier(vim.deepcopy(payload))
@@ -2589,7 +2590,7 @@ function SchemaCache:on_columns_loaded(data)
   end
 
   local payload_epoch = tonumber(data.root_epoch) or 0
-  if payload_epoch < self:_authoritative_root_epoch() then
+  if payload_epoch < self:authoritative_root_epoch() then
     return false
   end
 

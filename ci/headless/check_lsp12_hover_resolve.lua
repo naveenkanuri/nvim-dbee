@@ -501,7 +501,7 @@ local function synthetic_table_item(test_cache, generation, schema, table_name)
       table_quoted = true,
       cache_identity = test_cache:cache_identity(),
       cache_generation = generation,
-      root_epoch = test_cache:_authoritative_root_epoch(),
+      root_epoch = test_cache:authoritative_root_epoch(),
     },
   }
 end

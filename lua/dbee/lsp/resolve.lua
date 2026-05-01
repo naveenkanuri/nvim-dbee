@@ -174,7 +174,7 @@ function M.handle(item, cache, opts)
   end
   if data.cache_identity ~= cache:cache_identity()
     or tonumber(data.cache_generation) ~= current_generation
-    or tonumber(data.root_epoch or 0) ~= cache:_authoritative_root_epoch()
+    or tonumber(data.root_epoch or 0) ~= cache:authoritative_root_epoch()
   then
     return incomplete(item, "stale_generation")
   end
