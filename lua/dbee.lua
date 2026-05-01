@@ -356,6 +356,25 @@ function dbee.focus_pane(name)
   end
 end
 
+local function drawer_action(name)
+  return function()
+    local ok, err = pcall(function()
+      if not dbee.is_open() then
+        dbee.open()
+      end
+      if not dbee.is_open() then
+        utils.log("warn", "Failed to open drawer; cannot run " .. name)
+        return
+      end
+      dbee.focus_pane("drawer")
+      api.ui.drawer_do_action(name)
+    end)
+    if not ok then
+      utils.log("error", "drawer action " .. name .. " failed: " .. tostring(err))
+    end
+  end
+end
+
 ---Open notes picker using snacks.nvim.
 local function note_picker_item_selectable(item)
   return item and item.kind == "note" and item.note_id ~= nil and item.disabled ~= true
@@ -1587,6 +1606,14 @@ function dbee.actions(opts)
         dbee.toggle_drawer()
       end,
     },
+    { id = "add_folder", label = "+ New Folder", run = drawer_action("add_folder") },
+    { id = "rename_folder", label = "Rename Folder", run = drawer_action("rename_folder") },
+    { id = "delete_folder", label = "Delete Folder", run = drawer_action("delete_folder") },
+    {
+      id = "move_connection_to_folder",
+      label = "Move Connection To Folder",
+      run = drawer_action("move_connection_to_folder"),
+    },
   }
 
   if is_oracle_connection(current_conn) then
@@ -1711,6 +1738,11 @@ function dbee.actions(opts)
     end,
   })
 end
+
+dbee.add_folder = drawer_action("add_folder")
+dbee.rename_folder = drawer_action("rename_folder")
+dbee.delete_folder = drawer_action("delete_folder")
+dbee.move_connection_to_folder = drawer_action("move_connection_to_folder")
 
 ---Execute a query on current connection.
 ---Convenience wrapper around some api functions that executes a query on
