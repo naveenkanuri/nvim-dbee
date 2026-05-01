@@ -128,6 +128,55 @@ local required_lsp12_2_true_markers = {
   "LSP12_2_WORKSPACESYMBOL_PERF_BUDGET_100MS",
 }
 
+local required_lsp12_3_true_markers = {
+  "LSP12_3_EXPAND_SELECT_STAR_OK",
+  "LSP12_3_EXPAND_SELECT_STAR_QUOTED_PRESERVED",
+  "LSP12_3_EXPAND_SELECT_STAR_OUT_OF_SCOPE_NO_ACTION",
+  "LSP12_3_EXPAND_SELECT_STAR_WIDE_TABLE_BOUNDED_COPY",
+  "LSP12_3_EXPAND_QUALIFIED_STAR_NO_ACTION",
+  "LSP12_3_EXPAND_CTE_SHADOW_NO_ACTION",
+  "LSP12_3_QUALIFY_IDENTIFIER_OK",
+  "LSP12_3_QUALIFY_IDENTIFIER_AMBIGUOUS_NO_ACTION",
+  "LSP12_3_QUALIFY_IDENTIFIER_QUOTED_PRESERVED",
+  "LSP12_3_QUALIFY_IDENTIFIER_ALREADY_QUALIFIED_NO_ACTION",
+  "LSP12_3_QUALIFY_CTE_SHADOW_NO_ACTION",
+  "LSP12_3_REFRESH_SCHEMA_CMD_OK",
+  "LSP12_3_RELOAD_TABLE_METADATA_CMD_OK",
+  "LSP12_3_EXECUTE_COMMAND_PROVIDER_OK",
+  "LSP12_3_WORKSPACE_EXECUTE_COMMAND_OK",
+  "LSP12_3_REFRESH_CMD_IMMEDIATE_ASYNC",
+  "LSP12_3_RELOAD_CMD_IMMEDIATE_ASYNC",
+  "LSP12_3_RELOAD_CMD_SCOPE_FILTERED",
+  "LSP12_3_RELOAD_CTE_SHADOW_NO_ACTION",
+  "LSP12_3_AUTHORITY_FAIL_CLOSED_NO_ACTIONS",
+  "LSP12_3_EPOCH_STALE_NO_ACTIONS",
+  "LSP12_3_COMMAND_STALE_TOKEN_REJECTED",
+  "LSP12_3_NO_ACTIONABLE_RANGE_EMPTY",
+  "LSP12_3_DISABLED_NO_CAPABILITY",
+  "LSP12_3_DISABLED_CMD_REJECTED_DIRECT",
+  "LSP12_3_ACTION_ORDER_STABLE",
+  "LSP12_3_CONTEXT_ONLY_PREFIX_MATCH_OK",
+  "LSP12_3_MULTISTMT_SEMICOLON_AWARE",
+  "LSP12_3_EDIT_SINGLE_FILE_SINGLE_RANGE",
+  "LSP12_3_STALE_EDIT_REJECTED",
+  "LSP12_3_NEW_CODE_ACTION_NO_HELPER_BYPASS",
+  "LSP12_3_NO_SYNC_DB",
+  "LSP12_3_NO_ASYNC_DB",
+  "LSP12_3_MAKE_PERF_LSP_WIRED",
+  "LSP12_3_ROLLUP_EXACTLY_ONCE_OK",
+  "LSP12_3_PERF_CODEACTION_BUDGET_50MS",
+  "LSP12_3_PERF_EDIT_BUDGET_100MS",
+}
+
+local required_lsp12_3_metric_markers = {
+  LSP12_3_PERF_SCENARIOS_COUNT = "4",
+  LSP12_3_MEASURED_COUNT = "100",
+  LSP12_3_CODEACTION_EMPTY_REFACTOR_RANGE_P95_MS = "number",
+  LSP12_3_CODEACTION_EXPAND_SELECT_STAR_P95_MS = "number",
+  LSP12_3_CODEACTION_QUALIFY_IDENTIFIER_P95_MS = "number",
+  LSP12_3_CODEACTION_SOURCE_COMMANDS_P95_MS = "number",
+}
+
 local function parse_markers(lines)
   local markers = {}
   for _, line in ipairs(lines) do
@@ -208,6 +257,59 @@ local function evaluate_lsp12_2(lines)
   }
 end
 
+local function evaluate_lsp12_3(lines)
+  local markers = parse_markers(lines)
+  local failures = {}
+
+  local function require_marker(label, allowed)
+    local values = markers[label]
+    if not values or #values == 0 then
+      failures[#failures + 1] = "missing " .. label
+      return
+    end
+    if #values ~= 1 then
+      failures[#failures + 1] = label .. " must appear exactly once, found " .. tostring(#values)
+    end
+    for _, value in ipairs(values) do
+      if not allowed[value] then
+        failures[#failures + 1] = label .. " has unsupported value " .. tostring(value)
+      end
+    end
+  end
+
+  local function require_numeric_marker(label)
+    local values = markers[label]
+    if not values or #values == 0 then
+      failures[#failures + 1] = "missing " .. label
+      return
+    end
+    if #values ~= 1 then
+      failures[#failures + 1] = label .. " must appear exactly once, found " .. tostring(#values)
+    end
+    local value = tonumber(values[1])
+    if value == nil or value ~= value or value == math.huge or value == -math.huge then
+      failures[#failures + 1] = label .. " must be finite numeric, got " .. tostring(values[1])
+    end
+  end
+
+  for _, label in ipairs(required_lsp12_3_true_markers) do
+    require_marker(label, { ["true"] = true })
+  end
+  for label, expected in pairs(required_lsp12_3_metric_markers) do
+    if expected == "number" then
+      require_numeric_marker(label)
+    else
+      require_marker(label, { [expected] = true })
+    end
+  end
+
+  return {
+    ok = #failures == 0,
+    failures = failures,
+    checked = #required_lsp12_3_true_markers + vim.tbl_count(required_lsp12_3_metric_markers),
+  }
+end
+
 if vim.env.LSP12_ROLLUP_EXPORT == "1" then
   return {
     evaluate = evaluate,
@@ -215,6 +317,9 @@ if vim.env.LSP12_ROLLUP_EXPORT == "1" then
     required_advisory_markers = required_advisory_markers,
     evaluate_lsp12_2 = evaluate_lsp12_2,
     required_lsp12_2_true_markers = required_lsp12_2_true_markers,
+    evaluate_lsp12_3 = evaluate_lsp12_3,
+    required_lsp12_3_true_markers = required_lsp12_3_true_markers,
+    required_lsp12_3_metric_markers = required_lsp12_3_metric_markers,
   }
 end
 
@@ -269,6 +374,22 @@ local function selftest()
   if lsp12_2_duplicate.ok then
     fail({ "selftest duplicate LSP12.2 marker did not fail" })
   end
+  local lsp12_3_lines = {}
+  for _, marker in ipairs(required_lsp12_3_true_markers) do
+    lsp12_3_lines[#lsp12_3_lines + 1] = marker .. "=true"
+  end
+  for label, expected in pairs(required_lsp12_3_metric_markers) do
+    lsp12_3_lines[#lsp12_3_lines + 1] = label .. "=" .. (expected == "number" and "1.25" or expected)
+  end
+  local lsp12_3_valid = evaluate_lsp12_3(lsp12_3_lines)
+  if not lsp12_3_valid.ok then
+    fail({ "selftest valid LSP12.3 log failed: " .. table.concat(lsp12_3_valid.failures, "; ") })
+  end
+  lsp12_3_lines[#lsp12_3_lines + 1] = required_lsp12_3_true_markers[1] .. "=true"
+  local lsp12_3_duplicate = evaluate_lsp12_3(lsp12_3_lines)
+  if lsp12_3_duplicate.ok then
+    fail({ "selftest duplicate LSP12.3 marker did not fail" })
+  end
   emit("LSP12_ROLLUP_SELFTEST_ALL_PASS", "true")
   vim.cmd("qa!")
 end
@@ -280,11 +401,15 @@ end
 local lines = read_lines()
 local result = evaluate(lines)
 local lsp12_2_result = evaluate_lsp12_2(lines)
+local lsp12_3_result = evaluate_lsp12_3(lines)
 local failures = {}
 for _, failure in ipairs(result.failures) do
   failures[#failures + 1] = failure
 end
 for _, failure in ipairs(lsp12_2_result.failures) do
+  failures[#failures + 1] = failure
+end
+for _, failure in ipairs(lsp12_3_result.failures) do
   failures[#failures + 1] = failure
 end
 if #failures > 0 then
@@ -295,4 +420,6 @@ emit("LSP12_ROLLUP_MARKERS_CHECKED", result.checked)
 emit("LSP12_HOVER_RESOLVE_ALL_PASS", "true")
 emit("LSP12_2_ROLLUP_MARKERS_CHECKED", lsp12_2_result.checked)
 emit("LSP12_2_ALL_PASS", "true")
+emit("LSP12_3_ROLLUP_MARKERS_CHECKED", lsp12_3_result.checked)
+emit("LSP12_3_ALL_PASS", "true")
 vim.cmd("qa!")

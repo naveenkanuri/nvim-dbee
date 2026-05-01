@@ -2560,6 +2560,201 @@ local function run_lsp12_perf_section()
   )
 end
 
+local LSP12_3_SCENARIOS = {}
+local LSP12_3_MEASURED_COUNT = 100
+
+local function lsp12_3_register(spec)
+  LSP12_3_SCENARIOS[#LSP12_3_SCENARIOS + 1] = spec
+end
+
+local function lsp12_3_before(lines, opts)
+  opts = opts or {}
+  local cache = make_cache(opts.table_count or 1, opts.columns_per_table or DEFAULT_COLUMNS_PER_TABLE, {
+    preload_columns = opts.preload_columns ~= false,
+  })
+  local bufnr, uri = make_buffer(lines)
+  local client, client_id = start_lsp(cache, bufnr)
+  client:notify("textDocument/didOpen", {
+    textDocument = {
+      uri = uri,
+      languageId = "sql",
+      version = 1,
+      text = table.concat(lines, "\n"),
+    },
+  })
+  return {
+    cache = cache,
+    handler = cache.handler,
+    bufnr = bufnr,
+    uri = uri,
+    client = client,
+    client_id = client_id,
+  }
+end
+
+local function lsp12_3_after(state)
+  completion_after(state)
+end
+
+local function lsp12_3_code_action(state, line_index, start_character, end_character, only)
+  local params = {
+    textDocument = { uri = state.uri },
+    range = {
+      start = { line = line_index or 0, character = start_character or 0 },
+      ["end"] = { line = line_index or 0, character = end_character or start_character or 0 },
+    },
+    context = {},
+  }
+  if only then
+    params.context.only = only
+  end
+  return lsp12_request(state.client, state.bufnr, "textDocument/codeAction", params)
+end
+
+local function lsp12_3_position(line, needle)
+  local start_pos = assert(line:find(needle, 1, true), "missing code action needle " .. tostring(needle)) - 1
+  return start_pos
+end
+
+local function lsp12_3_assert_no_request_db(state, before_sync, before_async, slug)
+  local sync_delta = (state.handler.counters.connection_get_columns or 0) - before_sync
+  local async_delta = (state.handler.counters.connection_get_columns_async or 0) - before_async
+  if sync_delta ~= 0 or async_delta ~= 0 then
+    error(("%s request path touched DB counters sync=%d async=%d"):format(slug, sync_delta, async_delta))
+  end
+end
+
+lsp12_3_register({
+  slug = "CODEACTION_EMPTY_REFACTOR_RANGE",
+  before = function()
+    return lsp12_3_before({ "SELECT 1 FROM SCHEMA_001.TABLE_000001" })
+  end,
+  run = function(state)
+    local line = "SELECT 1 FROM SCHEMA_001.TABLE_000001"
+    local pos = lsp12_3_position(line, "1")
+    local before_sync = state.handler.counters.connection_get_columns or 0
+    local before_async = state.handler.counters.connection_get_columns_async or 0
+    local result, elapsed = lsp12_3_code_action(state, 0, pos, pos, { "refactor" })
+    if type(result) ~= "table" or #result ~= 0 then
+      error("empty refactor range returned actions")
+    end
+    lsp12_3_assert_no_request_db(state, before_sync, before_async, "CODEACTION_EMPTY_REFACTOR_RANGE")
+    return elapsed
+  end,
+})
+
+lsp12_3_register({
+  slug = "CODEACTION_EXPAND_SELECT_STAR",
+  before = function()
+    return lsp12_3_before({ "SELECT * FROM SCHEMA_001.TABLE_000001" }, {
+      columns_per_table = 200,
+    })
+  end,
+  run = function(state)
+    local line = "SELECT * FROM SCHEMA_001.TABLE_000001"
+    local pos = lsp12_3_position(line, "*")
+    local before_sync = state.handler.counters.connection_get_columns or 0
+    local before_async = state.handler.counters.connection_get_columns_async or 0
+    local result, elapsed = lsp12_3_code_action(state, 0, pos, pos + 1, { "refactor.rewrite" })
+    if type(result) ~= "table" or #result ~= 1 or not (result[1].edit and result[1].edit.documentChanges) then
+      error("expand code action missing versioned edit")
+    end
+    local edit = result[1].edit.documentChanges[1].edits[1]
+    if not edit.newText:find("COL_200", 1, true) then
+      error("expand code action did not render cap-sized columns")
+    end
+    lsp12_3_assert_no_request_db(state, before_sync, before_async, "CODEACTION_EXPAND_SELECT_STAR")
+    return elapsed
+  end,
+})
+
+lsp12_3_register({
+  slug = "CODEACTION_QUALIFY_IDENTIFIER",
+  before = function()
+    return lsp12_3_before({ "SELECT COL_001 FROM TABLE_000001" })
+  end,
+  run = function(state)
+    local line = "SELECT COL_001 FROM TABLE_000001"
+    local pos = lsp12_3_position(line, "TABLE_000001")
+    local before_sync = state.handler.counters.connection_get_columns or 0
+    local before_async = state.handler.counters.connection_get_columns_async or 0
+    local result, elapsed = lsp12_3_code_action(state, 0, pos, pos, { "refactor.rewrite" })
+    if type(result) ~= "table" or #result ~= 1 or not (result[1].edit and result[1].edit.documentChanges) then
+      error("qualify code action missing versioned edit")
+    end
+    local edit = result[1].edit.documentChanges[1].edits[1]
+    if edit.newText ~= "SCHEMA_001." then
+      error("qualify code action produced unexpected edit " .. tostring(edit.newText))
+    end
+    lsp12_3_assert_no_request_db(state, before_sync, before_async, "CODEACTION_QUALIFY_IDENTIFIER")
+    return elapsed
+  end,
+})
+
+lsp12_3_register({
+  slug = "CODEACTION_SOURCE_COMMANDS",
+  before = function()
+    return lsp12_3_before({ "SELECT COL_001 FROM SCHEMA_001.TABLE_000001" })
+  end,
+  run = function(state)
+    local line = "SELECT COL_001 FROM SCHEMA_001.TABLE_000001"
+    local pos = lsp12_3_position(line, "TABLE_000001")
+    local before_sync = state.handler.counters.connection_get_columns or 0
+    local before_async = state.handler.counters.connection_get_columns_async or 0
+    local result, elapsed = lsp12_3_code_action(state, 0, pos, pos, { "source" })
+    if type(result) ~= "table" or #result ~= 2 then
+      error("source command discovery expected reload and refresh actions")
+    end
+    if result[1].command.command ~= "dbee/reload_table" or result[2].command.command ~= "dbee/refresh_schema" then
+      error("source command order mismatch")
+    end
+    lsp12_3_assert_no_request_db(state, before_sync, before_async, "CODEACTION_SOURCE_COMMANDS")
+    return elapsed
+  end,
+})
+
+local function run_lsp12_3_perf_section()
+  emit("LSP12_3_PERF_SCENARIOS_COUNT", #LSP12_3_SCENARIOS)
+  emit("LSP12_3_MEASURED_COUNT", LSP12_3_MEASURED_COUNT)
+  local all_samples = {}
+  local edit_samples = {}
+
+  for _, spec in ipairs(LSP12_3_SCENARIOS) do
+    local samples = {}
+    local state = spec.before()
+    for iteration = 1, WARMUP_COUNT + LSP12_3_MEASURED_COUNT do
+      local ok, elapsed_or_err = xpcall(function()
+        return spec.run(state, iteration)
+      end, debug.traceback)
+      if not ok then
+        lsp12_3_after(state)
+        fail("LSP12.3 " .. spec.slug .. " failed: " .. tostring(elapsed_or_err))
+      end
+      if iteration > WARMUP_COUNT then
+        samples[#samples + 1] = elapsed_or_err
+        all_samples[#all_samples + 1] = elapsed_or_err
+        if spec.slug == "CODEACTION_EXPAND_SELECT_STAR" or spec.slug == "CODEACTION_QUALIFY_IDENTIFIER" then
+          edit_samples[#edit_samples + 1] = elapsed_or_err
+        end
+      end
+    end
+    lsp12_3_after(state)
+    local p95 = ns_to_ms(percentile(samples, 0.95))
+    emit("LSP12_3_" .. spec.slug .. "_P95_MS", format_float(p95))
+  end
+
+  local discovery_p95 = ns_to_ms(percentile(all_samples, 0.95))
+  local edit_p95 = ns_to_ms(percentile(edit_samples, 0.95))
+  emit("LSP12_3_PERF_CODEACTION_BUDGET_50MS", discovery_p95 <= 50 and "true" or "false")
+  emit("LSP12_3_PERF_EDIT_BUDGET_100MS", edit_p95 <= 100 and "true" or "false")
+  summary_rows[#summary_rows + 1] = string.format(
+    "LSP12.3 codeAction_p95_ms=%s edit_p95_ms=%s scenarios=%d",
+    format_float(discovery_p95),
+    format_float(edit_p95),
+    #LSP12_3_SCENARIOS
+  )
+end
+
 local LSP12_2_SCENARIOS = {}
 local LSP12_2_MEASURED_COUNT = 100
 
@@ -2851,6 +3046,7 @@ for _, spec in ipairs(SCENARIOS) do
 end
 
 run_lsp12_perf_section()
+run_lsp12_3_perf_section()
 run_lsp12_2_perf_section()
 
 run_flame_trace_subprocess()

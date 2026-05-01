@@ -427,6 +427,70 @@ function M._flush_pending()
   M._pending_bufs = {}
 end
 
+local function code_action_command_context(args)
+  if type(args) ~= "table" or not state.is_core_loaded() or not M._cache or not M._conn_id then
+    return nil, nil
+  end
+  if args.conn_id ~= M._conn_id then
+    return nil, nil
+  end
+  if type(M._cache.cache_identity) == "function" and args.cache_identity ~= M._cache:cache_identity() then
+    return nil, nil
+  end
+  if type(M._cache.generation) == "function" and tonumber(args.cache_generation) ~= M._cache:generation() then
+    return nil, nil
+  end
+  if type(M._cache.metadata_root_epoch) == "function"
+    and tonumber(args.root_epoch) ~= M._cache:metadata_root_epoch()
+  then
+    return nil, nil
+  end
+  local check = epoch_authority.check_fresh(M._cache, M._cache.handler, M._conn_id)
+  if not check.fresh then
+    return nil, nil
+  end
+  if type(M._cache.read_lsp_authority) == "function"
+    and schema_filter_authority.is_fail_closed(M._cache:read_lsp_authority())
+  then
+    return nil, nil
+  end
+
+  local handler = state.handler()
+  local conn = handler:get_current_connection()
+  if not conn or conn.id ~= M._conn_id then
+    return nil, nil
+  end
+  return handler, conn
+end
+
+---@param args table
+local function code_action_refresh_schema(args)
+  local handler, conn = code_action_command_context(args)
+  if not handler or not conn then
+    return nil
+  end
+  if M._cache and type(M._cache.invalidate) == "function" then
+    M._cache:invalidate()
+  end
+  M._request_root_refresh(handler, conn.id)
+  return nil
+end
+
+---@param args table
+local function code_action_reload_table(args)
+  local handler, conn = code_action_command_context(args)
+  if not handler or not conn or not M._cache or type(M._cache.reload_table_metadata_async) ~= "function" then
+    return nil
+  end
+  M._cache:reload_table_metadata_async(args.schema, args.table, {
+    schema_quoted = args.schema_quoted,
+    table_quoted = args.table_quoted,
+    root_epoch = args.root_epoch,
+    cache_generation = args.cache_generation,
+  })
+  return nil
+end
+
 --- Start LSP with a populated cache.
 ---@private
 ---@param cache SchemaCache
@@ -438,6 +502,10 @@ function M._start_lsp(cache, conn_id)
   if ok_config and current_config and type(current_config.lsp) == "table" then
     cfg.lsp = current_config.lsp
   end
+  cfg.code_action_commands = {
+    refresh_schema = code_action_refresh_schema,
+    reload_table = code_action_reload_table,
+  }
   local client_id = vim.lsp.start({
     name = "dbee-lsp",
     cmd = server.create(cache, cfg),

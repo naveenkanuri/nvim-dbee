@@ -140,6 +140,12 @@ The built-in LSP diagnostics can be configured under `lsp`:
         resolve = true,
         document_symbols = true,
         workspace_symbols = true,
+        code_actions = true,
+        code_action_expand_select_star = true,
+        code_action_qualify_identifier = true,
+        code_action_refresh_schema = true,
+        code_action_reload_table_metadata = true,
+        code_action_max_expand_columns = 200,
       },
     })
 <
@@ -152,10 +158,15 @@ supported for custom setups.
 The built-in LSP also advertises cache-backed hover, completion item resolve,
 document symbols, and workspace symbols by default. Set `lsp.hover = false`,
 `lsp.resolve = false`, `lsp.document_symbols = false`, or
-`lsp.workspace_symbols = false` to suppress those capabilities. Hover,
-resolve, and workspace symbols use already-loaded schema cache data only, so
-details may be minimal until table columns have warmed. Document symbols are
-source-text based and show SQL references from the current buffer.
+`lsp.workspace_symbols = false` to suppress those capabilities. Code actions
+are available through `vim.lsp.buf.code_action()` and can expand cached
+single-table `SELECT *`, qualify unqualified table references, refresh the
+schema cache, or reload table metadata. Set `lsp.code_actions = false` to
+disable the whole code-action surface, or use the per-action flags shown above
+for narrower rollback. Hover, resolve, workspace symbols, and code actions use
+already-loaded schema cache data only, so details may be minimal until table
+columns have warmed. Document symbols are source-text based and show SQL
+references from the current buffer.
 
 Here are the defaults:
 

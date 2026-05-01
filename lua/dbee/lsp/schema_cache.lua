@@ -2346,6 +2346,95 @@ end
 
 ---@param schema string?
 ---@param table_name string
+---@param opts? { schema_quoted?: boolean, table_quoted?: boolean }
+---@return table? resolved
+---@return string? reason
+function SchemaCache:resolve_table_for_code_action(schema, table_name, opts)
+  opts = opts or {}
+  local scope, reason = self:_fresh_lsp_scope()
+  if not scope then
+    return nil, reason
+  end
+  if not table_name or table_name == "" then
+    return nil, "missing_table"
+  end
+
+  if schema and schema ~= "" then
+    local actual_table, actual_schema = self:find_table_in_schema(schema, table_name, opts)
+    if not actual_schema or not actual_table or not self:schema_in_current_scope(actual_schema, scope) then
+      return nil, "missing_or_filtered"
+    end
+    local info = (self.tables[actual_schema] or {})[actual_table]
+    if not info then
+      return nil, "missing"
+    end
+    return {
+      schema = actual_schema,
+      table = actual_table,
+      table_type = info.type or "table",
+    }
+  end
+
+  local matches = {}
+  local schemas = vim.tbl_keys(self.schemas or {})
+  table.sort(schemas)
+  for _, candidate_schema in ipairs(schemas) do
+    if self:schema_in_current_scope(candidate_schema, scope) then
+      local actual_table = self:find_table_in_schema(candidate_schema, table_name, {
+        schema_quoted = true,
+        table_quoted = opts.table_quoted,
+      })
+      if actual_table then
+        matches[#matches + 1] = {
+          schema = candidate_schema,
+          table = actual_table,
+          table_type = ((self.tables[candidate_schema] or {})[actual_table] or {}).type or "table",
+        }
+      end
+    end
+  end
+  if #matches == 0 then
+    return nil, "missing_or_filtered"
+  end
+  if #matches > 1 then
+    return nil, "ambiguous"
+  end
+  return matches[1], nil
+end
+
+---@param schema string?
+---@param table_name string
+---@param opts? { schema_quoted?: boolean, table_quoted?: boolean, max_columns?: integer }
+---@return table? metadata
+---@return string? reason
+function SchemaCache:get_code_action_table_columns(schema, table_name, opts)
+  opts = opts or {}
+  local resolved, reason = self:resolve_table_for_code_action(schema, table_name, opts)
+  if not resolved then
+    return nil, reason
+  end
+  local key = table_key(resolved.schema, resolved.table)
+  local columns = self.columns[key]
+  if not columns then
+    return nil, "columns_not_loaded"
+  end
+  local max_columns = math.max(0, tonumber(opts.max_columns) or 200)
+  if #columns > max_columns then
+    return nil, "too_wide"
+  end
+  return {
+    kind = "table",
+    schema = resolved.schema,
+    table = resolved.table,
+    table_type = resolved.table_type,
+    columns = columns,
+    column_count = #columns,
+    columns_loaded = true,
+  }
+end
+
+---@param schema string?
+---@param table_name string
 ---@param column_name string
 ---@param opts? { schema_quoted?: boolean, table_quoted?: boolean, column_quoted?: boolean }
 ---@return table? metadata, string? reason
@@ -2857,6 +2946,77 @@ function SchemaCache:get_columns_async(schema, table_name, opts)
     columns = {},
     is_incomplete = true,
     in_flight = true,
+  }
+end
+
+--- Force an async column refresh for an already resolved table.
+---@param schema string
+---@param table_name string
+---@param opts? { schema_quoted?: boolean, table_quoted?: boolean, root_epoch?: integer, cache_generation?: integer }
+---@return table result
+function SchemaCache:reload_table_metadata_async(schema, table_name, opts)
+  opts = opts or {}
+  if opts.cache_generation ~= nil and tonumber(opts.cache_generation) ~= self:generation() then
+    return { scheduled = false, reason = "stale_generation" }
+  end
+
+  local epoch_check = epoch_authority.check_fresh(self, self.handler, self.conn_id)
+  if not epoch_check.fresh then
+    return { scheduled = false, reason = "stale_root_epoch" }
+  end
+
+  local root_epoch = self:_root_epoch(opts)
+  if not epoch_authority.admit_write(self, root_epoch, epoch_check.cache_epoch) then
+    return { scheduled = false, reason = "root_epoch_mismatch" }
+  end
+
+  local resolved, reason = self:resolve_table_for_code_action(schema, table_name, opts)
+  if not resolved then
+    return { scheduled = false, reason = reason or "unresolved_table" }
+  end
+
+  local materializations = { resolved.table_type or "table" }
+  local chain_key = self:_async_chain_key(
+    self.conn_id,
+    resolved.schema,
+    resolved.table,
+    materialization_identity(materializations),
+    root_epoch
+  )
+  self.async_failed[chain_key] = nil
+  if self.async_chains[chain_key] then
+    return {
+      scheduled = true,
+      in_flight = true,
+      schema = resolved.schema,
+      table = resolved.table,
+      root_epoch = root_epoch,
+    }
+  end
+
+  local entry = {
+    conn_id = self.conn_id,
+    root_epoch = root_epoch,
+    chain_key = chain_key,
+    schema_candidates = { resolved.schema },
+    table_candidates = { resolved.table },
+    materializations = materializations,
+    schema_index = 1,
+    table_index = 1,
+    materialization_index = 1,
+    nio = nio,
+  }
+
+  if not self:_queue_async_probe(entry) then
+    return { scheduled = false, reason = "queue_failed" }
+  end
+
+  return {
+    scheduled = true,
+    in_flight = true,
+    schema = resolved.schema,
+    table = resolved.table,
+    root_epoch = root_epoch,
   }
 end
 

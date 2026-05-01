@@ -710,6 +710,7 @@ end
 local function scan_statement_tokens(statement)
   local tokens = {}
   local index = 1
+  local depth = 0
   ensure_statement_offset_index(statement)
 
   while index <= #statement.text do
@@ -773,6 +774,7 @@ local function scan_statement_tokens(statement)
             raw = raw_text,
             name = parsed.name,
             quoted = true,
+            depth = depth,
             offset_start = start_index,
             offset_end = index,
             range = {
@@ -794,6 +796,7 @@ local function scan_statement_tokens(statement)
           raw = raw_text,
           name = parsed.name,
           quoted = false,
+          depth = depth,
           offset_start = start_index,
           offset_end = index,
           range = {
@@ -806,6 +809,12 @@ local function scan_statement_tokens(statement)
       while index <= #statement.text and statement.text:sub(index, index):match("[%w_%.]") do
         index = index + 1
       end
+    elseif ch == "(" then
+      depth = depth + 1
+      index = index + 1
+    elseif ch == ")" then
+      depth = math.max(0, depth - 1)
+      index = index + 1
     else
       index = index + 1
     end
@@ -970,8 +979,10 @@ function M.extract_hover_statement(params, opts)
 end
 
 ---@param statement table
+---@param opts? { top_level_only?: boolean }
 ---@return table[]
-local function parse_statement_table_refs(statement)
+local function parse_statement_table_refs(statement, opts)
+  opts = opts or {}
   local refs = {}
   local matches = {}
 
@@ -999,6 +1010,9 @@ local function parse_statement_table_refs(statement)
 
   local function token_lower(token)
     if not token or token.quoted == true then
+      return nil
+    end
+    if opts.top_level_only == true and token.depth ~= 0 then
       return nil
     end
     return token.name:lower()
@@ -1030,12 +1044,14 @@ local function parse_statement_table_refs(statement)
 
   local function parse_table_at(index, specificity)
     local first = tokens[index]
-    if not first or token_keyword(first) then
+    if not first or token_keyword(first) or (opts.top_level_only == true and first.depth ~= 0) then
       return nil, index + 1
     end
 
     local second = tokens[index + 1]
-    if second and not token_keyword(second) and dot_between(first, second) then
+    if second and not token_keyword(second) and dot_between(first, second)
+      and (opts.top_level_only ~= true or second.depth == 0)
+    then
       return {
         pos = first.offset_start,
         specificity = specificity,
@@ -1066,6 +1082,9 @@ local function parse_statement_table_refs(statement)
   local function attach_alias(ref, index)
     local token = tokens[index]
     if not ref or not token then
+      return index
+    end
+    if opts.top_level_only == true and token.depth ~= 0 then
       return index
     end
     if separator_between(ref.ref_end, token.offset_start):find(",", 1, true) then
@@ -1200,6 +1219,367 @@ function M.statement_table_refs(statement)
     refs[#refs + 1] = ref_with_ranges(statement, ref)
   end
   return refs
+end
+
+---@param statement table
+---@return table[]
+function M.code_action_table_refs(statement)
+  local refs = {}
+  for _, ref in ipairs(parse_statement_table_refs(statement, { top_level_only = true })) do
+    refs[#refs + 1] = ref_with_ranges(statement, ref)
+  end
+  return refs
+end
+
+---@param left table
+---@param right table
+---@return integer
+local function compare_position(left, right)
+  local left_line = tonumber(left and left.line) or 0
+  local right_line = tonumber(right and right.line) or 0
+  if left_line ~= right_line then
+    return left_line < right_line and -1 or 1
+  end
+  local left_char = tonumber(left and left.character) or 0
+  local right_char = tonumber(right and right.character) or 0
+  if left_char == right_char then
+    return 0
+  end
+  return left_char < right_char and -1 or 1
+end
+
+---@param range table?
+---@return table
+local function normalize_range(range)
+  range = range or {}
+  local start = range.start or range["start"] or { line = 0, character = 0 }
+  local finish = range["end"] or range.finish or start
+  return {
+    start = {
+      line = tonumber(start.line) or 0,
+      character = tonumber(start.character) or 0,
+    },
+    ["end"] = {
+      line = tonumber(finish.line) or tonumber(start.line) or 0,
+      character = tonumber(finish.character) or tonumber(start.character) or 0,
+    },
+  }
+end
+
+---@param range table
+---@return table
+local function range_cursor(range)
+  range = normalize_range(range)
+  return range.start
+end
+
+---@param outer table
+---@param inner table
+---@return boolean
+local function range_intersects(outer, inner)
+  outer = normalize_range(outer)
+  inner = normalize_range(inner)
+  return compare_position(inner["end"], outer.start) >= 0
+    and compare_position(inner.start, outer["end"]) <= 0
+end
+
+---@param statement table
+---@param position table
+---@return boolean
+local function statement_contains_position(statement, position)
+  local start_pos = statement.start or { line = 0, character = 0 }
+  local end_pos = M.statement_offset_to_position(statement, #statement.text + 1)
+  return compare_position(start_pos, position) <= 0
+    and compare_position(position, end_pos) <= 0
+end
+
+---@param params table
+---@return table?
+function M.code_action_statement(params)
+  if type(params) ~= "table" or not params.textDocument or not params.textDocument.uri then
+    return nil
+  end
+  local bufnr = vim.uri_to_bufnr(params.textDocument.uri)
+  if not vim.api.nvim_buf_is_valid(bufnr) then
+    return nil
+  end
+  local cursor = range_cursor(params.range)
+  local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+  local text = table.concat(lines or {}, "\n")
+  for _, statement in ipairs(M.extract_statements(text)) do
+    if statement_contains_position(statement, cursor) then
+      return statement
+    end
+  end
+  return nil
+end
+
+---@param token table?
+---@return string?
+local function token_lower_name(token)
+  if not token or token.quoted == true then
+    return nil
+  end
+  return token.name:lower()
+end
+
+---@param statement table
+---@return { has_with: boolean, valid: boolean, names: table[] }
+function M.statement_local_relations(statement)
+  local tokens = scan_statement_tokens(statement)
+  local first_top = nil
+  for index, token in ipairs(tokens) do
+    if token.depth == 0 then
+      first_top = index
+      break
+    end
+  end
+  if not first_top or token_lower_name(tokens[first_top]) ~= "with" then
+    return { has_with = false, valid = true, names = {} }
+  end
+
+  local names = {}
+  local index = first_top + 1
+  while index <= #tokens do
+    local token = tokens[index]
+    if token.depth ~= 0 then
+      index = index + 1
+    else
+      local lower = token_lower_name(token)
+      if lower == "select" then
+        return { has_with = true, valid = #names > 0, names = names }
+      end
+      if lower and sql_keywords_set[lower] then
+        return { has_with = true, valid = false, names = names }
+      end
+
+      names[#names + 1] = {
+        name = token.name,
+        raw = token.raw,
+        quoted = token.quoted,
+        range = token.range,
+      }
+      index = index + 1
+
+      local found_as = false
+      while index <= #tokens do
+        local candidate = tokens[index]
+        if candidate.depth == 0 then
+          local candidate_lower = token_lower_name(candidate)
+          if candidate_lower == "as" then
+            found_as = true
+            index = index + 1
+            break
+          elseif candidate_lower == "select" then
+            return { has_with = true, valid = false, names = names }
+          end
+        end
+        index = index + 1
+      end
+      if not found_as then
+        return { has_with = true, valid = false, names = names }
+      end
+
+      while index <= #tokens and tokens[index].depth ~= 0 do
+        index = index + 1
+      end
+    end
+  end
+
+  return { has_with = true, valid = false, names = names }
+end
+
+---@param statement table
+---@return table?
+function M.single_code_action_table_ref(statement)
+  local refs = M.code_action_table_refs(statement)
+  if #refs ~= 1 then
+    return nil
+  end
+  return refs[1]
+end
+
+---@param statement table
+---@param range table
+---@return table?
+function M.table_ref_at_range(statement, range)
+  for _, ref in ipairs(M.code_action_table_refs(statement)) do
+    if ref.table_range and range_intersects(range, ref.table_range) then
+      return ref
+    end
+  end
+  return nil
+end
+
+---@param statement table
+---@return table?
+local function top_level_select_bounds(statement)
+  local select_offset, from_offset = nil, nil
+  for _, token in ipairs(scan_statement_tokens(statement)) do
+    if token.depth == 0 and token.quoted ~= true then
+      local lower = token.name:lower()
+      if lower == "select" and not select_offset then
+        select_offset = token.offset_end
+      elseif lower == "from" and select_offset then
+        from_offset = token.offset_start
+        break
+      end
+    end
+  end
+  if not select_offset or not from_offset or from_offset <= select_offset then
+    return nil
+  end
+  return {
+    select_end = select_offset,
+    from_start = from_offset,
+  }
+end
+
+---@param statement table
+---@return table[]
+local function scan_star_tokens(statement)
+  local stars = {}
+  local index = 1
+  local depth = 0
+  local state = "normal"
+  local dollar_tag = nil
+
+  local function dollar_quote_tag(offset)
+    return statement.text:sub(offset):match("^(%$[%w_]*%$)")
+  end
+
+  while index <= #statement.text do
+    local ch = statement.text:sub(index, index)
+    local next_ch = statement.text:sub(index + 1, index + 1)
+
+    if state == "normal" and ch == "-" and next_ch == "-" then
+      state = "line_comment"
+      index = index + 2
+    elseif state == "normal" and ch == "/" and next_ch == "*" then
+      state = "block_comment"
+      index = index + 2
+    elseif state == "normal" and ch == "'" then
+      state = "single_quote"
+      index = index + 1
+    elseif state == "normal" and ch == '"' then
+      state = "double_quote"
+      index = index + 1
+    elseif state == "normal" and ch == "$" then
+      local tag = dollar_quote_tag(index)
+      if tag then
+        state = "dollar_quote"
+        dollar_tag = tag
+        index = index + #tag
+      else
+        index = index + 1
+      end
+    elseif state == "normal" and ch == "(" then
+      depth = depth + 1
+      index = index + 1
+    elseif state == "normal" and ch == ")" then
+      depth = math.max(0, depth - 1)
+      index = index + 1
+    elseif state == "normal" and ch == "*" then
+      stars[#stars + 1] = {
+        offset_start = index,
+        offset_end = index + 1,
+        depth = depth,
+        range = {
+          start = M.statement_offset_to_position(statement, index),
+          ["end"] = M.statement_offset_to_position(statement, index + 1),
+        },
+      }
+      index = index + 1
+    elseif state == "line_comment" then
+      if ch == "\n" then
+        state = "normal"
+      end
+      index = index + 1
+    elseif state == "block_comment" then
+      if ch == "*" and next_ch == "/" then
+        state = "normal"
+        index = index + 2
+      else
+        index = index + 1
+      end
+    elseif state == "single_quote" then
+      if ch == "'" and next_ch == "'" then
+        index = index + 2
+      else
+        if ch == "'" then
+          state = "normal"
+        end
+        index = index + 1
+      end
+    elseif state == "double_quote" then
+      if ch == '"' and next_ch == '"' then
+        index = index + 2
+      else
+        if ch == '"' then
+          state = "normal"
+        end
+        index = index + 1
+      end
+    elseif state == "dollar_quote" and dollar_tag
+      and statement.text:sub(index, index + #dollar_tag - 1) == dollar_tag
+    then
+      state = "normal"
+      index = index + #dollar_tag
+      dollar_tag = nil
+    else
+      index = index + 1
+    end
+  end
+
+  return stars
+end
+
+---@param statement table
+---@param offset integer
+---@return boolean
+local function star_is_qualified(statement, offset)
+  local before = statement.text:sub(1, math.max(0, offset - 1))
+  return before:match("%.%s*$") ~= nil
+end
+
+---@param statement table
+---@param range table
+---@return table?
+---@return string?
+function M.select_star_at_range(statement, range)
+  local bounds = top_level_select_bounds(statement)
+  if not bounds then
+    return nil, "not_select_list"
+  end
+  for _, star in ipairs(scan_star_tokens(statement)) do
+    if star.depth == 0
+      and star.offset_start > bounds.select_end
+      and star.offset_start < bounds.from_start
+      and range_intersects(range, star.range)
+    then
+      if star_is_qualified(statement, star.offset_start) then
+        return nil, "qualified_star"
+      end
+      return star, nil
+    end
+  end
+  return nil, "missing_star"
+end
+
+---@param params table
+---@return table?
+function M.code_action_context(params)
+  local statement = M.code_action_statement(params)
+  if not statement then
+    return nil
+  end
+  return {
+    uri = params.textDocument and params.textDocument.uri,
+    range = normalize_range(params.range),
+    statement = statement,
+    table_refs = M.code_action_table_refs(statement),
+    local_relations = M.statement_local_relations(statement),
+  }
 end
 
 ---@param statement table

@@ -1,4 +1,5 @@
 local context = require("dbee.lsp.context")
+local code_actions = require("dbee.lsp.code_actions")
 local epoch_authority = require("dbee.lsp.epoch_authority")
 local hover = require("dbee.lsp.hover")
 local resolve = require("dbee.lsp.resolve")
@@ -263,6 +264,12 @@ local function get_lsp_feature_config(opts)
     resolve = true,
     document_symbols = true,
     workspace_symbols = true,
+    code_actions = true,
+    code_action_expand_select_star = true,
+    code_action_qualify_identifier = true,
+    code_action_refresh_schema = true,
+    code_action_reload_table_metadata = true,
+    code_action_max_expand_columns = 200,
   }
   if opts and type(opts.lsp) == "table" then
     return {
@@ -270,6 +277,12 @@ local function get_lsp_feature_config(opts)
       resolve = opts.lsp.resolve ~= false,
       document_symbols = opts.lsp.document_symbols ~= false,
       workspace_symbols = opts.lsp.workspace_symbols ~= false,
+      code_actions = opts.lsp.code_actions ~= false,
+      code_action_expand_select_star = opts.lsp.code_action_expand_select_star ~= false,
+      code_action_qualify_identifier = opts.lsp.code_action_qualify_identifier ~= false,
+      code_action_refresh_schema = opts.lsp.code_action_refresh_schema ~= false,
+      code_action_reload_table_metadata = opts.lsp.code_action_reload_table_metadata ~= false,
+      code_action_max_expand_columns = tonumber(opts.lsp.code_action_max_expand_columns) or 200,
     }
   end
   local ok, state = pcall(require, "dbee.api.state")
@@ -286,7 +299,26 @@ local function get_lsp_feature_config(opts)
     resolve = lsp.resolve ~= false,
     document_symbols = lsp.document_symbols ~= false,
     workspace_symbols = lsp.workspace_symbols ~= false,
+    code_actions = lsp.code_actions ~= false,
+    code_action_expand_select_star = lsp.code_action_expand_select_star ~= false,
+    code_action_qualify_identifier = lsp.code_action_qualify_identifier ~= false,
+    code_action_refresh_schema = lsp.code_action_refresh_schema ~= false,
+    code_action_reload_table_metadata = lsp.code_action_reload_table_metadata ~= false,
+    code_action_max_expand_columns = tonumber(lsp.code_action_max_expand_columns) or 200,
   }
+end
+
+---@param feature_config table
+---@return table?
+local function execute_command_provider(feature_config)
+  if feature_config.code_actions == false then
+    return nil
+  end
+  local commands = code_actions.enabled_commands(feature_config)
+  if #commands == 0 then
+    return nil
+  end
+  return { commands = commands }
 end
 
 local function to_vim_diagnostics(diagnostics)
@@ -419,6 +451,7 @@ function M.create(cache, opts)
   local feature_config = get_lsp_feature_config(opts)
   local resolve_memo = {}
   local client_capabilities = nil
+  local document_versions = {}
 
   return function(dispatchers, config)
     local diagnostic_refresh_scheduled = false
@@ -544,6 +577,8 @@ function M.create(cache, opts)
               hoverProvider = feature_config.hover and true or nil,
               documentSymbolProvider = feature_config.document_symbols and true or nil,
               workspaceSymbolProvider = feature_config.workspace_symbols and true or nil,
+              codeActionProvider = feature_config.code_actions and true or nil,
+              executeCommandProvider = execute_command_provider(feature_config),
               completionProvider = {
                 triggerCharacters = { ".", " " },
                 resolveProvider = feature_config.resolve == true,
@@ -609,6 +644,24 @@ function M.create(cache, opts)
             result = {}
           end
           callback(nil, result)
+        elseif method == "textDocument/codeAction" then
+          local ok, result = pcall(code_actions.handle_code_action, params, cache, {
+            lsp = feature_config,
+            document_versions = document_versions,
+          })
+          if not ok then
+            result = {}
+          end
+          callback(nil, result)
+        elseif method == "workspace/executeCommand" then
+          local ok, result = pcall(code_actions.execute_command, params, cache, {
+            lsp = feature_config,
+            commands = opts and opts.code_action_commands or nil,
+          })
+          if not ok then
+            result = nil
+          end
+          callback(nil, result)
         else
           callback(nil, nil)
         end
@@ -624,13 +677,20 @@ function M.create(cache, opts)
           if dispatchers and dispatchers.on_exit then
             dispatchers.on_exit(0, 0)
           end
+        elseif method == "textDocument/didOpen" then
+          if params and params.textDocument then
+            document_versions[params.textDocument.uri] = params.textDocument.version
+          end
+          handle_diagnostics(method, params)
         elseif method == "textDocument/didSave" or method == "textDocument/didChange" then
           if method == "textDocument/didChange" and params and params.textDocument then
+            document_versions[params.textDocument.uri] = params.textDocument.version
             symbols.invalidate_document(params.textDocument.uri)
           end
           handle_diagnostics(method, params)
         elseif method == "textDocument/didClose" then
           if params and params.textDocument then
+            document_versions[params.textDocument.uri] = nil
             symbols.invalidate_document(params.textDocument.uri)
           end
         end

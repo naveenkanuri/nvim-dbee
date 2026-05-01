@@ -38,7 +38,7 @@ local config = {}
 ---@alias drawer_config { disable_candies: boolean, candies: table<string, Candy>, mappings: key_mapping[], disable_help: boolean, window_options: table<string, any>, buffer_options: table<string, any> }
 
 ---Configuration for built-in LSP features.
----@alias lsp_config { diagnostics_mode: "debounce_didchange"|"save_only"|"off", diagnostics_debounce_ms: integer, hover: boolean, resolve: boolean, document_symbols: boolean, workspace_symbols: boolean }
+---@alias lsp_config { diagnostics_mode: "debounce_didchange"|"save_only"|"off", diagnostics_debounce_ms: integer, hover: boolean, resolve: boolean, document_symbols: boolean, workspace_symbols: boolean, code_actions: boolean, code_action_expand_select_star: boolean, code_action_qualify_identifier: boolean, code_action_refresh_schema: boolean, code_action_reload_table_metadata: boolean, code_action_max_expand_columns: integer }
 
 ---@divider -
 
@@ -399,6 +399,12 @@ config.default = {
     resolve = true,
     document_symbols = true,
     workspace_symbols = true,
+    code_actions = true,
+    code_action_expand_select_star = true,
+    code_action_qualify_identifier = true,
+    code_action_refresh_schema = true,
+    code_action_reload_table_metadata = true,
+    code_action_max_expand_columns = 200,
   },
 
   -- window layout
@@ -431,6 +437,12 @@ function config.validate(cfg)
     lsp_resolve = { cfg.lsp.resolve, "boolean" },
     lsp_document_symbols = { cfg.lsp.document_symbols, "boolean" },
     lsp_workspace_symbols = { cfg.lsp.workspace_symbols, "boolean" },
+    lsp_code_actions = { cfg.lsp.code_actions, "boolean" },
+    lsp_code_action_expand_select_star = { cfg.lsp.code_action_expand_select_star, "boolean" },
+    lsp_code_action_qualify_identifier = { cfg.lsp.code_action_qualify_identifier, "boolean" },
+    lsp_code_action_refresh_schema = { cfg.lsp.code_action_refresh_schema, "boolean" },
+    lsp_code_action_reload_table_metadata = { cfg.lsp.code_action_reload_table_metadata, "boolean" },
+    lsp_code_action_max_expand_columns = { cfg.lsp.code_action_max_expand_columns, "number" },
 
     window_layout = { cfg.window_layout, "table" },
     window_layout_open = { cfg.window_layout.open, "function" },
@@ -452,6 +464,10 @@ function config.validate(cfg)
 
   if cfg.lsp.diagnostics_debounce_ms < 0 then
     error("lsp.diagnostics_debounce_ms must be non-negative", 2)
+  end
+
+  if cfg.lsp.code_action_max_expand_columns < 0 then
+    error("lsp.code_action_max_expand_columns must be non-negative", 2)
   end
 end
 
