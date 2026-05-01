@@ -1,4 +1,5 @@
 local context = require("dbee.lsp.context")
+local epoch_authority = require("dbee.lsp.epoch_authority")
 local schema_name_canonical = require("dbee.schema_name_canonical")
 
 local M = {}
@@ -105,6 +106,15 @@ local function read_document(uri)
   }
 end
 
+local function document_epoch_check(cache)
+  local handler = cache and cache.handler or nil
+  local conn_id = cache and cache.conn_id or nil
+  local _, check = epoch_authority.read_with_freshness(cache, handler, conn_id, function()
+    return true
+  end)
+  return check
+end
+
 local function schema_known(cache, ref)
   if not ref.schema or ref.schema == "" then
     return false
@@ -112,8 +122,11 @@ local function schema_known(cache, ref)
   if not cache or type(cache.find_schema) ~= "function" then
     return false
   end
-  local ok, actual = pcall(cache.find_schema, cache, ref.schema, { quoted = ref.schema_quoted })
-  return ok and actual ~= nil
+  local known = epoch_authority.read_with_freshness(cache, cache.handler, cache.conn_id, function()
+    local ok, actual = pcall(cache.find_schema, cache, ref.schema, { quoted = ref.schema_quoted })
+    return ok and actual ~= nil
+  end)
+  return known == true
 end
 
 local function range_key(range)
@@ -132,14 +145,24 @@ local function canonical_part(value, quoted, cache)
   return schema_name_canonical.canonical(value, quoted == true, cache_fold(cache)).canonical
 end
 
-local function document_cache_identity(cache)
+local function document_cache_identity(cache, epoch_check)
   if cache and type(cache.document_symbol_cache_identity) == "function" then
     local ok, identity = pcall(cache.document_symbol_cache_identity, cache)
     if ok and identity then
-      return tostring(identity)
+      return table.concat({
+        tostring(identity),
+        "handler_epoch:" .. tostring(epoch_check and epoch_check.handler_epoch or "none"),
+        "fresh:" .. tostring(epoch_check and epoch_check.fresh == true),
+        "available:" .. tostring(epoch_check and epoch_check.available == true),
+      }, "|")
     end
   end
-  return cache and ("cache:" .. tostring(cache)) or "cache:none"
+  return table.concat({
+    cache and ("cache:" .. tostring(cache)) or "cache:none",
+    "handler_epoch:" .. tostring(epoch_check and epoch_check.handler_epoch or "none"),
+    "fresh:" .. tostring(epoch_check and epoch_check.fresh == true),
+    "available:" .. tostring(epoch_check and epoch_check.available == true),
+  }, "|")
 end
 
 local function table_identity(ref, cache)
@@ -309,11 +332,12 @@ function M.handle_document_symbol(params, cache, opts)
   end
 
   local hierarchical = opts.force_flat ~= true and hierarchical_supported(opts.client_capabilities)
+  local epoch_check = document_epoch_check(cache)
   local cache_key = table.concat({
     uri,
     tostring(doc.bufnr),
     tostring(doc.changedtick),
-    document_cache_identity(cache),
+    document_cache_identity(cache, epoch_check),
     hierarchical and "tree" or "flat",
   }, "|")
   local cached = document_cache[uri]
