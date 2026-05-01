@@ -594,6 +594,25 @@ local function position_to_statement_offset(statement, line, col)
   return #statement.text + 1
 end
 
+---@param text string
+---@param start table
+---@param offset integer
+---@return table
+local function statement_offset_to_position(text, start, offset)
+  local current_line = start.line
+  local current_col = start.character
+  for i = 1, math.max(0, offset - 1) do
+    local ch = text:sub(i, i)
+    if ch == "\n" then
+      current_line = current_line + 1
+      current_col = 0
+    else
+      current_col = current_col + 1
+    end
+  end
+  return { line = current_line, character = current_col }
+end
+
 ---@param params table
 ---@param opts? { max_scan_lines?: integer }
 ---@return table?
@@ -645,9 +664,25 @@ function M.extract_hover_statement(params, opts)
 
   local lines = vim.api.nvim_buf_get_lines(bufnr, start_line, end_line + 1, false)
   local text = table.concat(lines, "\n")
-  return {
+  local statement_start = { line = start_line, character = 0 }
+  local cursor_offset = position_to_statement_offset({
     text = text,
-    start = { line = start_line, character = 0 },
+    start = statement_start,
+  }, cursor_line, params.position.character or 0)
+  local slice_start = 1
+  for i = 1, math.min(cursor_offset - 1, #text) do
+    if text:sub(i, i) == ";" then
+      slice_start = i + 1
+    end
+  end
+  local slice_end = #text
+  local next_semicolon = text:find(";", math.max(1, cursor_offset), true)
+  if next_semicolon then
+    slice_end = next_semicolon - 1
+  end
+  return {
+    text = text:sub(slice_start, slice_end),
+    start = statement_offset_to_position(text, statement_start, slice_start),
     scanned_lines = scanned,
   }
 end
@@ -692,7 +727,7 @@ local function parse_statement_table_refs(statement)
   end
 
   local function first_clause_boundary(text, start_index)
-    local boundary = nil
+    local boundary = text:find(";", start_index, true)
     for _, keyword in ipairs({ "where", "join", "on", "group", "order", "having", "limit", "union" }) do
       local found = text:find("%f[%a]" .. keyword_pattern(keyword) .. "%f[%A]", start_index)
       if found and (not boundary or found < boundary) then

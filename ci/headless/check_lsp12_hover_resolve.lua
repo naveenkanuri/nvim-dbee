@@ -315,6 +315,13 @@ local comma_from_hover = request_hover(client, comma_from_uri, 0, position_of(co
 assert_eq("comma from ambiguous select-list", comma_from_hover, nil)
 emit("LSP12_HOVER_COMMA_FROM_AMBIGUOUS_NIL", "true")
 
+local semicolon_line = "SELECT * FROM public.orders; SELECT id FROM public.users"
+local semicolon_buf, semicolon_uri = make_buffer({ semicolon_line })
+local semicolon_hover = request_hover(client, semicolon_uri, 0, position_of(semicolon_line, "id"))
+assert_true("same-line semicolon column hover", semicolon_hover and semicolon_hover.contents.value:find("Primary key", 1, true))
+assert_true("same-line semicolon not previous table", not semicolon_hover.contents.value:find("orders%.id"))
+emit("LSP12_HOVER_SAME_LINE_SEMICOLON_OK", "true")
+
 assert_eq("hover sync db calls", handler.counters.sync, 0)
 assert_eq("hover async db calls", handler.counters.async, 0)
 emit("LSP12_HOVER_NO_SYNC_DB", "true")
