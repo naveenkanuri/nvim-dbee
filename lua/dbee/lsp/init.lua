@@ -499,11 +499,11 @@ function M._on_structure_loaded(handler, data)
     if scope_changed and type(M._cache.delete_column_cache_for_filter_change) == "function" then
       M._cache:delete_column_cache_for_filter_change()
     end
-    M._cache:build_from_structure(data.structures)
+    M._cache:build_from_structure(data.structures, { root_epoch = payload_epoch })
     M._cache:save_to_disk()
   else
     local cache = SchemaCache:new(handler, data.conn_id)
-    cache:build_from_structure(data.structures)
+    cache:build_from_structure(data.structures, { root_epoch = payload_epoch })
     cache:save_to_disk()
     M._start_lsp(cache, data.conn_id)
   end
@@ -547,11 +547,14 @@ function M._on_schemas_loaded(handler, data)
     if scope_changed and type(M._cache.delete_column_cache_for_filter_change) == "function" then
       M._cache:delete_column_cache_for_filter_change()
     end
-    M._cache:build_from_schemas(data.schemas or {}, { preserve_loaded = not scope_changed })
+    M._cache:build_from_schemas(data.schemas or {}, {
+      preserve_loaded = not scope_changed,
+      root_epoch = payload_epoch,
+    })
     M._cache:save_to_disk()
   else
     local cache = SchemaCache:new(handler, data.conn_id)
-    cache:build_from_schemas(data.schemas or {})
+    cache:build_from_schemas(data.schemas or {}, { root_epoch = payload_epoch })
     cache:save_to_disk()
     M._start_lsp(cache, data.conn_id)
   end

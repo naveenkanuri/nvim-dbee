@@ -539,6 +539,53 @@ do
   emit("LSP12_RESOLVE_INVALIDATION_BUMPS_GENERATION", "true")
 end
 
+do
+  local lag_cache, lag_handler = make_cache("lsp12-invalid-lag")
+  function lag_handler:get_current_connection()
+    return { id = "lsp12-invalid-lag", type = "postgres" }
+  end
+  local old_state = package.loaded["dbee.api.state"]
+  local old_lsp_init = package.loaded["dbee.lsp.init"]
+  package.loaded["dbee.lsp.init"] = nil
+  package.loaded["dbee.api.state"] = {
+    is_core_loaded = function()
+      return true
+    end,
+    handler = function()
+      return lag_handler
+    end,
+    config = function()
+      return { lsp = {} }
+    end,
+  }
+  local lsp_init = require("dbee.lsp.init")
+  lsp_init._cache = lag_cache
+  lsp_init._conn_id = "lsp12-invalid-lag"
+  lsp_init._connection_invalidated_consumer_live = true
+  lsp_init._pending_connection_invalidations = {}
+  lsp_init._connection_invalidation_flush_scheduled = false
+  epoch_ref.value = 2
+  lsp_init._on_connection_invalidated({
+    current_conn_id_after = "lsp12-invalid-lag",
+    authoritative_root_epoch = 2,
+  })
+  local lag_item = first_label(lag_cache:get_table_completion_items("public", {
+    schema_quoted = true,
+    include_data = true,
+  }), "users")
+  assert_true("invalidation lag item data", lag_item and lag_item.data)
+  assert_eq("invalidation lag cache-owned epoch", lag_item.data.root_epoch, 1)
+  local lag_resolved = resolve.handle(lag_item, lag_cache, { memo = {} })
+  assert_eq("invalidation lag no docs", lag_resolved.documentation, nil)
+  assert_eq("invalidation lag incomplete", lag_resolved.data.dbee_resolve_status, "incomplete")
+  lsp_init._pending_connection_invalidations = {}
+  lsp_init._connection_invalidated_consumer_live = false
+  package.loaded["dbee.api.state"] = old_state
+  package.loaded["dbee.lsp.init"] = old_lsp_init
+  epoch_ref.value = 1
+  emit("LSP12_RESOLVE_INVALIDATION_LAG_FAIL_CLOSED", "true")
+end
+
 local function assert_path_generation(label, before_cache, mutate, fresh_item, destructive)
   local old_item = synthetic_table_item(before_cache, before_cache:generation(), "public", "users")
   mutate(before_cache)

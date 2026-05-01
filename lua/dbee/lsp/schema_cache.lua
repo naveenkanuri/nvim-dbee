@@ -22,6 +22,7 @@
 ---@field private async_failed table<string, boolean>
 ---@field private next_async_request_id integer
 ---@field private metadata_generation integer
+---@field private metadata_root_epoch_value integer
 ---@field private cache_identity_value string
 ---@field private cache_dir string directory for disk cache
 local SchemaCache = {}
@@ -200,6 +201,7 @@ function SchemaCache:new(handler, conn_id)
     completion_refresh_notifier = nil,
     next_async_request_id = 0,
     metadata_generation = 0,
+    metadata_root_epoch_value = 0,
     cache_dir = cache_dir,
     fold_id = normalized_scope.fold,
     schema_scope = normalized_scope,
@@ -215,13 +217,20 @@ function SchemaCache:new(handler, conn_id)
   setmetatable(o, self)
   self.__index = self
   o.cache_identity_value = tostring(conn_id or "") .. "|" .. tostring(o)
+  o.metadata_root_epoch_value = o:_authoritative_root_epoch()
   return o
 end
 
 ---@private
 ---@param _reason string?
-function SchemaCache:_bump_metadata_generation(_reason)
+---@param root_epoch integer?
+function SchemaCache:_bump_metadata_generation(_reason, root_epoch)
   self.metadata_generation = (self.metadata_generation or 0) + 1
+  if root_epoch ~= nil then
+    self.metadata_root_epoch_value = tonumber(root_epoch) or 0
+  else
+    self.metadata_root_epoch_value = self:_authoritative_root_epoch()
+  end
 end
 
 ---@private
@@ -358,8 +367,10 @@ end
 --- Build the cache from metadata query result rows.
 --- Each row is a map with schema_name, table_name, obj_type keys (case-insensitive).
 ---@param rows table[] array of {schema_name: string, table_name: string, obj_type: string}
-function SchemaCache:build_from_metadata_rows(rows)
-  self:_bump_metadata_generation("build_from_metadata_rows")
+---@param opts? { root_epoch?: integer }
+function SchemaCache:build_from_metadata_rows(rows, opts)
+  opts = opts or {}
+  self:_bump_metadata_generation("build_from_metadata_rows", opts.root_epoch)
   self.schemas = {}
   self.tables = {}
   self.columns = {}
@@ -403,8 +414,10 @@ end
 --- Build the cache from a pre-fetched structure tree.
 --- NEVER calls connection_get_structure() — structure must be provided.
 ---@param structs DBStructure[]
-function SchemaCache:build_from_structure(structs)
-  self:_bump_metadata_generation("build_from_structure")
+---@param opts? { root_epoch?: integer }
+function SchemaCache:build_from_structure(structs, opts)
+  opts = opts or {}
+  self:_bump_metadata_generation("build_from_structure", opts.root_epoch)
   self.schemas = {}
   self.tables = {}
   self.columns = {}
@@ -424,10 +437,10 @@ function SchemaCache:build_from_structure(structs)
 end
 
 ---@param schemas table[] array of {name: string}
----@param opts? { preserve_loaded?: boolean }
+---@param opts? { preserve_loaded?: boolean, root_epoch?: integer }
 function SchemaCache:build_from_schemas(schemas, opts)
-  self:_bump_metadata_generation("build_from_schemas")
   opts = opts or {}
+  self:_bump_metadata_generation("build_from_schemas", opts.root_epoch)
   local preserve_loaded = opts.preserve_loaded ~= false
   local previous_tables = self.tables or {}
   local previous_columns = self.columns or {}
@@ -861,8 +874,10 @@ end
 ---@private
 ---@param key string
 ---@param cols Column[]
-function SchemaCache:_store_columns(key, cols)
-  self:_bump_metadata_generation("_store_columns")
+---@param opts? { root_epoch?: integer }
+function SchemaCache:_store_columns(key, cols, opts)
+  opts = opts or {}
+  self:_bump_metadata_generation("_store_columns", opts.root_epoch)
   self.columns[key] = cols
   self:_touch_column(key)
 
@@ -2053,7 +2068,7 @@ function SchemaCache:_completion_data(kind, identity)
     }, "."),
     cache_identity = self:cache_identity(),
     cache_generation = self:generation(),
-    root_epoch = self:_authoritative_root_epoch(),
+    root_epoch = self:metadata_root_epoch(),
   }
 end
 
@@ -2076,6 +2091,11 @@ end
 ---@return integer
 function SchemaCache:generation()
   return self.metadata_generation or 0
+end
+
+---@return integer
+function SchemaCache:metadata_root_epoch()
+  return self.metadata_root_epoch_value or 0
 end
 
 ---@return string
@@ -2628,7 +2648,7 @@ function SchemaCache:on_columns_loaded(data)
     self:_upsert_table_index(probe.schema, probe.table_name, probe.materialization)
   end
   local key = table_key(probe.schema, probe.table_name)
-  self:_store_columns(key, cols)
+  self:_store_columns(key, cols, { root_epoch = payload_epoch })
   self:_save_columns_to_disk(key, cols)
   local should_notify = self:_consume_completion_refresh_eligible(entries)
   for _, entry in ipairs(entries) do
@@ -2656,7 +2676,7 @@ function SchemaCache:on_schema_objects_loaded(data)
     return false
   end
 
-  self:_bump_metadata_generation("on_schema_objects_loaded")
+  self:_bump_metadata_generation("on_schema_objects_loaded", data.root_epoch)
   self.schemas[schema] = true
   self.tables[schema] = self.tables[schema] or {}
   local filtered_objects = schema_filter.filter_structures(data.objects or {}, self.schema_scope)
