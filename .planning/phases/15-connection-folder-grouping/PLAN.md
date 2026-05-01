@@ -797,7 +797,7 @@ Strict family `FOLDER15_*` — **40 strict + 1 diagnostic** (perf is diagnostic 
 | `FOLDER15_LOAD_DUPE_CONN_DEDUPED_OK` | Conn ID in 2 folders → keeps first, in-memory dedupe |
 | `FOLDER15_LOAD_DROPS_MISSING_CONN_OK` | folder.connection_ids referencing missing conn → dropped from cache |
 | `FOLDER15_LOAD_NO_AUTO_REWRITE` | Self-heal does NOT touch disk |
-| `FOLDER15_CORRUPT_SIDECAR_NO_OVERWRITE` | Bad JSON → state = load_failed, mutations error, sidecar untouched |
+| `FOLDER15_CORRUPT_SIDECAR_NO_OVERWRITE` | All malformed shapes (JSON decode fail, `{}`, keyed objects, `[1]`, bad connection_ids) → state = load_failed, all 4 mutations error via `_require_folders_writeable`, sidecar untouched |
 | `FOLDER15_ADD_FOLDER_PERSISTS_OK` | add_folder writes; reload sees |
 | `FOLDER15_ADD_FOLDER_DUPE_NAME_REJECTS` | Dupe case-insensitive → error, no write |
 | `FOLDER15_RENAME_FOLDER_KEEPS_MEMBERS` | Rename preserves connection_ids order + content |
