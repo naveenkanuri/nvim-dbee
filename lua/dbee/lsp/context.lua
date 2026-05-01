@@ -1043,6 +1043,75 @@ local function parse_statement_table_refs(statement, opts)
     return separator_between(left.offset_end, right.offset_start):match("^%s*%.%s*$") ~= nil
   end
 
+  local function skip_quoted_text(index, quote)
+    index = index + 1
+    while index <= #statement.text do
+      local ch = statement.text:sub(index, index)
+      if ch == quote then
+        if statement.text:sub(index + 1, index + 1) == quote then
+          index = index + 2
+        else
+          return index + 1
+        end
+      else
+        index = index + 1
+      end
+    end
+    return #statement.text + 1
+  end
+
+  local function parenthesized_source_close(source_start_offset)
+    local index = math.max(1, source_start_offset or 1)
+    while index <= #statement.text and statement.text:sub(index, index):match("%s") do
+      index = index + 1
+    end
+    if statement.text:sub(index, index) == "," then
+      index = index + 1
+      while index <= #statement.text and statement.text:sub(index, index):match("%s") do
+        index = index + 1
+      end
+    end
+    if statement.text:sub(index, index) ~= "(" then
+      return nil
+    end
+
+    local depth = 0
+    while index <= #statement.text do
+      local ch = statement.text:sub(index, index)
+      local next_ch = statement.text:sub(index + 1, index + 1)
+      if ch == "-" and next_ch == "-" then
+        local newline = statement.text:find("\n", index + 2, true)
+        index = newline or (#statement.text + 1)
+      elseif ch == "/" and next_ch == "*" then
+        local _, close_end = statement.text:find("*/", index + 2, true)
+        index = close_end and (close_end + 1) or (#statement.text + 1)
+      elseif ch == "$" then
+        local tag = statement.text:sub(index):match("^(%$[%w_]*%$)")
+        if tag then
+          local _, close_end = statement.text:find(tag, index + #tag, true)
+          index = close_end and (close_end + 1) or (#statement.text + 1)
+        else
+          index = index + 1
+        end
+      elseif ch == "'" or ch == '"' then
+        index = skip_quoted_text(index, ch)
+      elseif ch == "(" then
+        depth = depth + 1
+        index = index + 1
+      elseif ch == ")" then
+        depth = depth - 1
+        index = index + 1
+        if depth <= 0 then
+          return index
+        end
+      else
+        index = index + 1
+      end
+    end
+
+    return #statement.text + 1
+  end
+
   local function parse_table_at(index, specificity)
     local first = tokens[index]
     if not first or token_keyword(first) or (opts.top_level_only == true and first.depth ~= 0) then
@@ -1114,6 +1183,61 @@ local function parse_statement_table_refs(statement, opts)
     return index
   end
 
+  local function skip_optional_derived_alias(index, close_offset)
+    local token = tokens[index]
+    if not token or token.depth ~= 0 then
+      return index
+    end
+    if separator_between(close_offset, token.offset_start):find(",", 1, true) then
+      return index
+    end
+
+    local lower = token_lower(token)
+    if lower == "as" then
+      local candidate = tokens[index + 1]
+      if not candidate or candidate.depth ~= 0 then
+        return index + 1
+      end
+      if separator_between(token.offset_end, candidate.offset_start):find(",", 1, true) then
+        return index + 1
+      end
+      if from_boundary(candidate) or token_keyword(candidate) then
+        return index + 1
+      end
+      return index + 2
+    end
+
+    if from_boundary(token) or token_keyword(token) then
+      return index
+    end
+    return index + 1
+  end
+
+  local function skip_derived_source(index, source_start_offset)
+    if opts.top_level_only ~= true then
+      return nil
+    end
+
+    local close_offset = parenthesized_source_close(source_start_offset)
+    if not close_offset then
+      local token = tokens[index]
+      if not token or token.depth == 0 then
+        return nil
+      end
+      local cursor = index
+      while tokens[cursor] and tokens[cursor].depth ~= 0 do
+        cursor = cursor + 1
+      end
+      return skip_optional_derived_alias(cursor, tokens[cursor - 1] and tokens[cursor - 1].offset_end or token.offset_end)
+    end
+
+    local cursor = index
+    while tokens[cursor] and tokens[cursor].offset_start < close_offset do
+      cursor = cursor + 1
+    end
+    return skip_optional_derived_alias(cursor, close_offset)
+  end
+
   local function add_match(ref)
     if ref then
       matches[#matches + 1] = ref
@@ -1126,11 +1250,16 @@ local function parse_statement_table_refs(statement, opts)
       if from_boundary(tokens[index]) then
         break
       end
-      local ref
-      ref, index = parse_table_at(index, 1)
-      if ref then
-        index = attach_alias(ref, index)
-        add_match(ref)
+      local skipped = skip_derived_source(index, tokens[index - 1] and tokens[index - 1].offset_end or 1)
+      if skipped and skipped > index then
+        index = skipped
+      else
+        local ref
+        ref, index = parse_table_at(index, 1)
+        if ref then
+          index = attach_alias(ref, index)
+          add_match(ref)
+        end
       end
     end
   end
@@ -1139,6 +1268,10 @@ local function parse_statement_table_refs(statement, opts)
     local index = start_index
     while tokens[index] and token_lower(tokens[index]) == "as" do
       index = index + 1
+    end
+    local skipped = skip_derived_source(index, tokens[index - 1] and tokens[index - 1].offset_end or 1)
+    if skipped and skipped > index then
+      return
     end
     local ref
     ref, index = parse_table_at(index, specificity)

@@ -390,6 +390,32 @@ assert_true("recursive cte refresh retained", first_command(recursive_cte_reload
 assert_eq("recursive cte lookup count", recursive_cte_lookup_count, 0)
 emit("LSP12_3_WITH_RECURSIVE_CTE_SHADOW_NO_ACTION", "true")
 
+do
+  local function check_derived_table_alias_no_action()
+    local derived_line = "select * from (select id from public.orders) users"
+    local _, derived_uri = make_buffer({ derived_line })
+    did_open(client, derived_uri, 1, derived_line)
+    local derived_lookup_count = 0
+    cache.get_code_action_table_columns = function()
+      derived_lookup_count = derived_lookup_count + 1
+      fail("derived table alias reached cached column lookup")
+    end
+    local derived_star = position_of(derived_line, "*")
+    local derived_expand = code_action(client, derived_uri, 0, derived_star, derived_star + 1, { "refactor.rewrite" })
+    cache.get_code_action_table_columns = original_columns
+    local derived_alias_pos = position_of(derived_line, "users")
+    local derived_qualify = code_action(client, derived_uri, 0, derived_alias_pos, derived_alias_pos, { "refactor.rewrite" })
+    local derived_reload = code_action(client, derived_uri, 0, derived_alias_pos, derived_alias_pos, { "source" })
+    assert_eq("derived alias expand omitted", #derived_expand, 0)
+    assert_eq("derived alias qualify omitted", #derived_qualify, 0)
+    assert_eq("derived alias source only refresh", #derived_reload, 1)
+    assert_true("derived alias refresh retained", first_command(derived_reload, "dbee/refresh_schema") ~= nil)
+    assert_eq("derived alias lookup count", derived_lookup_count, 0)
+    emit("LSP12_3_DERIVED_TABLE_ALIAS_NO_ACTION", "true")
+  end
+  check_derived_table_alias_no_action()
+end
+
 local qualify_line = "select id from orders"
 local qualify_buf, qualify_uri = make_buffer({ qualify_line })
 did_open(client, qualify_uri, 1, qualify_line)
