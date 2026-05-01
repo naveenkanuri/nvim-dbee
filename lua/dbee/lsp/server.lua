@@ -505,11 +505,14 @@ function M.create(cache, opts)
       end
       local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
       local text = table.concat(lines, "\n")
-      local ok, diags = pcall(compute_diagnostics, text, cache)
-      if not ok then
-        diags = {}
-      end
-      publish_diagnostics(uri, diags)
+      local diags = epoch_authority.read_with_freshness(cache, cache and cache.handler, cache and cache.conn_id, function()
+        local ok, computed = pcall(compute_diagnostics, text, cache)
+        if not ok then
+          return {}
+        end
+        return computed or {}
+      end)
+      publish_diagnostics(uri, diags or {})
     end
 
     local function handle_diagnostics(method, params)

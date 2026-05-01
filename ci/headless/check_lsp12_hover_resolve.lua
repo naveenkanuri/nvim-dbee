@@ -383,6 +383,33 @@ assert_eq("hover async db calls", handler.counters.async, 0)
 emit("LSP12_HOVER_NO_SYNC_DB", "true")
 emit("LSP12_HOVER_NO_ASYNC_DB", "true")
 
+do
+  local diag_line = "select * from public.missing_table"
+  local diag_buf, diag_uri = make_buffer({ diag_line })
+  local diag_ns = server.diagnostic_namespace()
+  vim.diagnostic.set(diag_ns, diag_buf, {
+    {
+      lnum = 0,
+      col = 0,
+      end_lnum = 0,
+      end_col = 1,
+      severity = vim.diagnostic.severity.WARN,
+      source = "dbee-lsp",
+      message = "stale",
+    },
+  })
+  epoch_ref.value = 2
+  client.notify("textDocument/didSave", {
+    textDocument = { uri = diag_uri },
+  })
+  vim.wait(1000, function()
+    return #vim.diagnostic.get(diag_buf, { namespace = diag_ns }) == 0
+  end, 10)
+  assert_eq("diagnostics stale cache cleared", #vim.diagnostic.get(diag_buf, { namespace = diag_ns }), 0)
+  epoch_ref.value = 1
+  emit("LSP12_DIAGNOSTICS_FAIL_CLOSED_ON_STALE_CACHE", "true")
+end
+
 cache:_upsert_table_index("public", "wide_table", "table")
 local wide_columns = {}
 for i = 1, 250 do
