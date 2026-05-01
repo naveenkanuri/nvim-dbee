@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.3
 milestone_name: Enterprise DB UX + v1.2 Closure
-status: executing
-stopped_at: Initialized milestone v1.3 requirements and roadmap
-last_updated: "2026-05-01T17:45:00-05:00"
-last_activity: 2026-05-01 -- Phase 12.2 implementation complete; ready for impl-gate r1
+status: Phase 12.3 implemented and verified; ready for impl-gate r1
+stopped_at: Phase 12.3 complete; summary written
+last_updated: "2026-05-01T14:08:41Z"
+last_activity: 2026-05-01 -- Phase 12.3 LSP code actions implemented and verified
 progress:
   total_phases: 9
-  completed_phases: 8
+  completed_phases: 9
   total_plans: 21
-  completed_plans: 20
-  percent: 95
+  completed_plans: 21
+  percent: 100
 ---
 
 # Project State
@@ -21,22 +21,22 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-29)
 
 **Core value:** Every user action should give clear, immediate feedback -- no silent failures, no missing affordances, no dead ends.
-**Current focus:** Phase 12.2 -- LSP document/workspace symbols
+**Current focus:** Phase 12.3 -- LSP code actions
 
 ## Current Position
 
-Phase: 12.2 (lsp-feature-gap-closure) -- EXECUTING
-Plan: 12-02
-Status: Phase 12.2 implemented; ready for `$deep-review` impl-gate r1
-Last activity: 2026-05-01 -- Phase 12.2 implementation complete; ready for impl-gate r1
+Phase: 12.3 (lsp-feature-gap-closure) -- COMPLETE
+Plan: 12-03
+Status: Phase 12.3 implemented and verified; ready for `$deep-review` impl-gate r1
+Last activity: 2026-05-01 -- Phase 12.3 LSP code actions implemented and verified
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 10
+- Total plans completed: 21
 - Average duration: mixed (tracked + session-based)
 - Total execution time: mixed (not normalized across all phase summaries)
 
@@ -52,12 +52,13 @@ Progress: [░░░░░░░░░░] 0%
 
 **Recent Trend:**
 
-- Last 5 plans: 03-02, 04-01, 04-02, 05-01, 05-02
-- Trend: v1.0 milestone complete; v1.1 roadmap initialized
+- Last 5 plans: 12-01, 12-02, 12-03, 13, 14
+- Trend: v1.3 LSP feature gap closure complete with Phase 12.1/12.2/12.3 perf gates preserved
 
 *Updated after each plan completion*
 | Phase --phase P07 | --plan | 01 tasks | --duration files |
 | Phase --phase P07 | --plan | 02 tasks | --duration files |
+| Phase 12 P03 | 17min | 12 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -95,6 +96,9 @@ Recent decisions affecting current work:
 - v1.2: Phase 10 LSP perf harness and Phase 11 LSP optimization/correctness shipped; Phase 12 LSP feature gap closure deferred to v1.3.
 - v1.3: Roadmap is Phase 13 regression batch -> Phase 14 enterprise DB architecture -> Phase 15 polish -> conditional Phase 16 LSP features.
 - v1.3: Phase 13 decision numbering starts at D-198; milestone setup did not consume D-numbers.
+- 12-03: Code actions use standard LSP CodeAction literals, versioned WorkspaceEdit.documentChanges, and init-owned workspace/executeCommand callbacks.
+- 12-03: textDocument/codeAction remains cache-only; refresh/reload commands recheck config, active connection, generation, root epoch, and schema scope before async scheduling.
+- 12-03: CTE/local relation shadows fail closed before cached-column lookup or rendering, including the LSP12_3_EXPAND_CTE_SHADOW_NO_ACTION watchpoint.
 
 ### Pending Todos
 
@@ -108,7 +112,7 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-29T16:08:37-05:00
-Stopped at: Initialized milestone v1.3 requirements and roadmap
-Resume file: .planning/milestones/v1.3-roadmap.md
+Last session: 2026-05-01T14:08:41Z
+Stopped at: Phase 12.3 complete; summary written
+Resume file: .planning/phases/12-lsp-feature-gap-closure/12-03-SUMMARY.md
 Codex thread: `019ddb0e-e8d0-7ca1-a4b0-8d4728863630`

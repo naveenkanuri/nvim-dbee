@@ -272,11 +272,16 @@ Phase 6 -> Phase 7 -> Phase 8. Phase 9 depends on Phase 6 and can run before or 
 **Goal**: Add high-value LSP features that can be supported truthfully from schema/cache state.
 **Depends on**: Phase 11
 **Requirements**: DBEE-FEAT-02 (deferred to v1.3 Phase 16)
-**Status**: Conditional. Decide at Phase 11 ship.
+**Status**: Complete. Activated as v1.3 DBEE-FEAT-02 gap-closure scope.
 **Success Criteria** (what must be TRUE):
   1. If Phase 10+11 finish with budget headroom and no major regressions, v1.2 may add completion resolve/details, hover, schema refresh/reload code actions, and schema object symbols.
   2. Semantic tokens, inlay hints, `vim.lsp.config()` migration, and multi-client LSP architecture remain deferred unless explicitly re-scoped.
-**Plans**: TBD by `$gsd-plan-phase 12` if activated
+**Plans**: 3 plans
+
+Plans:
+- [x] 12-01-PLAN.md -- LSP hover and completion resolve
+- [x] 12-02-PLAN.md -- LSP document/workspace symbols
+- [x] 12-03-PLAN.md -- LSP code actions and workspace executeCommand
 
 **Research bullets:**
 - Feature work must remain additive and must not reopen Phase 10/11 perf and correctness locks.
@@ -291,7 +296,7 @@ Phase 10 -> Phase 11. Phase 12 is conditional at Phase 11 ship.
 |-------|----------------|--------|-----------|
 | 10. LSP Perf Harness | 1/1 | Complete | v1.2 shipped |
 | 11. LSP Perf Optimization And Correctness | 1/1 | Complete | v1.2 shipped |
-| 12. LSP Feature Gap Closure | 0/TBD | Deferred to v1.3 Phase 16 | - |
+| 12. LSP Feature Gap Closure | 3/3 | Complete (v1.3 DBEE-FEAT-02 scope) | 2026-05-01 |
 
 ## Milestone v1.3: Enterprise DB UX + v1.2 Closure
 
@@ -365,4 +370,4 @@ Phase 13 -> Phase 14 -> Phase 15. Phase 16 is conditional at Phase 15 ship.
 | 13. UX Regression Batch | 0/TBD | Pending discuss | - |
 | 14. Enterprise DB UX Architecture | 0/TBD | Pending | - |
 | 15. LSP + Drawer Polish Batch | 0/TBD | Pending | - |
-| 16. LSP Feature Gap Closure | 0/TBD | Conditional | - |
+| 16. LSP Feature Gap Closure | 3/3 | Complete via Phase 12.1-12.3 | 2026-05-01 |

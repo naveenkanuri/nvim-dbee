@@ -101,7 +101,7 @@ Requirements for the Enterprise DB UX + v1.2 Closure milestone.
 
 ### Conditional LSP Features
 
-- [ ] **DBEE-FEAT-02**: User can use additive built-in dbee LSP feature surfaces deferred from Phase 12: completion item resolve/details, hover for table/column metadata, schema refresh/reload code actions, and document/workspace symbols for cached schema objects, only if mandatory v1.3 phases finish with budget headroom and no major regressions.
+- [x] **DBEE-FEAT-02**: User can use additive built-in dbee LSP feature surfaces deferred from Phase 12: completion item resolve/details, hover for table/column metadata, schema refresh/reload code actions, and document/workspace symbols for cached schema objects, only if mandatory v1.3 phases finish with budget headroom and no major regressions.
 
 ## v2 Requirements
 
