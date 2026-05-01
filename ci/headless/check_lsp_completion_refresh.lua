@@ -397,11 +397,20 @@ local function make_startup_handler(opts)
       if opts.authority_error then
         error("params unavailable")
       end
+      if opts.scope_ref then
+        return opts.scope_ref.value
+      end
       return opts.scope
     end
   end
+  function handler:get_authoritative_root_epoch()
+    return 1
+  end
   function handler:connection_get_structure_singleflight()
     self.structure_requests = self.structure_requests + 1
+  end
+  function handler:connection_get_columns_async()
+    self.column_requests = (self.column_requests or 0) + 1
   end
   function handler:connection_execute(_, _)
     self.metadata_requests = self.metadata_requests + 1
@@ -444,6 +453,74 @@ lsp_init._execute_metadata_query(authority_nil_handler, "startup-authority-nil",
 assert_eq("startup nil authority fail-closed signature", startup_started_signature, "schema-filter-v1|fail-closed")
 assert_eq("startup nil authority no structure refresh", authority_nil_handler.structure_requests, 0)
 assert_eq("startup nil authority no metadata SQL", authority_nil_handler.metadata_requests, 0)
+
+local function warm_active_cache(handler, conn_id)
+  local cache = SchemaCache:new(handler, conn_id)
+  cache:build_from_metadata_rows({
+    { schema_name = "APP", table_name = "SAS_JOBS", obj_type = "table" },
+  })
+  assert_true("active warm cache starts visible " .. conn_id, cache:find_schema("APP") ~= nil)
+  lsp_init._client_id = 9002
+  lsp_init._cache = cache
+  lsp_init._conn_id = conn_id
+  lsp_init._attached_bufs = {}
+  lsp_init._pending_bufs = {}
+  return cache
+end
+
+local function assert_active_cache_fail_closed(label, handler, cache)
+  assert_eq(label .. " signature", cache.schema_filter_signature, "schema-filter-v1|fail-closed")
+  assert_eq(label .. " schema hidden", cache:find_schema("APP"), nil)
+  local result = cache:get_columns_async("APP", "SAS_JOBS", {
+    probe_if_missing = true,
+    materializations = { "table" },
+  })
+  assert_eq(label .. " completion complete", result.is_incomplete, false)
+  assert_eq(label .. " no column transport", handler.column_requests or 0, 0)
+  assert_eq(label .. " no structure refresh", handler.structure_requests, 0)
+  assert_eq(label .. " no metadata SQL", handler.metadata_requests, 0)
+end
+
+reset_lsp_startup_state()
+local active_refresh_scope = { value = schema_filter.normalize(nil, nil) }
+local active_refresh_handler = make_startup_handler({
+  authority_present = true,
+  scope_ref = active_refresh_scope,
+  conn_id = "startup-active-refresh",
+})
+local active_refresh_cache = warm_active_cache(active_refresh_handler, "startup-active-refresh")
+state_module.handler = function()
+  return active_refresh_handler
+end
+active_refresh_scope.value = nil
+lsp_init.refresh()
+assert_active_cache_fail_closed("active refresh nil authority", active_refresh_handler, active_refresh_cache)
+
+reset_lsp_startup_state()
+local active_invalidation_scope = { value = schema_filter.normalize(nil, nil) }
+local active_invalidation_handler = make_startup_handler({
+  authority_present = true,
+  scope_ref = active_invalidation_scope,
+  conn_id = "startup-active-invalidation",
+})
+local active_invalidation_cache = warm_active_cache(active_invalidation_handler, "startup-active-invalidation")
+state_module.handler = function()
+  return active_invalidation_handler
+end
+lsp_init._connection_invalidated_consumer_live = true
+lsp_init._pending_connection_invalidations = {
+  {
+    new_conn_ids = { "startup-active-invalidation" },
+    authoritative_root_epoch = 2,
+  },
+}
+active_invalidation_scope.value = nil
+lsp_init._flush_connection_invalidations()
+assert_active_cache_fail_closed(
+  "active invalidation nil authority",
+  active_invalidation_handler,
+  active_invalidation_cache
+)
 
 reset_lsp_startup_state()
 startup_started_signature = nil
@@ -586,5 +663,6 @@ print("ARCH14_LSP_PROBE_SCOPE_OK=true")
 print("ARCH14_FILTER_AUTHORITY_SINGLE_SOURCE_OK=true")
 print("ARCH14_LSP_CACHE_FAIL_CLOSED_ON_AUTHORITY_NIL=true")
 print("ARCH14_LSP_STARTUP_AUTHORITY_NIL_NO_METADATA_SQL=true")
+print("ARCH14_LSP_ACTIVE_CACHE_FAIL_CLOSED_ON_AUTHORITY_NIL=true")
 print("LSP_COMPLETION_REFRESH_NOTIFY_OK=true")
 vim.cmd("qa!")

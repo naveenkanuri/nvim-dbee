@@ -104,6 +104,22 @@ local function clear_lsp_diagnostics()
   end
 end
 
+local function fail_close_active_cache(conn_id, reason)
+  if not M._cache or M._conn_id ~= conn_id then
+    return
+  end
+
+  cancel_active_async(reason)
+  clear_lsp_diagnostics()
+  local scope_changed = false
+  if type(M._cache.refresh_schema_scope) == "function" then
+    scope_changed = M._cache:refresh_schema_scope()
+  end
+  if scope_changed and type(M._cache.delete_column_cache_for_filter_change) == "function" then
+    M._cache:delete_column_cache_for_filter_change()
+  end
+end
+
 ---@param conn_id connection_id|nil
 local function clear_connection_tracking(conn_id)
   if conn_id and conn_id ~= "" then
@@ -560,6 +576,7 @@ function M._request_root_refresh(handler, conn_id)
 
   local lazy_root, authority_unavailable = connection_uses_lazy_schema_root(handler, conn)
   if authority_unavailable then
+    fail_close_active_cache(conn_id, "schema-filter-authority-unavailable")
     return
   end
 
