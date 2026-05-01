@@ -608,6 +608,9 @@ assert_no_pattern("symbols fold", symbols_source, {
   "canonicalize",
   "canonical_name",
 })
+assert_no_pattern("symbols db calls", symbols_source, {
+  "connection_get_[%w_]*%s*%(",
+})
 local schema_cache_source = read_file("lua/dbee/lsp/schema_cache.lua")
 local helper_start = schema_cache_source:find("function SchemaCache:get_workspace_symbol_snapshot", 1, true)
 assert_true("helper body found", helper_start ~= nil)
@@ -631,6 +634,9 @@ assert_no_pattern("helper local fold", helper_body, {
   "casefold",
   "canonicalize",
   "canonical_name",
+})
+assert_no_pattern("helper db calls", helper_body, {
+  "connection_get_[%w_]*%s*%(",
 })
 emit("LSP12_2_NEW_SYMBOL_CODE_NO_HELPER_BYPASS", "true")
 
