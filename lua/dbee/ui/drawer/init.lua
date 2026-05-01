@@ -29,6 +29,10 @@ end
 ---@field type string
 ---@field schema? string
 ---@field raw_name? string
+---@field folder_id? string
+---@field conn_id? string
+---@field source_meta? table
+---@field search_text? string
 ---@field action_1? drawer_node_action
 ---@field action_2? drawer_node_action
 ---@field action_3? drawer_node_action
@@ -458,8 +462,10 @@ local function clone_rendered_snapshot(snapshot_nodes)
       type = snap.type,
       schema = snap.schema,
       raw_name = snap.raw_name,
+      folder_id = snap.folder_id,
       conn_id = snap.conn_id,
       source_meta = snap.source_meta,
+      search_text = snap.search_text,
       action_1 = snap.action_1,
       action_2 = snap.action_2,
       action_3 = snap.action_3,
@@ -501,8 +507,10 @@ local function snapshot_to_tree_nodes(snapshot_nodes)
       type = snap.type,
       schema = snap.schema,
       raw_name = snap.raw_name,
+      folder_id = snap.folder_id,
       conn_id = snap.conn_id,
       source_meta = snap.source_meta,
+      search_text = snap.search_text,
       action_1 = snap.action_1,
       action_2 = snap.action_2,
       action_3 = snap.action_3,
@@ -538,8 +546,10 @@ local function snapshot_rendered_tree(ui, tree, parent_id)
       type = node.type,
       schema = node.schema,
       raw_name = node.raw_name,
+      folder_id = node.folder_id,
       conn_id = node.conn_id,
       source_meta = node.source_meta,
+      search_text = node.search_text,
       action_1 = node.action_1,
       action_2 = node.action_2,
       action_3 = node.action_3,
@@ -590,8 +600,10 @@ local function searchable_node_to_tree_node(ui, node, inherited_conn_id, childre
     type = node.type,
     schema = node.schema,
     raw_name = node.raw_name,
+    folder_id = node.folder_id,
     conn_id = node.conn_id,
     source_meta = node.source_meta,
+    search_text = node.search_text,
     action_1 = node.action_1,
     action_2 = node.action_2,
     action_3 = node.action_3,
@@ -603,6 +615,8 @@ local function searchable_node_to_tree_node(ui, node, inherited_conn_id, childre
         ui:open_edit_connection_with_wizard(source_meta, target_conn_id, nil, on_done)
       end,
     })
+  elseif node.type == "folder" and node.source_meta and node.folder_id then
+    convert.decorate_folder_node(tree_node, ui.handler, node.source_meta, node.folder_id)
   elseif SEARCHABLE_TYPES[node.type] then
     local struct_meta = node.struct_meta or {
       id = node.id,
@@ -719,6 +733,10 @@ end
 ---@param snapshot_epoch table<connection_id, integer>
 ---@return boolean
 local function should_apply_bootstrap_invalidation(data, snapshot_epoch)
+  if data and data.reason == "folder_mutation" then
+    return true
+  end
+
   local event_epoch = tonumber(data and data.authoritative_root_epoch) or 0
   if event_epoch <= 0 then
     return false
@@ -2799,6 +2817,18 @@ end
 ---@private
 ---@return table<string, fun()>
 function DrawerUI:get_actions()
+  local handler = self.handler
+
+  local function _guarded_folder_mutation(label, fn, on_done)
+    local ok, err = pcall(fn)
+    if not ok then
+      utils.log("error", label .. ": " .. tostring(err))
+    end
+    if on_done then
+      on_done()
+    end
+  end
+
   local function collapse_node(node)
     if node:collapse() then
       self.tree:render()
@@ -3026,7 +3056,7 @@ function DrawerUI:get_actions()
     end,
     add_connection = function()
       local current_node = self.tree:get_node() --[[@as DrawerUINode]]
-      local sources = create_capable_sources(self.handler)
+      local sources = create_capable_sources(handler)
       if #sources == 0 then
         utils.log("warn", "No sources support adding connections")
         return
@@ -3035,7 +3065,7 @@ function DrawerUI:get_actions()
       local preferred_source = nil
       local default_spec = {}
       if current_node and current_node.type == "connection" then
-        local source_meta, conn = resolve_connection_source_meta(self.handler, current_node:get_id())
+        local source_meta, conn = resolve_connection_source_meta(handler, current_node:get_id())
         if source_meta and source_meta.can_create then
           preferred_source = source_meta
         end
@@ -3059,6 +3089,221 @@ function DrawerUI:get_actions()
           end
 
           choose_source("Select a source", sources, begin_add)
+        end,
+      })
+    end,
+    add_folder = function()
+      perform_action({
+        mode = "refresh_after_action",
+        action = function(on_done, select, input)
+          local sources = {}
+          local by_label = {}
+          for _, source in ipairs(handler:get_sources()) do
+            local source_id = source:name()
+            if type(source.supports_folders) == "function" and source:supports_folders() then
+              local source_meta = build_source_meta(source, source_id)
+              local label = tostring(source_meta.name or source_meta.id)
+              sources[#sources + 1] = label
+              by_label[label] = source_meta
+            end
+          end
+
+          if #sources == 0 then
+            utils.log("warn", "No sources support folders")
+            on_done()
+            return
+          end
+
+          local prompt_name = function(source_meta)
+            input {
+              title = "New folder name",
+              default = "",
+              on_confirm = function(name)
+                if name and name ~= "" then
+                  _guarded_folder_mutation("add folder", function()
+                    handler:source_add_folder(source_meta.id, name)
+                  end, on_done)
+                else
+                  on_done()
+                end
+              end,
+            }
+          end
+
+          if #sources == 1 then
+            prompt_name(by_label[sources[1]])
+            return
+          end
+
+          select {
+            title = "Select a source",
+            items = sources,
+            on_confirm = function(selection)
+              local source_meta = by_label[selection]
+              if source_meta then
+                prompt_name(source_meta)
+              else
+                on_done()
+              end
+            end,
+          }
+        end,
+      })
+    end,
+    rename_folder = function()
+      perform_action({
+        mode = "refresh_after_action",
+        action = function(on_done, _, input)
+          local node = self.tree:get_node() --[[@as DrawerUINode]]
+          if not node or node.type ~= "folder" or not node.source_meta or not node.folder_id then
+            utils.log("warn", "Select a folder row to rename")
+            on_done()
+            return
+          end
+
+          input {
+            title = "Rename folder: " .. tostring(node.raw_name or ""),
+            default = node.raw_name or "",
+            on_confirm = function(new_name)
+              if new_name and new_name ~= "" then
+                _guarded_folder_mutation("rename folder", function()
+                  handler:source_rename_folder(node.source_meta.id, node.folder_id, new_name)
+                end, on_done)
+              else
+                on_done()
+              end
+            end,
+          }
+        end,
+      })
+    end,
+    delete_folder = function()
+      perform_action({
+        mode = "refresh_after_action",
+        action = function(on_done, select)
+          local node = self.tree:get_node() --[[@as DrawerUINode]]
+          if not node or node.type ~= "folder" or not node.source_meta or not node.folder_id then
+            utils.log("warn", "Select a folder row to delete")
+            on_done()
+            return
+          end
+
+          local DELETE_LABEL = "Delete (members ungrouped)"
+          select {
+            title = "Delete folder: " .. tostring(node.raw_name or ""),
+            items = { DELETE_LABEL, "Cancel" },
+            on_confirm = function(selection)
+              if selection == DELETE_LABEL then
+                _guarded_folder_mutation("delete folder", function()
+                  handler:source_remove_folder(node.source_meta.id, node.folder_id)
+                end, on_done)
+              else
+                on_done()
+              end
+            end,
+          }
+        end,
+      })
+    end,
+    move_connection_to_folder = function()
+      perform_action({
+        mode = "refresh_after_action",
+        action = function(on_done, select, input)
+          local current_node = self.tree:get_node() --[[@as DrawerUINode]]
+          local conn_id = resolve_connection_ancestor(self.tree, current_node)
+          if not conn_id then
+            utils.log("warn", "Select a connection row to move")
+            on_done()
+            return
+          end
+
+          local source_meta, conn = resolve_connection_source_meta(handler, conn_id)
+          if not source_meta or not conn then
+            utils.log("warn", "Connection source not found")
+            on_done()
+            return
+          end
+
+          local source_id = source_meta.id
+          local source = handler.sources[source_id]
+          if not source or type(source.supports_folders) ~= "function" or not source:supports_folders() then
+            utils.log("warn", "Source does not support folders")
+            on_done()
+            return
+          end
+
+          local folders = handler:source_get_folders(source_id)
+          local UNGROUPED_LABEL = "(ungrouped)"
+          local NEW_FOLDER_LABEL = "+ New folder…"
+          local items = { UNGROUPED_LABEL }
+          local label_to_target = { [UNGROUPED_LABEL] = nil }
+          local used = { [UNGROUPED_LABEL] = true }
+
+          local function unique_label(used_set, base, folder_id)
+            if not used_set[base] then
+              return base
+            end
+            folder_id = tostring(folder_id or "")
+            local tail_len = 6
+            while true do
+              local candidate = base .. " [" .. folder_id:sub(-tail_len) .. "]"
+              if not used_set[candidate] then
+                return candidate
+              end
+              if tail_len >= #folder_id then
+                local counter = 1
+                while used_set[candidate .. "#" .. tostring(counter)] do
+                  counter = counter + 1
+                end
+                return candidate .. "#" .. tostring(counter)
+              end
+              tail_len = tail_len + 4
+            end
+          end
+
+          for _, folder in ipairs(folders) do
+            local base = "📁 " .. tostring(folder.name)
+            local label = unique_label(used, base, folder.id)
+            used[label] = true
+            items[#items + 1] = label
+            label_to_target[label] = folder.id
+          end
+          items[#items + 1] = NEW_FOLDER_LABEL
+          used[NEW_FOLDER_LABEL] = true
+          label_to_target[NEW_FOLDER_LABEL] = "__new__"
+
+          select {
+            title = "Move connection to folder",
+            items = items,
+            on_confirm = function(selection)
+              if selection ~= UNGROUPED_LABEL and label_to_target[selection] == nil then
+                on_done()
+                return
+              end
+
+              local target = label_to_target[selection]
+              if target == "__new__" then
+                input {
+                  title = "New folder name",
+                  default = "",
+                  on_confirm = function(new_name)
+                    if new_name and new_name ~= "" then
+                      _guarded_folder_mutation("create+move", function()
+                        local id = handler:source_add_folder(source_id, new_name)
+                        handler:source_move_connection(source_id, conn_id, id)
+                      end, on_done)
+                    else
+                      on_done()
+                    end
+                  end,
+                }
+              else
+                _guarded_folder_mutation("move connection", function()
+                  handler:source_move_connection(source_id, conn_id, target)
+                end, on_done)
+              end
+            end,
+          }
         end,
       })
     end,
@@ -3623,11 +3868,19 @@ function DrawerUI:refresh()
         type = model_node.type,
         schema = model_node.schema,
         raw_name = model_node.raw_name,
+        folder_id = model_node.folder_id,
+        conn_id = model_node.conn_id,
+        source_meta = model_node.source_meta,
+        search_text = model_node.search_text,
         action_1 = model_node.action_1,
         action_2 = model_node.action_2,
         action_3 = model_node.action_3,
         lazy_children = children == nil and model_node.lazy_children or nil,
       }, children)
+
+      if model_node.type == "folder" and model_node.source_meta and model_node.folder_id then
+        convert.decorate_folder_node(node, self.handler, model_node.source_meta, model_node.folder_id)
+      end
 
       if children and #children > 0 then
         node._materialized_in_tree = true
