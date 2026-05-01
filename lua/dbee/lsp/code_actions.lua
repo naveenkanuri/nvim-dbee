@@ -226,6 +226,9 @@ local function expand_action(params, cache, opts)
   if not action_enabled(ACTION_EXPAND, opts.features) or not request_allows(opts, "refactor.rewrite") then
     return nil
   end
+  if not opts.ctx then
+    return nil
+  end
   local version = document_version(opts.document_versions, opts.ctx.uri)
   if not version then
     return nil
@@ -261,6 +264,9 @@ end
 ---@return table?
 local function qualify_action(params, cache, opts)
   if not action_enabled(ACTION_QUALIFY, opts.features) or not request_allows(opts, "refactor.rewrite") then
+    return nil
+  end
+  if not opts.ctx then
     return nil
   end
   local version = document_version(opts.document_versions, opts.ctx.uri)
@@ -311,6 +317,9 @@ end
 ---@return table?
 local function reload_action(params, cache, opts)
   if not action_enabled(ACTION_RELOAD, opts.features) or not request_allows(opts, "source") then
+    return nil
+  end
+  if not opts.ctx then
     return nil
   end
   local ref = context.table_ref_at_range(opts.ctx.statement, opts.ctx.range)
@@ -397,13 +406,8 @@ function M.handle_code_action(params, cache, opts)
     return {}
   end
 
-  local action_ctx = context.code_action_context(params)
-  if not action_ctx then
-    return {}
-  end
-
   local request_opts = {
-    ctx = action_ctx,
+    ctx = context.code_action_context(params),
     features = cfg,
     only = params.context and params.context.only or nil,
     document_versions = opts.document_versions,
