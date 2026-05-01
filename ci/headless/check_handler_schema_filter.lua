@@ -170,15 +170,82 @@ local function run_schema_object_singleflight_and_backpressure()
   })
   local joined = handler:connection_get_schema_objects_singleflight({
     conn_id = "conn-objects",
-    schema = "APP",
+    schema = "app",
     consumer = "lsp",
     priority = "lsp",
   })
   assert_true("first started", first.joined == false and first.queued == false)
-  assert_true("second joined folded key", joined.joined == true)
+  assert_true("second joined exact key", joined.joined == true)
   assert_eq("single object rpc", #starts, 1)
   assert_eq("threaded include", captured_opts.schema_filter.include[1], "app%")
   assert_eq("threaded signature", captured_opts.schema_filter_signature, "schema-filter-v1|type=postgres|fold=lower|lazy=1|include=4:app%|exclude=8:app_tmp%")
+
+  local exact_key_handler = Handler:new({})
+  install_connection_params_stub()
+  local exact_key_calls = {}
+  vim.fn.DbeeStructureForSchemaAsync = function(conn_id, request_id, root_epoch, caller_token, schema)
+    exact_key_calls[#exact_key_calls + 1] = {
+      conn_id = conn_id,
+      request_id = request_id,
+      root_epoch = root_epoch,
+      caller_token = caller_token,
+      schema = schema,
+    }
+  end
+  local exact_public = exact_key_handler:connection_get_schema_objects_singleflight({
+    conn_id = "conn-exact-key",
+    schema = "public",
+    consumer = "lsp-public",
+    priority = "lsp",
+  })
+  local exact_quoted = exact_key_handler:connection_get_schema_objects_singleflight({
+    conn_id = "conn-exact-key",
+    schema = "Public",
+    consumer = "lsp-quoted-public",
+    priority = "lsp",
+  })
+  assert_true("postgres public started", exact_public.started == true)
+  assert_true("postgres quoted-style Public not joined", exact_quoted.joined == false and exact_quoted.started == true)
+  assert_eq("postgres exact-distinct singleflight requests", #exact_key_calls, 2)
+
+  vim.fn.DbeeConnectionGetParams = function(conn_id)
+    return {
+      id = conn_id,
+      name = conn_id,
+      type = "sqlite",
+      url = "sqlite://example",
+      schema_filter = {
+        lazy_per_schema = false,
+      },
+    }
+  end
+  local sqlite_key_handler = Handler:new({})
+  local sqlite_key_calls = {}
+  vim.fn.DbeeStructureForSchemaAsync = function(conn_id, request_id, root_epoch, caller_token, schema)
+    sqlite_key_calls[#sqlite_key_calls + 1] = {
+      conn_id = conn_id,
+      request_id = request_id,
+      root_epoch = root_epoch,
+      caller_token = caller_token,
+      schema = schema,
+    }
+  end
+  local sqlite_first = sqlite_key_handler:connection_get_schema_objects_singleflight({
+    conn_id = "conn-sqlite-key",
+    schema = "Main",
+    consumer = "sqlite-main",
+    priority = "lsp",
+  })
+  local sqlite_joined = sqlite_key_handler:connection_get_schema_objects_singleflight({
+    conn_id = "conn-sqlite-key",
+    schema = "main",
+    consumer = "sqlite-main-lower",
+    priority = "lsp",
+  })
+  assert_true("sqlite first started", sqlite_first.started == true)
+  assert_true("sqlite case-insensitive joined", sqlite_joined.joined == true)
+  assert_eq("sqlite canonical singleflight requests", #sqlite_key_calls, 1)
+  install_connection_params_stub()
 
   local evicted_payloads = {}
   for index = 1, 100 do
@@ -228,7 +295,7 @@ local function run_schema_object_singleflight_and_backpressure()
   })
   local second_queued = coalesce_handler:connection_get_schema_objects_singleflight({
     conn_id = "conn-coalesce",
-    schema = "SAME_SCHEMA",
+    schema = "same_schema",
     consumer = "lsp-schema-dot",
     priority = "lsp",
     request_id = 11,
@@ -238,6 +305,8 @@ local function run_schema_object_singleflight_and_backpressure()
   assert_true("same key joined", second_queued.joined == true)
   assert_eq("same consumer coalesced", #coalesce_queue.queue[1].waiters, 1)
   assert_eq("same consumer request updated", coalesce_queue.queue[1].waiters[1].request_id, 11)
+  print("LSP11_R6_SINGLEFLIGHT_EXACT_KEY=true")
+  print("LSP11_R6_HANDLER_SINGLEFLIGHT_CANONICAL=true")
 
   local drawer_full = Handler:new({})
   install_connection_params_stub()

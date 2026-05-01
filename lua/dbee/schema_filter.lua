@@ -1,4 +1,5 @@
 local M = {}
+local schema_name_canonical = require("dbee.schema_name_canonical")
 
 local REGEX_META = "[%[%]%(%)%{%}%^%$%+%?%*\\|]"
 
@@ -7,26 +8,7 @@ local function trim(value)
 end
 
 local function fold_id(conn_type)
-  conn_type = tostring(conn_type or ""):lower()
-  if conn_type == "oracle" then
-    return "upper"
-  end
-  if conn_type == "postgres" or conn_type == "postgresql" or conn_type == "pg" then
-    return "lower"
-  end
-  if conn_type == "mysql" then
-    return "lower"
-  end
-  if conn_type == "sqlserver" or conn_type == "mssql" then
-    return "case_insensitive"
-  end
-  if conn_type == "sqlite" or conn_type == "sqlite3" then
-    return "case_insensitive"
-  end
-  if conn_type == "clickhouse" then
-    return "identity"
-  end
-  return "upper"
+  return schema_name_canonical.fold_for(conn_type)
 end
 
 local function fold_value(value, fold)

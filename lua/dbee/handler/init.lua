@@ -1,6 +1,7 @@
 local event_bus = require("dbee.handler.__events")
 local schema_filter = require("dbee.schema_filter")
 local schema_filter_authority = require("dbee.schema_filter_authority")
+local schema_name_canonical = require("dbee.schema_name_canonical")
 local utils = require("dbee.utils")
 local register_remote_plugin = require("dbee.api.__register")
 
@@ -754,13 +755,14 @@ end
 ---@private
 ---@param conn_id connection_id
 ---@param schema string
+---@param authority? table
 ---@return string
-function Handler:_fold_schema_name(conn_id, schema)
-  local authority = schema_filter_authority.read(self, conn_id)
-  local scope = authority.status == "ok" and authority.scope
-    or authority.status == "api_absent_legacy" and schema_filter_authority.legacy_implicit_all()
-    or schema_filter_authority.fail_closed_scope()
-  return schema_filter.fold(schema, scope.fold)
+function Handler:_schema_object_key_schema(conn_id, schema, authority)
+  authority = authority or schema_filter_authority.read(self, conn_id)
+  if authority.status == "ok" and authority.scope then
+    return schema_name_canonical.singleflight_key(schema, authority.scope.fold)
+  end
+  return tostring(schema or "")
 end
 
 ---@private
@@ -1202,8 +1204,6 @@ function Handler:connection_get_schema_objects_singleflight(opts)
   end
 
   local epoch = self:get_authoritative_root_epoch(opts.conn_id)
-  local folded_schema = self:_fold_schema_name(opts.conn_id, opts.schema)
-  local key = schema_object_key(opts.conn_id, folded_schema, epoch)
   local waiter = {
     consumer = opts.consumer,
     request_id = opts.request_id or 0,
@@ -1229,6 +1229,8 @@ function Handler:connection_get_schema_objects_singleflight(opts)
     }
   end
 
+  local key_schema = self:_schema_object_key_schema(opts.conn_id, opts.schema, authority)
+  local key = schema_object_key(opts.conn_id, key_schema, epoch)
   local active = self._schema_object_flights[key]
   if active then
     upsert_schema_waiter(active.waiters, waiter)
@@ -1250,7 +1252,8 @@ function Handler:connection_get_schema_objects_singleflight(opts)
     key = key,
     conn_id = opts.conn_id,
     schema = opts.schema,
-    folded_schema = folded_schema,
+    key_schema = key_schema,
+    folded_schema = key_schema,
     epoch = epoch,
     request_id = internal_request_id,
     priority = opts.priority or "lsp",
@@ -1438,7 +1441,8 @@ function Handler:migrate_structure_flights(old_conn_id, new_conn_id, rewrite)
   for key, flight in pairs(self._schema_object_flights or {}) do
     if flight.conn_id == old_conn_id then
       self._schema_object_flights[key] = nil
-      local new_key = schema_object_key(new_conn_id, flight.folded_schema, flight.epoch)
+      flight.key_schema = flight.key_schema or flight.folded_schema
+      local new_key = schema_object_key(new_conn_id, flight.key_schema, flight.epoch)
       flight.alias_conn_ids = flight.alias_conn_ids or {}
       flight.alias_conn_ids[old_conn_id] = true
       flight.conn_id = new_conn_id
@@ -1460,7 +1464,8 @@ function Handler:migrate_structure_flights(old_conn_id, new_conn_id, rewrite)
     for _, entry in ipairs(old_queue.queue or {}) do
       old_queue.queued_keys[entry.key] = nil
       entry.conn_id = new_conn_id
-      entry.key = schema_object_key(new_conn_id, entry.folded_schema, entry.epoch)
+      entry.key_schema = entry.key_schema or entry.folded_schema
+      entry.key = schema_object_key(new_conn_id, entry.key_schema, entry.epoch)
       entry.opts = self:get_schema_filter(new_conn_id)
       entry.schema_filter_signature = rewrite and rewrite.schema_filter_signature or entry.schema_filter_signature
       entry.fold = rewrite and rewrite.schema_filter_fold or entry.fold
@@ -1655,8 +1660,8 @@ function Handler:_on_schema_objects_loaded(data)
     return
   end
 
-  local payload_schema = self:_fold_schema_name(flight.conn_id, data.schema or "")
-  if payload_schema ~= flight.folded_schema then
+  local payload_schema = schema_name_canonical.singleflight_key(data.schema or "", flight.fold)
+  if payload_schema ~= (flight.key_schema or flight.folded_schema) then
     return
   end
 

@@ -30,10 +30,11 @@ end
 --- Build completion items for table names.
 ---@param cache SchemaCache
 ---@param schema string? specific schema to filter by
+---@param opts? table
 ---@return lsp.CompletionItem[]
-local function table_completions(cache, schema)
+local function table_completions(cache, schema, opts)
   if schema then
-    return cache:get_table_completion_items(schema)
+    return cache:get_table_completion_items(schema, opts)
   end
 
   return cache:get_all_table_completion_items()
@@ -56,22 +57,35 @@ local function column_completions(cache, table_ref, alias_info)
 
   if alias_info and alias_info.schema then
     -- Explicit schema-qualified aliases should stay in that schema. Resolve
-    -- schema/table case-insensitively against cache, then queue async warmup
-    -- if metadata cache doesn't contain that schema/table yet.
-    actual_name, actual_schema = cache:find_table_in_schema(alias_info.schema, tbl_name)
+    -- schema/table according to quote metadata, then queue async warmup if
+    -- metadata cache doesn't contain that schema/table yet.
+    actual_name, actual_schema = cache:find_table_in_schema(alias_info.schema, tbl_name, {
+      schema_quoted = alias_info.schema_quoted,
+      table_quoted = alias_info.table_quoted,
+    })
     if actual_name then
-      cols = cache:get_columns_async(actual_schema, actual_name)
+      cols = cache:get_columns_async(actual_schema, actual_name, {
+        schema_quoted = true,
+        table_quoted = true,
+      })
     else
       cols = cache:get_columns_async(alias_info.schema, tbl_name, {
+        schema_quoted = alias_info.schema_quoted,
+        table_quoted = alias_info.table_quoted,
         probe_if_missing = true,
         materializations = { "table", "view" },
       })
     end
   else
     -- Unqualified table or alias: use global table resolution.
-    actual_name, actual_schema = cache:find_table(tbl_name)
+    actual_name, actual_schema = cache:find_table(tbl_name, {
+      table_quoted = alias_info and alias_info.table_quoted,
+    })
     if actual_name then
-      cols = cache:get_columns_async(actual_schema, actual_name)
+      cols = cache:get_columns_async(actual_schema, actual_name, {
+        schema_quoted = true,
+        table_quoted = true,
+      })
     end
   end
 
@@ -86,7 +100,10 @@ local function column_completions(cache, table_ref, alias_info)
   actual_schema = actual_schema or cols.resolved_schema
   actual_name = actual_name or cols.resolved_name
   if actual_schema and actual_name then
-    return completion_result(cache:get_column_completion_items(actual_schema, actual_name), false)
+    return completion_result(cache:get_column_completion_items(actual_schema, actual_name, {
+      schema_quoted = true,
+      table_quoted = true,
+    }), false)
   end
 
   return completion_result({}, false)
@@ -156,10 +173,10 @@ local function get_completions(params, cache)
 
   if ctx == "table_in_schema" then
     if type(cache.get_schema_table_completion_async) == "function" then
-      local schema_result = cache:get_schema_table_completion_async(extra)
+      local schema_result = cache:get_schema_table_completion_async(extra, alias_info)
       return completion_result(schema_result.items or {}, schema_result.is_incomplete == true)
     end
-    return completion_result(table_completions(cache, extra), false)
+    return completion_result(table_completions(cache, extra, alias_info), false)
   end
 
   if ctx == "column_of_table" then
@@ -266,17 +283,20 @@ local function compute_diagnostics(text, cache)
   end
 
   local function add_unknown(statement, ref, ref_start)
-    local schema_part, tbl = ref:match("^([%w_]+)%.([%w_]+)$")
+    local parsed = context.parse_table_ref(ref)
     local missing = false
     local message
-    if schema_part and tbl then
+    if parsed and parsed.schema then
+      local schema_part = parsed.schema
+      local tbl = parsed.table
       if type(cache.schema_status) == "function" then
-        local status = cache:schema_status(schema_part)
+        local status = cache:schema_status(schema_part, { schema_quoted = parsed.schema_quoted })
         if status == "filtered_out" then
+          local raw_schema = ref:match("^(.-)%.") or schema_part
           diagnostics[#diagnostics + 1] = {
             range = {
               start = context.statement_offset_to_position(statement, ref_start),
-              ["end"] = context.statement_offset_to_position(statement, ref_start + #schema_part),
+              ["end"] = context.statement_offset_to_position(statement, ref_start + #raw_schema),
             },
             severity = DiagnosticSeverity.Information,
             source = "dbee-lsp",
@@ -287,15 +307,19 @@ local function compute_diagnostics(text, cache)
           return
         end
       end
-      local actual = cache:find_table_in_schema(schema_part, tbl)
+      local actual = cache:find_table_in_schema(schema_part, tbl, {
+        schema_quoted = parsed.schema_quoted,
+        table_quoted = parsed.table_quoted,
+      })
       missing = actual == nil
       message = string.format("Unknown table: %s.%s", schema_part, tbl)
     else
-      tbl = ref:match("^([%w_]+)$")
-      if not tbl then
+      parsed = parsed or context.parse_table_ref(ref)
+      if not parsed or parsed.schema then
         return
       end
-      local actual = cache:find_table(tbl)
+      local tbl = parsed.table
+      local actual = cache:find_table(tbl, { table_quoted = parsed.table_quoted })
       missing = actual == nil
       if missing and type(cache.has_unloaded_active_schemas) == "function" and cache:has_unloaded_active_schemas() then
         return
@@ -319,7 +343,7 @@ local function compute_diagnostics(text, cache)
   end
 
   local function scan_statement(statement, keyword)
-    local pattern = "()%f[%a]" .. keyword_pattern(keyword) .. "%f[%A]%s+()([%w_%.]+)"
+    local pattern = "()%f[%a]" .. keyword_pattern(keyword) .. "%f[%A]%s+()([^%s,;%(%)]+)"
     local init = 1
     while true do
       local match_start, match_end, _, ref_start, ref = statement.text:find(pattern, init)

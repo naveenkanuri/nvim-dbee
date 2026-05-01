@@ -1,7 +1,9 @@
 -- Headless checks for Phase 11 SchemaCache indexes and LRU behavior.
 
 local SchemaCache = require("dbee.lsp.schema_cache")
+local context = require("dbee.lsp.context")
 local schema_filter = require("dbee.schema_filter")
+local schema_name_canonical = require("dbee.schema_name_canonical")
 
 local function fail(msg)
   print("LSP11_SCHEMA_CACHE_OPT_FAIL=" .. msg)
@@ -47,6 +49,51 @@ local function assert_sorted(label, values)
   end
 end
 
+assert_true("canonical helper api present", type(schema_name_canonical.canonical) == "function")
+assert_true("canonical equivalent api present", type(schema_name_canonical.equivalent) == "function")
+assert_true("canonical fold api present", type(schema_name_canonical.fold_for) == "function")
+assert_eq("postgres lower fold", schema_name_canonical.canonical("Public", false, "lower").canonical, "public")
+assert_eq("oracle upper fold", schema_name_canonical.canonical("users", false, "upper").canonical, "USERS")
+assert_eq("quoted preserved", schema_name_canonical.canonical("Public", true, "lower").canonical, "Public")
+assert_true("clickhouse identity distinct", not schema_name_canonical.equivalent("Public", false, "public", false, "identity"))
+
+local quoted_ref = context.parse_table_ref('"Public"."Users"')
+assert_true("quoted ref parsed", quoted_ref ~= nil)
+assert_eq("quoted schema metadata", quoted_ref.schema_quoted, true)
+assert_eq("quoted table metadata", quoted_ref.table_quoted, true)
+assert_eq("quoted schema name", quoted_ref.schema, "Public")
+assert_eq("quoted table name", quoted_ref.table, "Users")
+local unquoted_ref = context.parse_table_ref("Public.users")
+assert_true("unquoted ref parsed", unquoted_ref ~= nil)
+assert_eq("unquoted schema metadata", unquoted_ref.schema_quoted, false)
+assert_eq("unquoted table metadata", unquoted_ref.table_quoted, false)
+
+local function source(path)
+  local fd = assert(io.open(path, "r"))
+  local text = fd:read("*a")
+  fd:close()
+  return text
+end
+
+local consumer_files = {
+  "lua/dbee/lsp/schema_cache.lua",
+  "lua/dbee/lsp/init.lua",
+  "lua/dbee/handler/init.lua",
+  "lua/dbee/ui/drawer/init.lua",
+}
+for _, path in ipairs(consumer_files) do
+  local text = source(path)
+  assert_true(path .. " does not call schema_filter.fold", not text:find("schema_filter%.fold%("))
+  assert_true(path .. " does not use local _fold helper", not text:find("[:%.]_fold%("))
+end
+
+local drawer_source = source("lua/dbee/ui/drawer/init.lua")
+assert_true("drawer loaded schemas uses canonical helper", drawer_source:find("drawer_schema_loaded_key", 1, true) ~= nil)
+assert_true("drawer loaded schemas no hardcoded case insensitive fold", not drawer_source:find("root_loaded_schemas.-case_insensitive"))
+
+local lsp_init_source = source("lua/dbee/lsp/init.lua")
+assert_true("lsp same cache identifier uses canonical helper", lsp_init_source:find("schema_name_canonical.singleflight_key", 1, true) ~= nil)
+
 local cache = SchemaCache:new({}, "lsp11-schema-cache-optimization")
 cache:build_from_metadata_rows({
   { schema_name = "B_SCHEMA", table_name = "VALID_TABLE", obj_type = "table" },
@@ -91,6 +138,36 @@ assert_eq("postgres quoted table exact", pg_quoted_cache:find_table_in_schema("P
 assert_eq("postgres quoted table not unquoted folded", pg_quoted_cache:find_table_in_schema("PUBLIC", "USERS"), nil)
 assert_eq("postgres quoted schema exact", pg_quoted_cache:find_schema("Public"), "Public")
 assert_eq("postgres quoted schema not unquoted folded", pg_quoted_cache:find_schema("pUbLiC"), "public")
+
+local pg_unquoted_cache = scoped_cache("postgres", "lsp11-r6-unquoted-folds")
+pg_unquoted_cache:build_from_metadata_rows({
+  { schema_name = "public", table_name = "users", obj_type = "table" },
+  { schema_name = "Public", table_name = "users", obj_type = "table" },
+})
+local pg_unquoted_name, pg_unquoted_schema = pg_unquoted_cache:find_table_in_schema("Public", "users", {
+  schema_quoted = false,
+  table_quoted = false,
+})
+local pg_quoted_name, pg_quoted_schema = pg_unquoted_cache:find_table_in_schema("Public", "users", {
+  schema_quoted = true,
+  table_quoted = false,
+})
+assert_eq("postgres unquoted schema uses folded canonical schema", pg_unquoted_schema, "public")
+assert_eq("postgres unquoted schema uses folded canonical table", pg_unquoted_name, "users")
+assert_eq("postgres quoted schema keeps exact schema", pg_quoted_schema, "Public")
+assert_eq("postgres quoted schema finds exact-distinct table", pg_quoted_name, "users")
+
+local pg_loaded_cache = scoped_cache("postgres", "lsp11-r6-loaded-exact-aware")
+pg_loaded_cache:build_from_schemas({ "public", "Public" }, { preserve_loaded = false })
+pg_loaded_cache:on_schema_objects_loaded({
+  conn_id = "lsp11-r6-loaded-exact-aware",
+  schema = "public",
+  objects = {
+    { type = "table", schema = "public", name = "users" },
+  },
+})
+assert_eq("postgres unquoted loaded status", pg_loaded_cache:schema_status("public", { schema_quoted = false }), "loaded")
+assert_eq("postgres quoted exact-distinct unloaded status", pg_loaded_cache:schema_status("Public", { schema_quoted = true }), "active_unloaded")
 
 local oracle_cache = scoped_cache("oracle", "lsp11-r6-oracle-case-lookup")
 oracle_cache:build_from_metadata_rows({
@@ -278,6 +355,15 @@ assert_eq("lua nil ternary pattern cleared", table.concat(nil_ternary_hits, ",")
 print("LSP11_SCHEMA_INDEX_SORTED=true")
 print("LSP11_SCHEMA_LOOKUP_SCHEMA_AWARE=true")
 print("LSP11_R6_SCHEMA_CASE_LOOKUP_MATCHES=true")
+print("LSP11_R6_CANONICAL_HELPER_PRESENT=true")
+print("LSP11_R6_CANONICAL_HELPER_LOWER_FOLD=true")
+print("LSP11_R6_CANONICAL_HELPER_UPPER_FOLD=true")
+print("LSP11_R6_CANONICAL_HELPER_QUOTED_PRESERVED=true")
+print("LSP11_R6_CANONICAL_HELPER_IDENTITY=true")
+print("LSP11_R6_CANONICAL_HELPER_ALL_CONSUMERS_ROUTED=true")
+print("LSP11_R6_DRAWER_LOADED_SCHEMAS_CANONICAL=true")
+print("LSP11_R6_LSP_SAME_CACHE_ID_CANONICAL=true")
+print("LSP11_R6_CONTEXT_QUOTE_METADATA=true")
 print("LSP11_LRU_EVICTION_COUNT=" .. tostring(stats.column_evictions))
 print("LSP11_LRU_EVICTION_OK=true")
 print("LSP11_LRU_BOUND_HONORED=true")
@@ -286,6 +372,8 @@ print("LSP11_INDEX_INCREMENTAL_OK=true")
 print("LSP11_INCREMENTAL_INDEX_EQUIVALENT=true")
 print("LSP11_R6_INC_FULL_REPR_EQUIVALENT=true")
 print("LSP11_R6_QUOTED_VS_UNQUOTED_DISTINCT=true")
+print("LSP11_R6_UNQUOTED_FOLDS_NOT_EXACT=true")
+print("LSP11_R6_LOADED_SCHEMA_EXACT_AWARE=true")
 print("LSP11_R6_TARGETED_GLOBAL_INDEX_O1=true")
 print("LSP11_R6_LUA_NIL_TERNARY_CLEARED=true")
 

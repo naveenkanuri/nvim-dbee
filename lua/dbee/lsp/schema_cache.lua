@@ -26,6 +26,7 @@ local SchemaCache = {}
 local nio = require("nio")
 local schema_filter = require("dbee.schema_filter")
 local schema_filter_authority = require("dbee.schema_filter_authority")
+local schema_name_canonical = require("dbee.schema_name_canonical")
 
 local MAX_COLUMNS_IN_MEMORY = 500
 local SYNC_COLUMN_FILE_LOAD_LIMIT = 100
@@ -48,15 +49,6 @@ local CompletionItemKind = {
 ---@return string
 local function table_key(schema, table_name)
   return (schema or "_default") .. "." .. table_name
-end
-
----@param value string?
----@return string?
-local function fold(value, fold_id)
-  if not value then
-    return nil
-  end
-  return schema_filter.fold(value, fold_id or "upper")
 end
 
 ---@param ... string?
@@ -378,7 +370,7 @@ function SchemaCache:build_from_metadata_rows(rows)
   self.root_mode = "full"
   self.loaded_schemas = {}
   for schema in pairs(self.schemas) do
-    self.loaded_schemas[self:_fold(schema)] = true
+    self:_mark_schema_loaded(schema)
   end
 end
 
@@ -400,7 +392,7 @@ function SchemaCache:build_from_structure(structs)
   self.root_mode = "full"
   self.loaded_schemas = {}
   for schema in pairs(self.schemas) do
-    self.loaded_schemas[self:_fold(schema)] = true
+    self:_mark_schema_loaded(schema)
   end
 end
 
@@ -428,11 +420,11 @@ function SchemaCache:build_from_schemas(schemas, opts)
     local name = schema.name or schema.schema or schema
     if type(name) == "string" and name ~= "" and schema_filter.matches(name, self.schema_scope) then
       self.schemas[name] = true
-      local folded = self:_fold(name)
-      local previous_name = previous_schema_lookup_exact[name] or previous_schema_lookup[folded] or name
-      if preserve_loaded and previous_loaded[folded] and previous_tables[previous_name] then
+      local canonical_name = schema_name_canonical.canonical(name, false, self.fold_id).canonical
+      local previous_name = previous_schema_lookup_exact[name] or previous_schema_lookup[canonical_name] or name
+      if preserve_loaded and self:_schema_loaded_in(previous_name, previous_loaded) and previous_tables[previous_name] then
         self.tables[name] = vim.deepcopy(previous_tables[previous_name])
-        self.loaded_schemas[folded] = true
+        self:_mark_schema_loaded(name)
       else
         self.tables[name] = self.tables[name] or {}
       end
@@ -442,7 +434,7 @@ function SchemaCache:build_from_schemas(schemas, opts)
   if preserve_loaded then
     for key, cols in pairs(previous_columns) do
       local schema = key:match("^(.-)%.")
-      if schema and self.loaded_schemas[self:_fold(schema)] then
+      if schema and self:_schema_loaded_in(schema, self.loaded_schemas) then
         self.columns[key] = cols
         self.column_lru[key] = previous_lru[key]
       end
@@ -455,22 +447,53 @@ end
 
 ---@private
 ---@param value string?
----@return string?
-function SchemaCache:_fold(value)
-  return fold(value, self.fold_id)
-end
-
----@private
----@param value string?
 ---@return boolean
 function SchemaCache:_can_fold_alias(value)
   if type(value) ~= "string" or value == "" then
     return false
   end
-  if self.fold_id == "lower" or self.fold_id == "upper" then
-    return value == self:_fold(value)
+  return schema_name_canonical.is_unquoted_canonical(value, self.fold_id)
+end
+
+---@private
+---@param exact_lookup table<string, any>?
+---@param folded_lookup table<string, any>?
+---@param value string?
+---@param quoted boolean?
+---@return any
+function SchemaCache:_resolve_lookup(exact_lookup, folded_lookup, value, quoted)
+  if not value or value == "" then
+    return nil
   end
-  return true
+  local canonical = schema_name_canonical.canonical(value, quoted == true, self.fold_id).canonical
+  if quoted == true then
+    return exact_lookup and exact_lookup[value] or nil
+  end
+  if quoted == false then
+    return (folded_lookup and folded_lookup[canonical]) or (exact_lookup and exact_lookup[canonical])
+  end
+  return (exact_lookup and exact_lookup[value]) or (folded_lookup and folded_lookup[canonical])
+end
+
+---@private
+---@param schema string
+---@return string
+function SchemaCache:_loaded_schema_key(schema)
+  return schema_name_canonical.loaded_key(schema, self.fold_id)
+end
+
+---@private
+---@param schema string
+function SchemaCache:_mark_schema_loaded(schema)
+  self.loaded_schemas[self:_loaded_schema_key(schema)] = true
+end
+
+---@private
+---@param schema string
+---@param loaded table<string, boolean>?
+---@return boolean
+function SchemaCache:_schema_loaded_in(schema, loaded)
+  return loaded and loaded[self:_loaded_schema_key(schema)] == true or false
 end
 
 ---@private
@@ -480,10 +503,10 @@ function SchemaCache:_upsert_schema_lookup(schema)
   if not self:_can_fold_alias(schema) then
     return
   end
-  local folded = self:_fold(schema)
-  local current = self.schema_lookup[folded]
+  local canonical = schema_name_canonical.canonical(schema, false, self.fold_id).canonical
+  local current = self.schema_lookup[canonical]
   if not current or schema < current then
-    self.schema_lookup[folded] = schema
+    self.schema_lookup[canonical] = schema
   end
 end
 
@@ -515,10 +538,10 @@ function SchemaCache:_upsert_table_lookup(schema, name)
   if not self:_can_fold_alias(name) then
     return
   end
-  local folded = self:_fold(name)
-  local current = folded_lookup[folded]
+  local canonical = schema_name_canonical.canonical(name, false, self.fold_id).canonical
+  local current = folded_lookup[canonical]
   if not current or name < current then
-    folded_lookup[folded] = name
+    folded_lookup[canonical] = name
   end
 end
 
@@ -637,10 +660,10 @@ function SchemaCache:_update_global_table_index_for_table(schema, name, table_ty
   end
 
   if self:_can_fold_alias(name) then
-    local folded = self:_fold(name)
-    local current = self.table_lookup_global[folded]
+    local canonical = schema_name_canonical.canonical(name, false, self.fold_id).canonical
+    local current = self.table_lookup_global[canonical]
     if self:_global_lookup_precedes(current, schema, name) then
-      self.table_lookup_global[folded] = {
+      self.table_lookup_global[canonical] = {
         name = name,
         schema = schema,
       }
@@ -1642,9 +1665,9 @@ function SchemaCache:load_from_disk()
     self.schemas[s] = true
   end
 
-  for _, folded_schema in ipairs(data.root_loaded_schemas or {}) do
-    if type(folded_schema) == "string" then
-      self.loaded_schemas[folded_schema] = true
+  for _, loaded_schema in ipairs(data.root_loaded_schemas or {}) do
+    if type(loaded_schema) == "string" then
+      self.loaded_schemas[self:_loaded_schema_key(loaded_schema)] = true
     end
   end
 
@@ -1657,7 +1680,7 @@ function SchemaCache:load_from_disk()
 
   if self.root_mode == "full" and next(self.loaded_schemas) == nil then
     for schema in pairs(self.schemas) do
-      self.loaded_schemas[self:_fold(schema)] = true
+      self:_mark_schema_loaded(schema)
     end
   end
 
@@ -1850,6 +1873,19 @@ end
 
 -- ── Public API ──────────────────────────────────────────────
 
+local function quoted_option(opts, primary, fallback)
+  if type(opts) ~= "table" then
+    return nil
+  end
+  if opts[primary] ~= nil then
+    return opts[primary]
+  end
+  if fallback and opts[fallback] ~= nil then
+    return opts[fallback]
+  end
+  return nil
+end
+
 --- Get all schema names.
 ---@return string[]
 function SchemaCache:get_schemas()
@@ -1879,21 +1915,26 @@ end
 
 --- Get precomputed table completion items for a schema.
 ---@param schema string
+---@param opts? { schema_quoted?: boolean, quoted?: boolean }
 ---@return lsp.CompletionItem[]
-function SchemaCache:get_table_completion_items(schema)
-  local actual_schema = self:find_schema(schema) or schema
+function SchemaCache:get_table_completion_items(schema, opts)
+  opts = opts or {}
+  local actual_schema = self:find_schema(schema, { quoted = quoted_option(opts, "schema_quoted", "quoted") }) or schema
   return copy_items(self.table_items_by_schema[actual_schema])
 end
 
-function SchemaCache:schema_status(schema)
-  local actual_schema = self:find_schema(schema) or schema
+---@param schema string
+---@param opts? { schema_quoted?: boolean, quoted?: boolean }
+function SchemaCache:schema_status(schema, opts)
+  opts = opts or {}
+  local actual_schema = self:find_schema(schema, { quoted = quoted_option(opts, "schema_quoted", "quoted") }) or schema
   if not schema_filter.matches(actual_schema, self.schema_scope) then
     return "filtered_out", actual_schema
   end
-  if not self:find_schema(actual_schema) then
+  if not self:find_schema(actual_schema, { quoted = true }) then
     return "missing", actual_schema
   end
-  if self.root_mode == "schemas_only" and not self.loaded_schemas[self:_fold(actual_schema)] then
+  if self.root_mode == "schemas_only" and not self:_schema_loaded_in(actual_schema, self.loaded_schemas) then
     return "active_unloaded", actual_schema
   end
   return "loaded", actual_schema
@@ -1904,18 +1945,20 @@ function SchemaCache:has_unloaded_active_schemas()
     return false
   end
   for schema in pairs(self.schemas or {}) do
-    if schema_filter.matches(schema, self.schema_scope) and not self.loaded_schemas[self:_fold(schema)] then
+    if schema_filter.matches(schema, self.schema_scope) and not self:_schema_loaded_in(schema, self.loaded_schemas) then
       return true
     end
   end
   return false
 end
 
-function SchemaCache:get_schema_table_completion_async(schema)
-  local status, actual_schema = self:schema_status(schema)
+---@param schema string
+---@param opts? { schema_quoted?: boolean, quoted?: boolean }
+function SchemaCache:get_schema_table_completion_async(schema, opts)
+  local status, actual_schema = self:schema_status(schema, opts)
   if status == "loaded" then
     return {
-      items = self:get_table_completion_items(actual_schema),
+      items = self:get_table_completion_items(actual_schema, { schema_quoted = true }),
       is_incomplete = false,
     }
   end
@@ -1972,31 +2015,37 @@ end
 --- Get precomputed column completion items for a table.
 ---@param schema string
 ---@param table_name string
+---@param opts? { schema_quoted?: boolean, table_quoted?: boolean }
 ---@return lsp.CompletionItem[]
-function SchemaCache:get_column_completion_items(schema, table_name)
-  local actual_schema = self:find_schema(schema) or schema or "_default"
-  local actual_table = self:find_table_in_schema(actual_schema, table_name) or table_name
+function SchemaCache:get_column_completion_items(schema, table_name, opts)
+  opts = opts or {}
+  local actual_schema = self:find_schema(schema, { quoted = opts.schema_quoted }) or schema or "_default"
+  local actual_table = self:find_table_in_schema(actual_schema, table_name, {
+    schema_quoted = true,
+    table_quoted = opts.table_quoted,
+  }) or table_name
   return copy_items(self.column_items_by_key[table_key(actual_schema, actual_table)])
 end
 
---- Find a schema name case-insensitively.
+--- Find a schema name using exact or folded semantics.
 ---@param schema_name string?
+---@param opts? { quoted?: boolean }
 ---@return string?
-function SchemaCache:find_schema(schema_name)
+function SchemaCache:find_schema(schema_name, opts)
   if not schema_name or schema_name == "" then
     return nil
   end
-  return self.schema_lookup_exact[schema_name] or self.schema_lookup[self:_fold(schema_name)]
+  return self:_resolve_lookup(self.schema_lookup_exact, self.schema_lookup, schema_name, opts and opts.quoted)
 end
 
 --- Get columns through the non-blocking async miss path.
 ---@param schema string
 ---@param table_name string
----@param opts? { probe_if_missing?: boolean, materializations?: string[], root_epoch?: integer }
+---@param opts? { probe_if_missing?: boolean, materializations?: string[], root_epoch?: integer, schema_quoted?: boolean, table_quoted?: boolean }
 ---@return { columns: Column[], is_incomplete: boolean, in_flight: boolean, reason?: string, resolved_schema?: string, resolved_name?: string }
 function SchemaCache:get_columns_async(schema, table_name, opts)
   opts = opts or {}
-  schema = self:find_schema(schema) or schema or "_default"
+  schema = self:find_schema(schema, { quoted = opts.schema_quoted }) or schema or "_default"
   table_name = table_name or ""
 
   if not schema_filter.matches(schema, self.schema_scope) then
@@ -2008,7 +2057,10 @@ function SchemaCache:get_columns_async(schema, table_name, opts)
     }
   end
 
-  local actual_table = self:find_table_in_schema(schema, table_name)
+  local actual_table = self:find_table_in_schema(schema, table_name, {
+    schema_quoted = true,
+    table_quoted = opts.table_quoted,
+  })
   if actual_table then
     table_name = actual_table
   end
@@ -2068,9 +2120,9 @@ function SchemaCache:get_columns_async(schema, table_name, opts)
   local table_candidates = { table_name }
   if opts.probe_if_missing then
     schema_candidates = unique_nonempty(
-      self:find_schema(schema),
+      self:find_schema(schema, { quoted = opts.schema_quoted }),
       schema,
-      schema:upper(),
+      schema_name_canonical.canonical(schema, false, "upper").canonical,
       "_default"
     )
     table_candidates = unique_nonempty(
@@ -2223,7 +2275,7 @@ function SchemaCache:on_schema_objects_loaded(data)
   if data.error or data.error_kind then
     return false
   end
-  local schema = self:find_schema(data.schema) or data.schema
+  local schema = self:find_schema(data.schema, { quoted = true }) or data.schema
   if not schema or schema == "" then
     return false
   end
@@ -2252,7 +2304,7 @@ function SchemaCache:on_schema_objects_loaded(data)
     end
   end
   apply_structs(filtered_objects, schema)
-  self.loaded_schemas[self:_fold(schema)] = true
+  self:_mark_schema_loaded(schema)
   self:_rebuild_structure_indexes()
   self:save_to_disk()
   return true
@@ -2274,14 +2326,14 @@ end
 --- Results are cached to disk for subsequent sessions.
 ---@param schema string
 ---@param table_name string
----@param opts? { probe_if_missing?: boolean, materializations?: string[] }
+---@param opts? { probe_if_missing?: boolean, materializations?: string[], schema_quoted?: boolean, table_quoted?: boolean }
 ---@return Column[]
 function SchemaCache:get_columns(schema, table_name, opts)
   opts = opts or {}
   schema = schema or "_default"
 
   -- Normalize schema casing against known cache entries.
-  schema = self:find_schema(schema) or schema
+  schema = self:find_schema(schema, { quoted = opts.schema_quoted }) or schema
 
   local key = table_key(schema, table_name)
   if self.columns[key] then
@@ -2289,7 +2341,10 @@ function SchemaCache:get_columns(schema, table_name, opts)
     return self.columns[key]
   end
 
-  local actual_table = self:find_table_in_schema(schema, table_name)
+  local actual_table = self:find_table_in_schema(schema, table_name, {
+    schema_quoted = true,
+    table_quoted = opts.table_quoted,
+  })
   if actual_table then
     table_name = actual_table
     key = table_key(schema, table_name)
@@ -2301,7 +2356,10 @@ function SchemaCache:get_columns(schema, table_name, opts)
 
   local tbl_info = (self.tables[schema] or {})[table_name]
   if not tbl_info then
-    local default_table = self:find_table_in_schema("_default", table_name)
+    local default_table = self:find_table_in_schema("_default", table_name, {
+      schema_quoted = true,
+      table_quoted = opts.table_quoted,
+    })
     tbl_info = default_table and (self.tables["_default"] or {})[default_table] or nil
     if tbl_info then
       schema = "_default"
@@ -2316,7 +2374,10 @@ function SchemaCache:get_columns(schema, table_name, opts)
 
   if not tbl_info then
     -- Normalize table casing against known entries in this schema.
-    table_name = self:find_table_in_schema(schema, table_name) or table_name
+    table_name = self:find_table_in_schema(schema, table_name, {
+      schema_quoted = true,
+      table_quoted = opts.table_quoted,
+    }) or table_name
     tbl_info = (self.tables[schema] or {})[table_name]
     key = table_key(schema, table_name)
     if tbl_info and self.columns[key] then
@@ -2379,12 +2440,13 @@ function SchemaCache:get_columns(schema, table_name, opts)
 
     -- Prefer an existing schema with matching case-insensitive name.
     local matched_schema = nil
-    matched_schema = self:find_schema(schema)
+    matched_schema = self:find_schema(schema, { quoted = opts.schema_quoted })
 
     add_schema_candidate(matched_schema)
     add_schema_candidate(schema)
-    if schema ~= "_default" and schema:upper() ~= schema then
-      add_schema_candidate(schema:upper())
+    local upper_schema = schema_name_canonical.canonical(schema, false, "upper").canonical
+    if schema ~= "_default" and upper_schema ~= schema then
+      add_schema_candidate(upper_schema)
     end
 
     add_table_candidate(table_name)
@@ -2437,43 +2499,41 @@ function SchemaCache:get_cached_columns()
   return self.columns
 end
 
---- Find a table within a specific schema case-insensitively.
+--- Find a table within a specific schema.
 ---@param schema_name string
 ---@param table_name string
+---@param opts? { schema_quoted?: boolean, table_quoted?: boolean }
 ---@return string? actual_name, string? actual_schema
-function SchemaCache:find_table_in_schema(schema_name, table_name)
-  local actual_schema = self:find_schema(schema_name) or schema_name
+function SchemaCache:find_table_in_schema(schema_name, table_name, opts)
+  opts = opts or {}
+  local actual_schema = self:find_schema(schema_name, { quoted = opts.schema_quoted }) or schema_name
   if not table_name or table_name == "" then
     return nil, actual_schema
   end
   local exact_lookup = self.table_lookup_exact_by_schema[actual_schema]
-  local actual_name = exact_lookup and exact_lookup[table_name]
-  if actual_name then
-    return actual_name, actual_schema
-  end
   local schema_lookup = self.table_lookup_by_schema[actual_schema]
-  if not schema_lookup then
-    return nil, actual_schema
-  end
-  actual_name = schema_lookup[self:_fold(table_name)]
+  local actual_name = self:_resolve_lookup(exact_lookup, schema_lookup, table_name, opts.table_quoted)
   if actual_name then
     return actual_name, actual_schema
   end
   return nil, actual_schema
 end
 
---- Find a table name matching case-insensitively.
+--- Find a table name using exact or folded semantics.
 ---@param table_name string
+---@param opts? { table_quoted?: boolean, quoted?: boolean }
 ---@return string? actual_name, string? schema
-function SchemaCache:find_table(table_name)
+function SchemaCache:find_table(table_name, opts)
   if not table_name or table_name == "" then
     return nil, nil
   end
-  local exact_match = self.table_lookup_exact_global[table_name]
-  if exact_match then
-    return exact_match.name, exact_match.schema
-  end
-  local match = self.table_lookup_global[self:_fold(table_name)]
+  opts = opts or {}
+  local match = self:_resolve_lookup(
+    self.table_lookup_exact_global,
+    self.table_lookup_global,
+    table_name,
+    quoted_option(opts, "table_quoted", "quoted")
+  )
   if match then
     return match.name, match.schema
   end

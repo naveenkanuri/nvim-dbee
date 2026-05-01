@@ -8,6 +8,7 @@ local expansion = require("dbee.ui.drawer.expansion")
 local reconnect = require("dbee.reconnect")
 local schema_filter = require("dbee.schema_filter")
 local schema_filter_authority = require("dbee.schema_filter_authority")
+local schema_name_canonical = require("dbee.schema_name_canonical")
 local utils = require("dbee.utils")
 
 local connection_wizard = nil
@@ -291,6 +292,13 @@ end
 ---@return boolean
 local function schema_visible_for_scope(normalized, schema_name)
   return schema_filter.matches(schema_name, normalized)
+end
+
+---@param normalized table
+---@param schema_name string?
+---@return string
+local function drawer_schema_loaded_key(normalized, schema_name)
+  return schema_name_canonical.loaded_key(schema_name, normalized and normalized.fold)
 end
 
 ---@param normalized table
@@ -2132,13 +2140,12 @@ function DrawerUI:on_schema_objects_loaded(data, branch_id)
   end
   if not data.error and not data.error_kind then
     self._struct_cache.root_loaded_schemas[data.conn_id] = self._struct_cache.root_loaded_schemas[data.conn_id] or {}
-    self._struct_cache.root_loaded_schemas[data.conn_id][schema_filter.fold(data.schema, "case_insensitive")] = true
+    local loaded_key = drawer_schema_loaded_key(scope, data.schema)
+    self._struct_cache.root_loaded_schemas[data.conn_id][loaded_key] = true
 
     local root = self._struct_cache.root[data.conn_id]
     for _, schema_node in ipairs(root and root.structures or {}) do
-      if schema_filter.fold(schema_node.schema or schema_node.name, "case_insensitive")
-        == schema_filter.fold(data.schema, "case_insensitive")
-      then
+      if drawer_schema_loaded_key(scope, schema_node.schema or schema_node.name) == loaded_key then
         schema_node.children = vim.deepcopy(state.raw or {})
         break
       end

@@ -4,6 +4,7 @@ local SchemaCache = require("dbee.lsp.schema_cache")
 local server = require("dbee.lsp.server")
 local schema_filter = require("dbee.schema_filter")
 local schema_filter_authority = require("dbee.schema_filter_authority")
+local schema_name_canonical = require("dbee.schema_name_canonical")
 local utils = require("dbee.utils")
 
 -- Metadata SQL queries per connection type.
@@ -242,7 +243,8 @@ local function same_cache_identifier(left, right)
   if not left or not right or not M._cache then
     return false
   end
-  return schema_filter.fold(left, M._cache.fold_id) == schema_filter.fold(right, M._cache.fold_id)
+  return schema_name_canonical.singleflight_key(left, M._cache.fold_id)
+    == schema_name_canonical.singleflight_key(right, M._cache.fold_id)
 end
 
 ---@param bufnr integer
@@ -275,14 +277,19 @@ function M._resolve_completion_refresh_target(bufnr)
   end
 
   if alias_info and alias_info.schema then
-    local actual_name, actual_schema = M._cache:find_table_in_schema(alias_info.schema, table_name)
+    local actual_name, actual_schema = M._cache:find_table_in_schema(alias_info.schema, table_name, {
+      schema_quoted = alias_info.schema_quoted,
+      table_quoted = alias_info.table_quoted,
+    })
     if actual_name then
       return actual_schema, actual_name
     end
     return nil, nil
   end
 
-  local actual_name, actual_schema = M._cache:find_table(table_name)
+  local actual_name, actual_schema = M._cache:find_table(table_name, {
+    table_quoted = alias_info and alias_info.table_quoted,
+  })
   if actual_name then
     return actual_schema, actual_name
   end

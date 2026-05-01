@@ -62,6 +62,113 @@ local sql_keywords_set = {
   ["else"] = true, ["end"] = true, values = true, asc = true, desc = true,
 }
 
+---@param raw string?
+---@return { name: string, quoted: boolean }?
+local function parse_identifier(raw)
+  if type(raw) ~= "string" or raw == "" then
+    return nil
+  end
+  if raw:sub(1, 1) == '"' and raw:sub(-1) == '"' and #raw >= 2 then
+    return {
+      name = raw:sub(2, -2):gsub('""', '"'),
+      quoted = true,
+    }
+  end
+  if raw:match("^[%w_]+$") then
+    return {
+      name = raw,
+      quoted = false,
+    }
+  end
+  return nil
+end
+
+---@param ref string
+---@return string[]?
+local function split_identifier_ref(ref)
+  if type(ref) ~= "string" or ref == "" then
+    return nil
+  end
+
+  local parts = {}
+  local current = {}
+  local quoted = false
+  local index = 1
+  while index <= #ref do
+    local ch = ref:sub(index, index)
+    if ch == '"' then
+      current[#current + 1] = ch
+      if quoted and ref:sub(index + 1, index + 1) == '"' then
+        current[#current + 1] = '"'
+        index = index + 1
+      else
+        quoted = not quoted
+      end
+    elseif ch == "." and not quoted then
+      parts[#parts + 1] = table.concat(current)
+      current = {}
+    else
+      current[#current + 1] = ch
+    end
+    index = index + 1
+  end
+  if quoted then
+    return nil
+  end
+  parts[#parts + 1] = table.concat(current)
+  return parts
+end
+
+---@param ref string
+---@return { table: string, table_quoted: boolean, schema: string?, schema_quoted: boolean? }?
+function M.parse_table_ref(ref)
+  local parts = split_identifier_ref(ref)
+  if not parts or #parts == 0 or #parts > 2 then
+    return nil
+  end
+
+  if #parts == 1 then
+    local table_id = parse_identifier(parts[1])
+    if not table_id then
+      return nil
+    end
+    return {
+      table = table_id.name,
+      table_quoted = table_id.quoted,
+    }
+  end
+
+  local schema_id = parse_identifier(parts[1])
+  local table_id = parse_identifier(parts[2])
+  if not schema_id or not table_id then
+    return nil
+  end
+  return {
+    schema = schema_id.name,
+    schema_quoted = schema_id.quoted,
+    table = table_id.name,
+    table_quoted = table_id.quoted,
+  }
+end
+
+---@param text string
+---@return { name: string, quoted: boolean, raw: string }?
+local function identifier_before_dot(text)
+  local quoted_raw = text:match('("[^"]*")%.$')
+  local quoted_id = parse_identifier(quoted_raw)
+  if quoted_id then
+    quoted_id.raw = quoted_raw
+    return quoted_id
+  end
+
+  local raw = text:match("([%w_]+)%.$")
+  local id = parse_identifier(raw)
+  if id then
+    id.raw = raw
+  end
+  return id
+end
+
 --- Get the text of the current line up to the cursor position.
 ---@param params table LSP completion params
 ---@return string
@@ -201,34 +308,33 @@ local function parse_aliases(bufnr, line, col)
 
       local alias_lower = alias and alias:lower() or ""
       if alias_lower ~= "" and not sql_keywords_set[alias_lower] then
-        local schema, tbl = table_ref:match("^([%w_]+)%.([%w_]+)$")
-        if not tbl then
-          tbl = table_ref
-          schema = nil
+        local parsed = M.parse_table_ref(table_ref)
+        if parsed then
+          matches[#matches + 1] = {
+            pos = s,
+            specificity = specificity,
+            alias = alias_lower,
+            table = parsed.table,
+            table_quoted = parsed.table_quoted,
+            schema = parsed.schema,
+            schema_quoted = parsed.schema_quoted,
+          }
         end
-
-        matches[#matches + 1] = {
-          pos = s,
-          specificity = specificity,
-          alias = alias_lower,
-          table = tbl,
-          schema = schema,
-        }
       end
 
       init = e + 1
     end
   end
 
-  add_matches("[Ff][Rr][Oo][Mm]%s+([%w_%.]+)%s+([%w_]+)", 1)
-  add_matches("[Jj][Oo][Ii][Nn]%s+([%w_%.]+)%s+([%w_]+)", 1)
-  add_matches("[Uu][Pp][Dd][Aa][Tt][Ee]%s+([%w_%.]+)%s+([%w_]+)", 1)
-  add_matches("[Mm][Ee][Rr][Gg][Ee]%s+[Ii][Nn][Tt][Oo]%s+([%w_%.]+)%s+([%w_]+)", 1)
+  add_matches("[Ff][Rr][Oo][Mm]%s+([^%s,;%(%)]+)%s+([%w_]+)", 1)
+  add_matches("[Jj][Oo][Ii][Nn]%s+([^%s,;%(%)]+)%s+([%w_]+)", 1)
+  add_matches("[Uu][Pp][Dd][Aa][Tt][Ee]%s+([^%s,;%(%)]+)%s+([%w_]+)", 1)
+  add_matches("[Mm][Ee][Rr][Gg][Ee]%s+[Ii][Nn][Tt][Oo]%s+([^%s,;%(%)]+)%s+([%w_]+)", 1)
 
-  add_matches("[Ff][Rr][Oo][Mm]%s+([%w_%.]+)%s+[Aa][Ss]%s+([%w_]+)", 2)
-  add_matches("[Jj][Oo][Ii][Nn]%s+([%w_%.]+)%s+[Aa][Ss]%s+([%w_]+)", 2)
-  add_matches("[Uu][Pp][Dd][Aa][Tt][Ee]%s+([%w_%.]+)%s+[Aa][Ss]%s+([%w_]+)", 2)
-  add_matches("[Mm][Ee][Rr][Gg][Ee]%s+[Ii][Nn][Tt][Oo]%s+([%w_%.]+)%s+[Aa][Ss]%s+([%w_]+)", 2)
+  add_matches("[Ff][Rr][Oo][Mm]%s+([^%s,;%(%)]+)%s+[Aa][Ss]%s+([%w_]+)", 2)
+  add_matches("[Jj][Oo][Ii][Nn]%s+([^%s,;%(%)]+)%s+[Aa][Ss]%s+([%w_]+)", 2)
+  add_matches("[Uu][Pp][Dd][Aa][Tt][Ee]%s+([^%s,;%(%)]+)%s+[Aa][Ss]%s+([%w_]+)", 2)
+  add_matches("[Mm][Ee][Rr][Gg][Ee]%s+[Ii][Nn][Tt][Oo]%s+([^%s,;%(%)]+)%s+[Aa][Ss]%s+([%w_]+)", 2)
 
   table.sort(matches, function(a, b)
     if a.pos == b.pos then
@@ -238,7 +344,12 @@ local function parse_aliases(bufnr, line, col)
   end)
 
   for _, m in ipairs(matches) do
-    aliases[m.alias] = { table = m.table, schema = m.schema }
+    aliases[m.alias] = {
+      table = m.table,
+      table_quoted = m.table_quoted,
+      schema = m.schema,
+      schema_quoted = m.schema_quoted,
+    }
   end
 
   return aliases
@@ -265,18 +376,19 @@ function M.analyze(params)
     trimmed = trimmed .. "."
   end
 
-  -- Check for dot-completion: "word." at end of line
-  local dot_prefix = trimmed:match("([%w_]+)%.$")
-  if dot_prefix then
+  -- Check for dot-completion: identifier. at end of line.
+  local dot_identifier = identifier_before_dot(trimmed)
+  if dot_identifier then
+    local dot_prefix = dot_identifier.name
     -- Could be schema.table or table/alias.column
     -- Check if we're in a table context (after FROM/JOIN)
-    local before_dot = trimmed:sub(1, #trimmed - #dot_prefix - 1)
+    local before_dot = trimmed:sub(1, #trimmed - #(dot_identifier.raw or dot_prefix) - 1)
     local lower_before = before_dot:lower():match("%S+%s*$") or ""
 
     for _, kw in ipairs(table_keywords) do
       if lower_before:match(kw .. "%s*$") then
         -- schema.table completion
-        return "table_in_schema", dot_prefix, nil
+        return "table_in_schema", dot_prefix, { schema_quoted = dot_identifier.quoted }
       end
     end
 
@@ -290,7 +402,11 @@ function M.analyze(params)
     end
 
     -- Could be a direct table name
-    return "column_of_table", dot_prefix, { table = dot_prefix, schema = nil }
+    return "column_of_table", dot_prefix, {
+      table = dot_prefix,
+      table_quoted = dot_identifier.quoted,
+      schema = nil,
+    }
   end
 
   -- Check for table context: after FROM, JOIN, INTO, UPDATE, etc.

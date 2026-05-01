@@ -205,6 +205,7 @@ local DrawerUI = require("dbee.ui.drawer")
 local convert = require("dbee.ui.drawer.convert")
 local drawer_model = require("dbee.ui.drawer.model")
 schema_filter = require("dbee.schema_filter")
+local schema_name_canonical = require("dbee.schema_name_canonical")
 
 local nvim_version = vim.version()
 local nvim_version_string = string.format("%d.%d.%d", nvim_version.major, nvim_version.minor, nvim_version.patch)
@@ -1151,7 +1152,7 @@ function build_arch14_scoped_spec(scoped_count, opts)
         applied_gen = 0,
         loading = false,
       }
-      root_loaded_schemas[conn_id][schema_filter.fold(schema_name, "case_insensitive")] = true
+      root_loaded_schemas[conn_id][schema_name_canonical.loaded_key(schema_name, normalized.fold)] = true
       loaded_lazy_ids[schema_id] = true
     end
   end
