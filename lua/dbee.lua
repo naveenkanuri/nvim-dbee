@@ -1776,6 +1776,15 @@ function dbee.store(format, output, opts)
   api.core.call_store_result(call.id, format, output, opts)
 end
 
+---Clear the managed Oracle wallet extraction cache.
+function dbee.wallet_cache_clear()
+  local core_ready, core_err = ensure_core_available()
+  if not core_ready then
+    error(core_err)
+  end
+  api.core.oracle_wallet_cache_clear()
+end
+
 ---Supported install commands.
 ---@alias install_command
 ---| '"wget"'

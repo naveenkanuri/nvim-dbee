@@ -161,6 +161,24 @@ function core.connection_test_spec(params)
   return state.handler():connection_test_spec(params)
 end
 
+---Test an unsaved connection spec and return additive success metadata.
+---@param params ConnectionParams
+---@return { status: string, error?: { error_kind: string, message: string }, meta?: table }
+function core.connection_test_detailed(params)
+  return state.handler():connection_test_detailed(params)
+end
+
+---Clear the managed Oracle wallet extraction cache.
+function core.oracle_wallet_cache_clear()
+  state.handler():oracle_wallet_cache_clear()
+end
+
+---Sync Oracle wallet auto-extract runtime setting to the backend.
+---@param enabled boolean
+function core.oracle_wallet_set_auto_extract(enabled)
+  state.handler():oracle_wallet_set_auto_extract(enabled == true)
+end
+
 ---List databases of a connection.
 ---Some databases might not support this - in that case, a call to this
 ---function returns an error.

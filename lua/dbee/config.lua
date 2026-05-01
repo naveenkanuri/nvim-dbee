@@ -13,6 +13,7 @@ local config = {}
 ---@field result? result_config
 ---@field call_log? call_log_config
 ---@field lsp? lsp_config
+---@field oracle? oracle_config
 ---@field window_layout? Layout
 
 ---@class Candy
@@ -39,6 +40,9 @@ local config = {}
 
 ---Configuration for built-in LSP features.
 ---@alias lsp_config { diagnostics_mode: "debounce_didchange"|"save_only"|"off", diagnostics_debounce_ms: integer, hover: boolean, resolve: boolean, document_symbols: boolean, workspace_symbols: boolean, code_actions: boolean, code_action_expand_select_star: boolean, code_action_qualify_identifier: boolean, code_action_refresh_schema: boolean, code_action_reload_table_metadata: boolean, code_action_max_expand_columns: integer }
+
+---Configuration for Oracle adapter behavior.
+---@alias oracle_config { wallet_auto_extract: boolean }
 
 ---@divider -
 
@@ -407,6 +411,10 @@ config.default = {
     code_action_max_expand_columns = 200,
   },
 
+  oracle = {
+    wallet_auto_extract = true,
+  },
+
   -- window layout
   window_layout = require("dbee.layouts").Default:new(),
 }
@@ -443,6 +451,8 @@ function config.validate(cfg)
     lsp_code_action_refresh_schema = { cfg.lsp.code_action_refresh_schema, "boolean" },
     lsp_code_action_reload_table_metadata = { cfg.lsp.code_action_reload_table_metadata, "boolean" },
     lsp_code_action_max_expand_columns = { cfg.lsp.code_action_max_expand_columns, "number" },
+    oracle = { cfg.oracle, "table" },
+    oracle_wallet_auto_extract = { cfg.oracle.wallet_auto_extract, "boolean" },
 
     window_layout = { cfg.window_layout, "table" },
     window_layout_open = { cfg.window_layout.open, "function" },

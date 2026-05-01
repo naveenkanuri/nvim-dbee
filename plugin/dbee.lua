@@ -55,6 +55,10 @@ local commands = {
 
     require("dbee").store(args[1], args[2], { extra_arg = args[3] })
   end,
+  wallet_cache_clear = function()
+    require("dbee").wallet_cache_clear()
+    vim.notify("DBee Oracle wallet cache cleared", vim.log.levels.INFO)
+  end,
 }
 
 ---@param args string args in form of Dbee arg1 arg2 ...
@@ -130,3 +134,8 @@ end, {
     return vim.tbl_keys(commands)
   end,
 })
+
+vim.api.nvim_create_user_command("DBeeWalletCacheClear", function()
+  require("dbee").wallet_cache_clear()
+  vim.notify("DBee Oracle wallet cache cleared", vim.log.levels.INFO)
+end, {})

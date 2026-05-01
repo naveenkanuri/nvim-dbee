@@ -119,6 +119,10 @@ local function deepcopy(value)
   return vim.deepcopy(value)
 end
 
+local function wallet_path_is_zip(wallet_path)
+  return type(wallet_path) == "string" and wallet_path:sub(-4):lower() == ".zip"
+end
+
 local function contrast_fg(bg)
   if type(bg) ~= "number" then
     return vim.o.background == "light" and 0x202020 or 0xeeeeee
@@ -215,6 +219,31 @@ local function ensure_mode_fields(state, mode)
     state.fields[mode].sslmode = "require"
   end
   return state.fields[mode]
+end
+
+local function wallet_auto_extract_hint(state)
+  if state.mode ~= "oracle_cloud_wallet" then
+    return nil
+  end
+  local fields = ensure_mode_fields(state, state.mode)
+  if wallet_path_is_zip(fields.wallet_path) then
+    return "Wallet zip will be auto-extracted on connect."
+  end
+end
+
+local function wallet_auto_extract_success(meta)
+  meta = type(meta) == "table" and meta or {}
+  local wallet = type(meta.wallet_auto_extract) == "table" and meta.wallet_auto_extract or nil
+  if not wallet then
+    return nil
+  end
+  local prefix = tostring(wallet.hash_prefix or "")
+  if prefix == "" then
+    return nil
+  end
+  local files = tonumber(wallet.file_count) or 0
+  local action = wallet.cache_hit == true and "wallet cache reused" or "wallet extracted"
+  return string.format("%s (%s... %d files)", action, prefix:sub(1, 6), files)
 end
 
 local function copy_shared_fields(from_fields, to_fields)
@@ -888,6 +917,7 @@ local function normalize_seed(seed, defaults)
     schema_filter = schema_filter_to_state(params.schema_filter),
     test_status = "untested",
     test_error = nil,
+    test_message = nil,
   }
 
   for known_mode in pairs(FIELD_DEFS) do
@@ -1287,6 +1317,7 @@ function Wizard:set_mode(mode)
   refresh_wallet_alias_state(self.state)
   self.state.test_status = "untested"
   self.state.test_error = nil
+  self.state.test_message = nil
   self.state.selection = 1
   self:render()
 end
@@ -1306,6 +1337,7 @@ function Wizard:set_db_kind(db_kind)
   refresh_wallet_alias_state(self.state)
   self.state.test_status = "untested"
   self.state.test_error = nil
+  self.state.test_message = nil
   self.state.selection = 1
   self:render()
 end
@@ -1319,6 +1351,7 @@ function Wizard:set_field(field_key, value)
   end
   self.state.test_status = "untested"
   self.state.test_error = nil
+  self.state.test_message = nil
   self:render()
 end
 
@@ -1343,6 +1376,7 @@ function Wizard:test_connection()
   self.state.last_error = nil
   self.state.test_status = "testing"
   self.state.test_error = nil
+  self.state.test_message = nil
   self:render()
   -- Force a redraw before the blocking ping so the spinner is visible.
   pcall(vim.cmd, "redraw")
@@ -1355,8 +1389,16 @@ function Wizard:test_connection()
     return
   end
 
-  local ping_failure = handler:connection_test_spec(submission.params)
-  if ping_failure then
+  local test_result = nil
+  if type(handler.connection_test_detailed) == "function" then
+    test_result = handler:connection_test_detailed(submission.params)
+  else
+    local legacy_failure = handler:connection_test_spec(submission.params)
+    test_result = legacy_failure and { status = "error", error = legacy_failure } or { status = "ok" }
+  end
+
+  if test_result and test_result.status == "error" then
+    local ping_failure = test_result.error or test_result
     self.state.test_status = "failed"
     self.state.test_error = (type(ping_failure) == "table"
       and (ping_failure.message or ping_failure.error or vim.inspect(ping_failure)))
@@ -1364,6 +1406,7 @@ function Wizard:test_connection()
   else
     self.state.test_status = "ok"
     self.state.test_error = nil
+    self.state.test_message = wallet_auto_extract_success(test_result and test_result.meta)
   end
   self:render()
 end
@@ -1470,12 +1513,19 @@ function Wizard:render()
     for line_chunk in err:gmatch("[^\n]+") do
       lines[#lines + 1] = "    " .. line_chunk
     end
+  elseif self.state.test_status == "ok" and self.state.test_message then
+    lines[#lines + 1] = "    " .. self.state.test_message
   end
 
   local submit_label = self.state.test_status == "ok" and "Submit" or "Submit (test connection first)"
   add_entry({ kind = "submit" }, submit_label)
   add_entry({ kind = "cancel" }, "Cancel")
 
+  local wallet_hint = wallet_auto_extract_hint(self.state)
+  if wallet_hint then
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = wallet_hint
+  end
   if self.state.wallet_alias_warning then
     lines[#lines + 1] = ""
     lines[#lines + 1] = "Warning: " .. self.state.wallet_alias_warning
@@ -1926,6 +1976,8 @@ M._MODE_OPTIONS = MODE_OPTIONS
 M._FIELD_DEFS = FIELD_DEFS
 M._parse_wallet_aliases = parse_wallet_aliases
 M._read_wallet_tnsnames = read_wallet_tnsnames
+M._wallet_auto_extract_hint = wallet_auto_extract_hint
+M._wallet_auto_extract_success = wallet_auto_extract_success
 M._validate = validate_submission
 M._serialize = serialize_submission
 M._normalize_seed = normalize_seed

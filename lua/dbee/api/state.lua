@@ -20,6 +20,15 @@ m.setup_called = false
 ---@type Config
 m.config = {}
 
+local function oracle_wallet_auto_extract_enabled()
+  local oracle = m.config.oracle or {}
+  return oracle.wallet_auto_extract ~= false
+end
+
+local function sync_oracle_wallet_auto_extract()
+  vim.fn.DbeeOracleWalletSetAutoExtract(oracle_wallet_auto_extract_enabled())
+end
+
 local function setup_handler()
   if m.core_loaded then
     return
@@ -39,7 +48,11 @@ local function setup_handler()
   end
   vim.env.PATH = install.dir() .. pathsep .. vim.env.PATH
 
-  m.handler = Handler:new(m.config.sources)
+  sync_oracle_wallet_auto_extract()
+
+  m.handler = Handler:new(m.config.sources, {
+    before_source_load = sync_oracle_wallet_auto_extract,
+  })
   m.handler:add_helpers(m.config.extra_helpers)
 
   -- activate default connection if present

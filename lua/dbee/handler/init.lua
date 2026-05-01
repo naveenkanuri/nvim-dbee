@@ -355,8 +355,10 @@ end
 local Handler = {}
 
 ---@param sources? Source[]
+---@param opts? { before_source_load?: fun() }
 ---@return Handler
-function Handler:new(sources)
+function Handler:new(sources, opts)
+  opts = opts or {}
   -- class object
   local o = {
     sources = {},
@@ -372,6 +374,7 @@ function Handler:new(sources)
     _schema_object_queues = {},
     _schema_spec_request_lookup = {},
     _connection_invalidated_consumers = {},
+    _before_source_load = opts.before_source_load,
   }
   setmetatable(o, self)
   self.__index = self
@@ -1849,6 +1852,25 @@ function Handler:_source_reload_silent(source_id, opts)
   local previous_current = self:get_current_connection()
   local current_conn_id_before = previous_current and previous_current.id or nil
 
+  if type(self._before_source_load) == "function" then
+    local ok_sync, sync_err = pcall(self._before_source_load)
+    if not ok_sync then
+      return {
+        source_id = source_id,
+        retired_conn_ids = connection_ids(previous_connections),
+        new_conn_ids = connection_ids(previous_connections),
+        current_conn_id_before = current_conn_id_before,
+        current_conn_id_after = current_conn_id_before,
+        rewrites = {},
+        authoritative_root_epoch = nil,
+        reload_error = {
+          error_kind = "reload_failed",
+          message = "wallet auto-extract sync failed before source load: " .. tostring(sync_err),
+        },
+      }
+    end
+  end
+
   for _, conn in ipairs(previous_connections) do
     pcall(vim.fn.DbeeDeleteConnection, conn.id)
   end
@@ -2559,6 +2581,25 @@ function Handler:connection_test_spec(params)
     return nil
   end
   return ret
+end
+
+---@param params ConnectionParams
+---@return { status: string, error?: { error_kind: string, message: string }, meta?: table }
+function Handler:connection_test_detailed(params)
+  local ret = vim.fn.DbeeConnectionTestDetailed(params)
+  if not ret or ret == vim.NIL then
+    return { status = "ok", meta = {} }
+  end
+  return ret
+end
+
+function Handler:oracle_wallet_cache_clear()
+  return vim.fn.DbeeOracleWalletCacheClear()
+end
+
+---@param enabled boolean
+function Handler:oracle_wallet_set_auto_extract(enabled)
+  return vim.fn.DbeeOracleWalletSetAutoExtract(enabled == true)
 end
 
 ---@param id connection_id
