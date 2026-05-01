@@ -207,11 +207,14 @@ end
 ---@param text string
 ---@return { text: string, start: { line: integer, character: integer } }[]
 function M.extract_statements(text)
+  text = text or ""
   local statements = {}
   local current = {}
   local start_line, start_character = 0, 0
   local line, character = 0, 0
   local has_content = false
+  local state = "normal"
+  local dollar_tag = nil
 
   local function push_statement()
     local statement_text = table.concat(current)
@@ -228,25 +231,117 @@ function M.extract_statements(text)
     has_content = false
   end
 
-  for i = 1, #text do
-    local ch = text:sub(i, i)
-    if not has_content and not ch:match("%s") then
+  local function mark_content(ch)
+    if not has_content and ch:match("%S") then
       start_line = line
       start_character = character
       has_content = true
     end
+  end
 
-    if ch == ";" then
-      push_statement()
-    else
-      current[#current + 1] = ch
-    end
-
+  local function append_char(ch)
+    mark_content(ch)
+    current[#current + 1] = ch
     if ch == "\n" then
       line = line + 1
       character = 0
     else
       character = character + 1
+    end
+  end
+
+  local function append_text(segment)
+    for offset = 1, #segment do
+      append_char(segment:sub(offset, offset))
+    end
+  end
+
+  local function dollar_quote_tag(index)
+    return text:sub(index):match("^(%$[%w_]*%$)")
+  end
+
+  local i = 1
+  while i <= #text do
+    local ch = text:sub(i, i)
+    local next_ch = text:sub(i + 1, i + 1)
+
+    if state == "normal" and ch == ";" then
+      push_statement()
+      character = character + 1
+      i = i + 1
+    elseif state == "normal" and ch == "-" and next_ch == "-" then
+      state = "line_comment"
+      append_text("--")
+      i = i + 2
+    elseif state == "normal" and ch == "/" and next_ch == "*" then
+      state = "block_comment"
+      append_text("/*")
+      i = i + 2
+    elseif state == "normal" and ch == "'" then
+      state = "single_quote"
+      append_char(ch)
+      i = i + 1
+    elseif state == "normal" and ch == '"' then
+      state = "double_quote"
+      append_char(ch)
+      i = i + 1
+    elseif state == "normal" and ch == "$" then
+      local tag = dollar_quote_tag(i)
+      if tag then
+        state = "dollar_quote"
+        dollar_tag = tag
+        append_text(tag)
+        i = i + #tag
+      else
+        append_char(ch)
+        i = i + 1
+      end
+    elseif state == "line_comment" then
+      append_char(ch)
+      if ch == "\n" then
+        state = "normal"
+      end
+      i = i + 1
+    elseif state == "block_comment" then
+      if ch == "*" and next_ch == "/" then
+        append_text("*/")
+        state = "normal"
+        i = i + 2
+      else
+        append_char(ch)
+        i = i + 1
+      end
+    elseif state == "single_quote" then
+      if ch == "'" and next_ch == "'" then
+        append_text("''")
+        i = i + 2
+      else
+        append_char(ch)
+        if ch == "'" then
+          state = "normal"
+        end
+        i = i + 1
+      end
+    elseif state == "double_quote" then
+      if ch == '"' and next_ch == '"' then
+        append_text('""')
+        i = i + 2
+      else
+        append_char(ch)
+        if ch == '"' then
+          state = "normal"
+        end
+        i = i + 1
+      end
+    elseif state == "dollar_quote" and dollar_tag and text:sub(i, i + #dollar_tag - 1) == dollar_tag then
+      local tag = dollar_tag
+      append_text(tag)
+      state = "normal"
+      dollar_tag = nil
+      i = i + #tag
+    else
+      append_char(ch)
+      i = i + 1
     end
   end
 
@@ -526,6 +621,14 @@ local function scan_identifier_tokens(line)
     elseif ch == "/" and next_ch == "*" then
       local _, close_end = line:find("*/", index + 2, true)
       index = close_end and (close_end + 1) or (#line + 1)
+    elseif ch == "$" then
+      local tag = line:sub(index):match("^(%$[%w_]*%$)")
+      if tag then
+        local _, close_end = line:find(tag, index + #tag, true)
+        index = close_end and (close_end + 1) or (#line + 1)
+      else
+        index = index + 1
+      end
     elseif ch == "'" then
       index = index + 1
       while index <= #line do
@@ -618,6 +721,14 @@ local function scan_statement_tokens(statement)
     elseif ch == "/" and next_ch == "*" then
       local _, close_end = statement.text:find("*/", index + 2, true)
       index = close_end and (close_end + 1) or (#statement.text + 1)
+    elseif ch == "$" then
+      local tag = statement.text:sub(index):match("^(%$[%w_]*%$)")
+      if tag then
+        local _, close_end = statement.text:find(tag, index + #tag, true)
+        index = close_end and (close_end + 1) or (#statement.text + 1)
+      else
+        index = index + 1
+      end
     elseif ch == "'" then
       index = index + 1
       while index <= #statement.text do

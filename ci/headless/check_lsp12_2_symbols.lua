@@ -308,6 +308,21 @@ assert_eq("comment/string schema omitted", symbol_named(ignored_text, "public"),
 assert_eq("comment/string fake omitted", symbol_named(ignored_text, "public.fake"), nil)
 emit("LSP12_2_DOCSYMBOL_IGNORES_COMMENTS_AND_STRINGS", "true")
 
+local aware_split_buf, aware_split_uri = make_buffer({
+  "select '; from public.fake' as s from users",
+  "select $$; from public.fake$$ as s from users",
+  "select $tag$; from public.fake$tag$ as s from users",
+  "select * from users -- ; from public.fake",
+  "select * from users /* ; from public.fake */",
+})
+local aware_split = request(client, "textDocument/documentSymbol", {
+  textDocument = { uri = aware_split_uri },
+})
+assert_true("quote/comment split users retained", symbol_named(aware_split, "users") ~= nil)
+assert_eq("quote/comment split schema omitted", symbol_named(aware_split, "public"), nil)
+assert_eq("quote/comment split fake omitted", symbol_named(aware_split, "public.fake"), nil)
+emit("LSP12_2_DOCSYMBOL_STMT_SPLIT_QUOTE_COMMENT_AWARE", "true")
+
 local dedupe_buf, dedupe_uri = make_buffer({ "select * from public.users; select * from PUBLIC.USERS" })
 local dedupe = request(client, "textDocument/documentSymbol", {
   textDocument = { uri = dedupe_uri },
