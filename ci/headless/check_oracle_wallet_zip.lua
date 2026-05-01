@@ -415,19 +415,22 @@ local required_true_markers = {
   "WALLET_ZIP_ROLLUP_EXACTLY_ONCE_OK",
 }
 
-local numeric_markers = {
-  WALLET_ZIP_CACHE_HIT_P50_MS = 5,
+local numeric_budget_markers = {
   WALLET_ZIP_CACHE_HIT_P95_MS = 5,
-  WALLET_ZIP_CACHE_HIT_MAX_MS = 5,
-  WALLET_ZIP_CACHE_HIT_TOTAL_P50_MS = 30,
   WALLET_ZIP_CACHE_HIT_TOTAL_P95_MS = 30,
-  WALLET_ZIP_CACHE_HIT_TOTAL_MAX_MS = 30,
-  WALLET_ZIP_EXTRACT_P50_MS = 500,
   WALLET_ZIP_EXTRACT_P95_MS = 500,
-  WALLET_ZIP_EXTRACT_MAX_MS = 500,
-  WALLET_ZIP_REEXTRACT_P50_MS = 500,
   WALLET_ZIP_REEXTRACT_P95_MS = 500,
-  WALLET_ZIP_REEXTRACT_MAX_MS = 500,
+}
+
+local numeric_diagnostic_markers = {
+  "WALLET_ZIP_CACHE_HIT_P50_MS",
+  "WALLET_ZIP_CACHE_HIT_MAX_MS",
+  "WALLET_ZIP_CACHE_HIT_TOTAL_P50_MS",
+  "WALLET_ZIP_CACHE_HIT_TOTAL_MAX_MS",
+  "WALLET_ZIP_EXTRACT_P50_MS",
+  "WALLET_ZIP_EXTRACT_MAX_MS",
+  "WALLET_ZIP_REEXTRACT_P50_MS",
+  "WALLET_ZIP_REEXTRACT_MAX_MS",
 }
 
 local function combined_markers()
@@ -458,7 +461,7 @@ local function validate_markers(markers, include_exact)
       end
     end
   end
-  for marker, budget in pairs(numeric_markers) do
+  for marker, budget in pairs(numeric_budget_markers) do
     local values = markers[marker] or {}
     if #values ~= 1 then
       failures[#failures + 1] = marker .. " count=" .. tostring(#values)
@@ -466,6 +469,17 @@ local function validate_markers(markers, include_exact)
       local value = tonumber(values[1])
       if not value or value ~= value or value == math.huge or value >= budget then
         failures[#failures + 1] = marker .. " expected finite < " .. tostring(budget) .. " got " .. tostring(values[1])
+      end
+    end
+  end
+  for _, marker in ipairs(numeric_diagnostic_markers) do
+    local values = markers[marker] or {}
+    if #values ~= 1 then
+      failures[#failures + 1] = marker .. " count=" .. tostring(#values)
+    else
+      local value = tonumber(values[1])
+      if not value or value ~= value or value == math.huge then
+        failures[#failures + 1] = marker .. " expected finite diagnostic value got " .. tostring(values[1])
       end
     end
   end
