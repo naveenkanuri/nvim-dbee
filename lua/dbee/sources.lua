@@ -448,12 +448,14 @@ function sources.FileSource:add_folder(name)
     id = "folder_" .. utils.random_string()
   end
 
-  self._folders_cache[#self._folders_cache + 1] = {
+  local next_cache = vim.deepcopy(self._folders_cache)
+  next_cache[#next_cache + 1] = {
     id = id,
     name = normalized_name,
     connection_ids = {},
   }
-  write_records_atomically(self:folders_path(), self._folders_cache)
+  write_records_atomically(self:folders_path(), next_cache)
+  self._folders_cache = next_cache
 
   return id
 end
@@ -473,21 +475,29 @@ function sources.FileSource:rename_folder(folder_id, new_name)
 
   local normalized_name = vim.trim(new_name)
   local key = normalized_name:lower()
-  local target = nil
+  local target_found = false
   for _, folder in ipairs(self._folders_cache or {}) do
     if folder.id == folder_id then
-      target = folder
+      target_found = true
     elseif tostring(folder.name or ""):lower() == key then
       error("folder name already exists: " .. normalized_name)
     end
   end
 
-  if not target then
+  if not target_found then
     error("folder id not found: " .. tostring(folder_id))
   end
 
-  target.name = normalized_name
-  write_records_atomically(self:folders_path(), self._folders_cache)
+  local next_cache = vim.deepcopy(self._folders_cache)
+  for _, folder in ipairs(next_cache or {}) do
+    if folder.id == folder_id then
+      folder.name = normalized_name
+      break
+    end
+  end
+
+  write_records_atomically(self:folders_path(), next_cache)
+  self._folders_cache = next_cache
 end
 
 ---@package
@@ -500,12 +510,13 @@ function sources.FileSource:remove_folder(folder_id)
   end
 
   local found = false
-  local next_folders = {}
-  for _, folder in ipairs(self._folders_cache or {}) do
+  local next_cache = vim.deepcopy(self._folders_cache)
+  for index = #next_cache, 1, -1 do
+    local folder = next_cache[index]
     if folder.id == folder_id then
       found = true
-    else
-      next_folders[#next_folders + 1] = folder
+      table.remove(next_cache, index)
+      break
     end
   end
 
@@ -513,8 +524,8 @@ function sources.FileSource:remove_folder(folder_id)
     error("folder id not found: " .. tostring(folder_id))
   end
 
-  self._folders_cache = next_folders
-  write_records_atomically(self:folders_path(), self._folders_cache)
+  write_records_atomically(self:folders_path(), next_cache)
+  self._folders_cache = next_cache
 end
 
 ---@package
@@ -557,19 +568,25 @@ function sources.FileSource:move_connection(conn_id, target_folder_id)
     return
   end
 
-  for _, folder in ipairs(self._folders_cache or {}) do
+  local next_cache = vim.deepcopy(self._folders_cache)
+  local next_target_folder = nil
+  for _, folder in ipairs(next_cache or {}) do
     for index = #(folder.connection_ids or {}), 1, -1 do
       if folder.connection_ids[index] == conn_id then
         table.remove(folder.connection_ids, index)
       end
     end
+    if target_folder_id ~= nil and folder.id == target_folder_id then
+      next_target_folder = folder
+    end
   end
 
-  if target_folder then
-    target_folder.connection_ids[#target_folder.connection_ids + 1] = conn_id
+  if next_target_folder then
+    next_target_folder.connection_ids[#next_target_folder.connection_ids + 1] = conn_id
   end
 
-  write_records_atomically(self:folders_path(), self._folders_cache)
+  write_records_atomically(self:folders_path(), next_cache)
+  self._folders_cache = next_cache
 end
 
 ---@package

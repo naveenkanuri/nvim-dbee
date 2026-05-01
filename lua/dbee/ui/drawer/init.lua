@@ -2832,6 +2832,7 @@ function DrawerUI:get_actions()
     if not ok then
       utils.log("error", label .. ": " .. tostring(err))
     end
+    invalidate_authoritative_caches(self)
     if on_done then
       on_done()
     end

@@ -81,6 +81,22 @@ local function read_json(path)
   return decoded or {}
 end
 
+local function cache_snapshot(source)
+  return vim.inspect(source._folders_cache)
+end
+
+local function with_failing_rename(fn)
+  local original_rename = vim.loop.fs_rename
+  vim.loop.fs_rename = function()
+    return nil, "rename exploded"
+  end
+  local ok, result = pcall(fn)
+  vim.loop.fs_rename = original_rename
+  if not ok then
+    error(result)
+  end
+end
+
 local function make_temp_dir()
   local dir = vim.fn.tempname()
   vim.fn.mkdir(dir, "p")
@@ -310,6 +326,74 @@ local function run_move_contracts()
   print("FOLDER15_MOVE_CONN_IDEMPOTENT_OK=true")
 end
 
+local function run_write_fail_rollback_contracts()
+  with_source(connection_records(), {
+    { id = "folder-one", name = "One", connection_ids = {} },
+  }, function(source)
+    source:load_folders()
+    local original_disk = read_file(source:folders_path())
+    local original_cache = cache_snapshot(source)
+    with_failing_rename(function()
+      local ok, err = pcall(source.add_folder, source, "Two")
+      assert_false("add rollback write failed", ok)
+      assert_match("add rollback err", tostring(err), "could not rename temp file")
+    end)
+    assert_eq("add rollback cache unchanged", cache_snapshot(source), original_cache)
+    assert_eq("add rollback disk unchanged", read_file(source:folders_path()), original_disk)
+  end)
+  print("FOLDER15_ADD_FOLDER_WRITE_FAIL_ROLLBACK_OK=true")
+
+  with_source(connection_records(), {
+    { id = "folder-one", name = "One", connection_ids = { "conn-a" } },
+  }, function(source)
+    source:load_folders()
+    local original_disk = read_file(source:folders_path())
+    local original_cache = cache_snapshot(source)
+    with_failing_rename(function()
+      local ok, err = pcall(source.rename_folder, source, "folder-one", "Renamed")
+      assert_false("rename rollback write failed", ok)
+      assert_match("rename rollback err", tostring(err), "could not rename temp file")
+    end)
+    assert_eq("rename rollback cache unchanged", cache_snapshot(source), original_cache)
+    assert_eq("rename rollback disk unchanged", read_file(source:folders_path()), original_disk)
+  end)
+  print("FOLDER15_RENAME_FOLDER_WRITE_FAIL_ROLLBACK_OK=true")
+
+  with_source(connection_records(), {
+    { id = "folder-one", name = "One", connection_ids = { "conn-a" } },
+    { id = "folder-two", name = "Two", connection_ids = {} },
+  }, function(source)
+    source:load_folders()
+    local original_disk = read_file(source:folders_path())
+    local original_cache = cache_snapshot(source)
+    with_failing_rename(function()
+      local ok, err = pcall(source.remove_folder, source, "folder-one")
+      assert_false("remove rollback write failed", ok)
+      assert_match("remove rollback err", tostring(err), "could not rename temp file")
+    end)
+    assert_eq("remove rollback cache unchanged", cache_snapshot(source), original_cache)
+    assert_eq("remove rollback disk unchanged", read_file(source:folders_path()), original_disk)
+  end)
+  print("FOLDER15_REMOVE_FOLDER_WRITE_FAIL_ROLLBACK_OK=true")
+
+  with_source(connection_records(), {
+    { id = "folder-one", name = "One", connection_ids = { "conn-a" } },
+    { id = "folder-two", name = "Two", connection_ids = {} },
+  }, function(source)
+    source:load_folders()
+    local original_disk = read_file(source:folders_path())
+    local original_cache = cache_snapshot(source)
+    with_failing_rename(function()
+      local ok, err = pcall(source.move_connection, source, "conn-a", "folder-two")
+      assert_false("move rollback write failed", ok)
+      assert_match("move rollback err", tostring(err), "could not rename temp file")
+    end)
+    assert_eq("move rollback cache unchanged", cache_snapshot(source), original_cache)
+    assert_eq("move rollback disk unchanged", read_file(source:folders_path()), original_disk)
+  end)
+  print("FOLDER15_MOVE_CONN_WRITE_FAIL_ROLLBACK_OK=true")
+end
+
 local function run_atomic_contracts()
   with_source(connection_records(), {
     { id = "folder-one", name = "One", connection_ids = {} },
@@ -464,6 +548,7 @@ run_corrupt_sidecar_contract()
 run_add_folder_contracts()
 run_rename_remove_contracts()
 run_move_contracts()
+run_write_fail_rollback_contracts()
 run_atomic_contracts()
 run_delete_prune_contract()
 run_reload_contract()

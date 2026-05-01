@@ -486,6 +486,13 @@ local function run_drawer_action_contracts()
   session:submit("")
   Harness.drain()
 
+  fixture.drawer.cached_search_model = { sentinel = true }
+  fixture.runtime.next_input_value = "Cache Reset"
+  actions.add_folder()
+  Harness.drain()
+  assert_eq("folder mutation clears search cache", fixture.drawer.cached_search_model, nil)
+  print("FOLDER15_DRAWER_FOLDER_MUTATION_INVALIDATES_SEARCH_CACHE_OK=true")
+
   fixture.source.fail_folder_mutation = true
   refresh_count = 0
   fixture.drawer.refresh = function(self)
