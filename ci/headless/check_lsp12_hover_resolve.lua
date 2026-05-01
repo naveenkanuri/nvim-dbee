@@ -576,6 +576,14 @@ do
     current_conn_id_after = "lsp12-invalid-lag",
     authoritative_root_epoch = 2,
   })
+  local lag_line = "select * from public.users u where u.id = 1"
+  local lag_buf, lag_uri = make_buffer({ lag_line })
+  local lag_hover = hover.handle({
+    textDocument = { uri = lag_uri },
+    position = { line = 0, character = position_of(lag_line, "users") },
+  }, lag_cache)
+  assert_eq("hover invalidation lag no docs", lag_hover, nil)
+  emit("LSP12_HOVER_INVALIDATION_LAG_FAIL_CLOSED", "true")
   local lag_item = first_label(lag_cache:get_table_completion_items("public", {
     schema_quoted = true,
     include_data = true,

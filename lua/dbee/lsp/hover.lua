@@ -23,6 +23,18 @@ local function authority_available(cache)
 end
 
 ---@param cache SchemaCache
+---@return boolean
+local function cache_fresh(cache)
+  if not cache
+    or type(cache.metadata_root_epoch) ~= "function"
+    or type(cache.authoritative_root_epoch) ~= "function"
+  then
+    return false
+  end
+  return tonumber(cache:metadata_root_epoch() or 0) == tonumber(cache:authoritative_root_epoch() or 0)
+end
+
+---@param cache SchemaCache
 ---@param ref table
 ---@return table?
 local function schema_metadata(cache, ref)
@@ -119,6 +131,9 @@ function M.handle(params, cache, opts)
     return nil
   end
   if not authority_available(cache) then
+    return nil
+  end
+  if not cache_fresh(cache) then
     return nil
   end
 
