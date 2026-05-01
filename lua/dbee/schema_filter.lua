@@ -8,18 +8,11 @@ local function trim(value)
 end
 
 local function fold_id(conn_type)
-  return schema_name_canonical.fold_for(conn_type)
+  return schema_name_canonical.fold_for(conn_type, "upper")
 end
 
 local function fold_value(value, fold)
-  value = tostring(value or "")
-  if fold == "upper" then
-    return value:upper()
-  end
-  if fold == "lower" or fold == "case_insensitive" then
-    return value:lower()
-  end
-  return value
+  return schema_name_canonical.canonical(value, false, fold).canonical
 end
 
 local function validate_pattern(pattern)

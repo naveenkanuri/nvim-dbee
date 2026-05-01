@@ -8,8 +8,9 @@ local VALID_FOLDS = {
 }
 
 ---@param adapter string?
+---@param fallback? "lower"|"upper"|"identity"|"case_insensitive"
 ---@return "lower"|"upper"|"identity"|"case_insensitive"
-function M.fold_for(adapter)
+function M.fold_for(adapter, fallback)
   adapter = tostring(adapter or ""):lower()
   if adapter == "postgres" or adapter == "postgresql" or adapter == "pg" or adapter == "mysql" then
     return "lower"
@@ -22,6 +23,9 @@ function M.fold_for(adapter)
   end
   if adapter == "sqlite" or adapter == "sqlite3" or adapter == "sqlserver" or adapter == "mssql" then
     return "case_insensitive"
+  end
+  if VALID_FOLDS[fallback] then
+    return fallback
   end
   return "case_insensitive"
 end

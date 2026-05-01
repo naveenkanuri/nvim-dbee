@@ -407,6 +407,28 @@ function SchemaCache:build_from_schemas(schemas, opts)
   local previous_loaded = self.loaded_schemas or {}
   local previous_schema_lookup_exact = self.schema_lookup_exact or {}
   local previous_schema_lookup = self.schema_lookup or {}
+  local preserved_loaded_schemas = {}
+
+  local function previous_schema_for_refresh(name)
+    local candidates = {}
+    if previous_schema_lookup_exact[name] then
+      candidates[#candidates + 1] = previous_schema_lookup_exact[name]
+    end
+    if self.fold_id == "case_insensitive" then
+      local canonical_name = schema_name_canonical.canonical(name, false, self.fold_id).canonical
+      if previous_schema_lookup[canonical_name] then
+        candidates[#candidates + 1] = previous_schema_lookup[canonical_name]
+      end
+    end
+
+    for _, candidate in ipairs(candidates) do
+      if schema_name_canonical.equivalent(candidate, true, name, true, self.fold_id) then
+        return candidate
+      end
+    end
+
+    return name
+  end
 
   self.schemas = {}
   self.tables = {}
@@ -420,11 +442,11 @@ function SchemaCache:build_from_schemas(schemas, opts)
     local name = schema.name or schema.schema or schema
     if type(name) == "string" and name ~= "" and schema_filter.matches(name, self.schema_scope) then
       self.schemas[name] = true
-      local canonical_name = schema_name_canonical.canonical(name, false, self.fold_id).canonical
-      local previous_name = previous_schema_lookup_exact[name] or previous_schema_lookup[canonical_name] or name
+      local previous_name = previous_schema_for_refresh(name)
       if preserve_loaded and self:_schema_loaded_in(previous_name, previous_loaded) and previous_tables[previous_name] then
         self.tables[name] = vim.deepcopy(previous_tables[previous_name])
         self:_mark_schema_loaded(name)
+        preserved_loaded_schemas[previous_name] = name
       else
         self.tables[name] = self.tables[name] or {}
       end
@@ -433,10 +455,12 @@ function SchemaCache:build_from_schemas(schemas, opts)
 
   if preserve_loaded then
     for key, cols in pairs(previous_columns) do
-      local schema = key:match("^(.-)%.")
-      if schema and self:_schema_loaded_in(schema, self.loaded_schemas) then
-        self.columns[key] = cols
-        self.column_lru[key] = previous_lru[key]
+      local schema, table_name = key:match("^(.-)%.(.+)$")
+      local preserved_schema = schema and preserved_loaded_schemas[schema]
+      if preserved_schema then
+        local preserved_key = schema == preserved_schema and key or table_key(preserved_schema, table_name)
+        self.columns[preserved_key] = cols
+        self.column_lru[preserved_key] = previous_lru[key]
       end
     end
   end

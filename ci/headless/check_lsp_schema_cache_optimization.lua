@@ -56,6 +56,9 @@ assert_eq("postgres lower fold", schema_name_canonical.canonical("Public", false
 assert_eq("oracle upper fold", schema_name_canonical.canonical("users", false, "upper").canonical, "USERS")
 assert_eq("quoted preserved", schema_name_canonical.canonical("Public", true, "lower").canonical, "Public")
 assert_true("clickhouse identity distinct", not schema_name_canonical.equivalent("Public", false, "public", false, "identity"))
+assert_eq("schema filter canonical lower", schema_filter.fold("Public", "lower"), schema_name_canonical.canonical("Public", false, "lower").canonical)
+assert_eq("schema filter canonical upper", schema_filter.fold("public", "upper"), schema_name_canonical.canonical("public", false, "upper").canonical)
+assert_eq("schema filter legacy default fold", schema_filter.fold_id(nil), "upper")
 
 local quoted_ref = context.parse_table_ref('"Public"."Users"')
 assert_true("quoted ref parsed", quoted_ref ~= nil)
@@ -93,6 +96,14 @@ assert_true("drawer loaded schemas no hardcoded case insensitive fold", not draw
 
 local lsp_init_source = source("lua/dbee/lsp/init.lua")
 assert_true("lsp same cache identifier uses canonical helper", lsp_init_source:find("schema_name_canonical.singleflight_key", 1, true) ~= nil)
+
+local schema_filter_source = source("lua/dbee/schema_filter.lua")
+assert_true(
+  "schema filter fold routes through canonical helper",
+  schema_filter_source:find("schema_name_canonical.canonical", 1, true) ~= nil
+)
+assert_true("schema filter fold no local upper transform", not schema_filter_source:find("value:upper%("))
+assert_true("schema filter fold no local lower transform", not schema_filter_source:find("value:lower%("))
 
 local cache = SchemaCache:new({}, "lsp11-schema-cache-optimization")
 cache:build_from_metadata_rows({
@@ -168,6 +179,37 @@ pg_loaded_cache:on_schema_objects_loaded({
 })
 assert_eq("postgres unquoted loaded status", pg_loaded_cache:schema_status("public", { schema_quoted = false }), "loaded")
 assert_eq("postgres quoted exact-distinct unloaded status", pg_loaded_cache:schema_status("Public", { schema_quoted = true }), "active_unloaded")
+
+local pg_refresh_cache = scoped_cache("postgres", "lsp11-r6-refresh-exact-aware")
+pg_refresh_cache:build_from_schemas({ "public" }, { preserve_loaded = false })
+pg_refresh_cache:on_schema_objects_loaded({
+  conn_id = "lsp11-r6-refresh-exact-aware",
+  schema = "public",
+  objects = {
+    { type = "table", schema = "public", name = "users" },
+  },
+})
+pg_refresh_cache:build_from_schemas({ "public", "Public" }, { preserve_loaded = true })
+assert_eq("postgres refresh preserves original loaded schema", pg_refresh_cache:schema_status("public", { schema_quoted = false }), "loaded")
+assert_eq("postgres refresh does not load exact-distinct schema", pg_refresh_cache:schema_status("Public", { schema_quoted = true }), "active_unloaded")
+assert_eq("postgres refresh exact-distinct table items", #pg_refresh_cache:get_table_completion_items("Public", { schema_quoted = true }), 0)
+
+local sqlite_refresh_cache = scoped_cache("sqlite", "lsp11-r6-refresh-case-insensitive")
+sqlite_refresh_cache:build_from_schemas({ "Main" }, { preserve_loaded = false })
+sqlite_refresh_cache:on_schema_objects_loaded({
+  conn_id = "lsp11-r6-refresh-case-insensitive",
+  schema = "Main",
+  objects = {
+    { type = "table", schema = "Main", name = "Users" },
+  },
+})
+sqlite_refresh_cache:_store_columns("Main.Users", {
+  { name = "id", type = "integer" },
+})
+sqlite_refresh_cache:build_from_schemas({ "MAIN" }, { preserve_loaded = true })
+assert_eq("sqlite refresh preserves loaded state by canonical", sqlite_refresh_cache:schema_status("main", { schema_quoted = false }), "loaded")
+assert_eq("sqlite refresh remaps preserved table items", #sqlite_refresh_cache:get_table_completion_items("MAIN", { schema_quoted = true }), 1)
+assert_eq("sqlite refresh remaps preserved columns", sqlite_refresh_cache:get_column_completion_items("MAIN", "Users", { schema_quoted = true })[1].label, "id")
 
 local oracle_cache = scoped_cache("oracle", "lsp11-r6-oracle-case-lookup")
 oracle_cache:build_from_metadata_rows({
@@ -376,5 +418,7 @@ print("LSP11_R6_UNQUOTED_FOLDS_NOT_EXACT=true")
 print("LSP11_R6_LOADED_SCHEMA_EXACT_AWARE=true")
 print("LSP11_R6_TARGETED_GLOBAL_INDEX_O1=true")
 print("LSP11_R6_LUA_NIL_TERNARY_CLEARED=true")
+print("LSP11_R6_REFRESH_LOADED_STATE_EXACT=true")
+print("LSP11_R6_SCHEMA_FILTER_CANONICAL_ROUTED=true")
 
 vim.cmd("qa!")

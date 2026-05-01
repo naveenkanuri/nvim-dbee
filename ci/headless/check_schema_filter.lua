@@ -27,6 +27,13 @@ local schema_filter = require("dbee.schema_filter")
 local schema_filter_authority = require("dbee.schema_filter_authority")
 
 local function run_normalization_contract()
+  assert_eq("legacy default fold", schema_filter.fold_id(nil), "upper")
+  assert_eq(
+    "legacy implicit all signature",
+    schema_filter_authority.legacy_implicit_all().schema_filter_signature,
+    "schema-filter-v1|type=|fold=upper|lazy=0|include=*|exclude=0:"
+  )
+
   local opts, err = schema_filter.to_structure_options({
     include = { " fin% ", "HR", "FIN%" },
     exclude = { " fin_temp% " },

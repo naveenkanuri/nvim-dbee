@@ -5,6 +5,7 @@ vim.fn.mkdir(vim.env.XDG_STATE_HOME, "p")
 
 local server = require("dbee.lsp.server")
 local SchemaCache = require("dbee.lsp.schema_cache")
+local schema_filter = require("dbee.schema_filter")
 
 local function fail(msg)
   print("LSP_ALIAS_FATAL=true")
@@ -34,6 +35,9 @@ end
 
 local fake_handler = {
   connection_get_columns = fail_sync_fetch,
+  get_schema_filter_normalized = function()
+    return schema_filter.normalize(nil, "postgres")
+  end,
   get_authoritative_root_epoch = function()
     return 1
   end,
