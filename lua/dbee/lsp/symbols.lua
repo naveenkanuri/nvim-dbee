@@ -1,4 +1,5 @@
 local context = require("dbee.lsp.context")
+local schema_name_canonical = require("dbee.schema_name_canonical")
 
 local M = {}
 
@@ -65,19 +66,35 @@ local function read_document(uri)
   end
 
   local line_count = vim.api.nvim_buf_line_count(bufnr)
-  local last_line = math.min(line_count, MAX_DOCUMENT_LINES)
-  local lines = vim.api.nvim_buf_get_lines(bufnr, 0, last_line, false)
   local bytes = 0
   local capped = line_count > MAX_DOCUMENT_LINES
   local kept = {}
-  for _, line in ipairs(lines) do
-    local extra = #line + (#kept > 0 and 1 or 0)
-    if bytes + extra > MAX_DOCUMENT_BYTES then
-      capped = true
+  local next_line = 0
+  while next_line < line_count and #kept < MAX_DOCUMENT_LINES and bytes < MAX_DOCUMENT_BYTES do
+    local chunk_end = math.min(line_count, next_line + 128, MAX_DOCUMENT_LINES)
+    local lines = vim.api.nvim_buf_get_lines(bufnr, next_line, chunk_end, false)
+    if not lines or #lines == 0 then
       break
     end
-    kept[#kept + 1] = line
-    bytes = bytes + extra
+    for _, line in ipairs(lines) do
+      local newline_bytes = #kept > 0 and 1 or 0
+      local extra = #line + newline_bytes
+      if bytes + extra > MAX_DOCUMENT_BYTES then
+        local remaining = MAX_DOCUMENT_BYTES - bytes - newline_bytes
+        if remaining > 0 then
+          kept[#kept + 1] = line:sub(1, remaining)
+          bytes = MAX_DOCUMENT_BYTES
+        end
+        capped = true
+        break
+      end
+      kept[#kept + 1] = line
+      bytes = bytes + extra
+    end
+    next_line = next_line + #lines
+    if capped then
+      break
+    end
   end
 
   return {
@@ -107,25 +124,43 @@ local function range_key(range)
   return tostring(start.line or 0) .. ":" .. tostring(start.character or 0)
 end
 
-local function table_identity(ref)
+local function cache_fold(cache)
+  return cache and cache.fold_id or "case_insensitive"
+end
+
+local function canonical_part(value, quoted, cache)
+  return schema_name_canonical.canonical(value, quoted == true, cache_fold(cache)).canonical
+end
+
+local function document_cache_identity(cache)
+  if cache and type(cache.document_symbol_cache_identity) == "function" then
+    local ok, identity = pcall(cache.document_symbol_cache_identity, cache)
+    if ok and identity then
+      return tostring(identity)
+    end
+  end
+  return cache and ("cache:" .. tostring(cache)) or "cache:none"
+end
+
+local function table_identity(ref, cache)
   if ref.schema and ref.schema ~= "" then
     return table.concat({
       ref.schema_quoted and "Q" or "U",
-      ref.schema,
+      canonical_part(ref.schema, ref.schema_quoted, cache),
       ref.table_quoted and "Q" or "U",
-      ref.table,
+      canonical_part(ref.table, ref.table_quoted, cache),
     }, "\0")
   end
-  return table.concat({ "ROOT", ref.table_quoted and "Q" or "U", ref.table }, "\0")
+  return table.concat({ "ROOT", ref.table_quoted and "Q" or "U", canonical_part(ref.table, ref.table_quoted, cache) }, "\0")
 end
 
-local function column_identity(col)
+local function column_identity(col, cache)
   return table.concat({
-    col.schema or "",
+    canonical_part(col.schema or "", col.schema_quoted, cache),
     col.schema_quoted and "Q" or "U",
-    col.table or "",
+    canonical_part(col.table or "", col.table_quoted, cache),
     col.table_quoted and "Q" or "U",
-    col.column or "",
+    canonical_part(col.column or "", col.column_quoted, cache),
     col.column_quoted and "Q" or "U",
   }, "\0")
 end
@@ -164,7 +199,7 @@ local function build_document_symbols(uri, refs, cache, hierarchical)
   local table_order = {}
 
   local function add_schema(ref)
-    local key = (ref.schema_quoted and "Q" or "U") .. "\0" .. ref.schema
+    local key = (ref.schema_quoted and "Q" or "U") .. "\0" .. canonical_part(ref.schema, ref.schema_quoted, cache)
     if not schema_nodes[key] then
       schema_nodes[key] = make_document_symbol(ref.schema, SymbolKind.Namespace, ref.schema_range, {})
       schema_order[#schema_order + 1] = key
@@ -174,7 +209,7 @@ local function build_document_symbols(uri, refs, cache, hierarchical)
 
   local function add_table(ref)
     local known_schema = schema_known(cache, ref)
-    local table_key = table_identity(ref)
+    local table_key = table_identity(ref, cache)
     if table_nodes[table_key] then
       return table_nodes[table_key]
     end
@@ -207,7 +242,7 @@ local function build_document_symbols(uri, refs, cache, hierarchical)
 
   local seen_columns = {}
   for _, col in ipairs(refs.columns or {}) do
-    local key = column_identity(col)
+    local key = column_identity(col, cache)
     if not seen_columns[key] then
       local table_ref = {
         schema = col.schema,
@@ -217,7 +252,7 @@ local function build_document_symbols(uri, refs, cache, hierarchical)
         table_range = col.range,
         ref_range = col.range,
       }
-      local table_node = table_nodes[table_identity(table_ref)]
+      local table_node = table_nodes[table_identity(table_ref, cache)]
       if table_node then
         table_node.children = table_node.children or {}
         table_node.children[#table_node.children + 1] =
@@ -274,7 +309,13 @@ function M.handle_document_symbol(params, cache, opts)
   end
 
   local hierarchical = opts.force_flat ~= true and hierarchical_supported(opts.client_capabilities)
-  local cache_key = table.concat({ uri, tostring(doc.bufnr), tostring(doc.changedtick), hierarchical and "tree" or "flat" }, "|")
+  local cache_key = table.concat({
+    uri,
+    tostring(doc.bufnr),
+    tostring(doc.changedtick),
+    document_cache_identity(cache),
+    hierarchical and "tree" or "flat",
+  }, "|")
   local cached = document_cache[uri]
   if cached and cached.key == cache_key then
     return copy(cached.result)

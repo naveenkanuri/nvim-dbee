@@ -2180,6 +2180,21 @@ function SchemaCache:cache_identity()
   return self.cache_identity_value or tostring(self.conn_id or "")
 end
 
+---@return string
+function SchemaCache:document_symbol_cache_identity()
+  local scope = self.schema_scope or {}
+  return table.concat({
+    tostring(self:cache_identity()),
+    tostring(self.conn_id or ""),
+    tostring(epoch_authority.cache_epoch(self)),
+    tostring(self:generation()),
+    tostring(self.fold_id or ""),
+    tostring(self.schema_filter_signature or ""),
+    scope.fail_closed == true and "fail_closed" or "scope_available",
+    tostring(self.root_mode or ""),
+  }, "|")
+end
+
 ---@return SchemaFilterAuthority
 function SchemaCache:read_lsp_authority()
   return schema_filter_authority.read(self.handler, self.conn_id)
