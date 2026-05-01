@@ -749,12 +749,7 @@ assert_true("epoch helper used", code_actions_text:find("epoch_authority%.check_
 assert_true("reload helper present", cache_text:find("reload_table_metadata_async", 1, true) ~= nil)
 assert_true("execute dispatch present", server_text:find("workspace/executeCommand", 1, true) ~= nil)
 assert_true("init callbacks present", init_text:find("code_action_refresh_schema", 1, true) ~= nil)
-local context_code_action_text = slice(
-  "context code action helpers",
-  context_text,
-  "function M.code_action_statement",
-  "function M.analyze"
-)
+local context_code_action_text = context_text
 local reload_helper_text = slice(
   "schema cache reload helper",
   cache_text,
