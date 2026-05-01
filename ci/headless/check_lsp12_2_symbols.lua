@@ -144,6 +144,16 @@ local function child_named(item, name)
   return nil
 end
 
+local function child_count(item, name)
+  local count = 0
+  for _, child in ipairs(item and item.children or {}) do
+    if child.name == name then
+      count = count + 1
+    end
+  end
+  return count
+end
+
 local cache, handler = make_cache()
 local client = server.create(cache)({}, {})
 local init = request(client, "initialize", {
@@ -224,6 +234,132 @@ local ambiguous = request(client, "textDocument/documentSymbol", {
 local ambiguous_users = child_named(symbol_named(ambiguous, "public"), "users")
 assert_eq("ambiguous bare column omitted", child_named(ambiguous_users, "id"), nil)
 emit("LSP12_2_DOCSYMBOL_COLUMN_SCOPE_SAFE", "true")
+
+local multiline_from_buf, multiline_from_uri = make_buffer({ "select * from", "public.users" })
+local multiline_from = request(client, "textDocument/documentSymbol", {
+  textDocument = { uri = multiline_from_uri },
+})
+assert_true("multiline from users", child_named(symbol_named(multiline_from, "public"), "users") ~= nil)
+emit("LSP12_2_DOCSYMBOL_MULTILINE_FROM_OK", "true")
+
+local multiline_join_buf, multiline_join_uri = make_buffer({
+  "select *",
+  "from",
+  "  public.users u",
+  "join",
+  "  public.orders o",
+  "on u.id = o.user_id",
+})
+local multiline_join = request(client, "textDocument/documentSymbol", {
+  textDocument = { uri = multiline_join_uri },
+})
+local multiline_join_public = symbol_named(multiline_join, "public")
+assert_true("multiline join users", child_named(multiline_join_public, "users") ~= nil)
+assert_true("multiline join orders", child_named(multiline_join_public, "orders") ~= nil)
+emit("LSP12_2_DOCSYMBOL_MULTILINE_JOIN_OK", "true")
+
+local multiline_column_buf, multiline_column_uri = make_buffer({
+  "select",
+  "  id,",
+  "  name",
+  "from users",
+})
+local multiline_column = request(client, "textDocument/documentSymbol", {
+  textDocument = { uri = multiline_column_uri },
+})
+local multiline_column_users = symbol_named(multiline_column, "users")
+assert_true("multiline column id", child_named(multiline_column_users, "id") ~= nil)
+assert_true("multiline column name", child_named(multiline_column_users, "name") ~= nil)
+emit("LSP12_2_DOCSYMBOL_MULTILINE_COLUMN_OK", "true")
+
+local identifier_buf, identifier_uri = make_buffer({
+  "select 1, id, count(*), 'literal', id as alias from users",
+})
+local identifier_only = request(client, "textDocument/documentSymbol", {
+  textDocument = { uri = identifier_uri },
+})
+local identifier_users = symbol_named(identifier_only, "users")
+assert_true("identifier id retained", child_named(identifier_users, "id") ~= nil)
+assert_eq("numeric literal omitted", child_named(identifier_users, "1"), nil)
+assert_eq("function omitted", child_named(identifier_users, "count"), nil)
+assert_eq("string literal omitted", child_named(identifier_users, "literal"), nil)
+assert_eq("alias omitted", child_named(identifier_users, "alias"), nil)
+emit("LSP12_2_DOCSYMBOL_SELECT_LIST_IDENTIFIERS_ONLY", "true")
+
+local dedupe_buf, dedupe_uri = make_buffer({ "select * from public.users; select * from PUBLIC.USERS" })
+local dedupe = request(client, "textDocument/documentSymbol", {
+  textDocument = { uri = dedupe_uri },
+})
+local dedupe_public = symbol_named(dedupe, "public")
+assert_true("canonical dedupe parent", dedupe_public ~= nil)
+assert_eq("canonical dedupe users", child_count(dedupe_public, "users"), 1)
+assert_eq("canonical dedupe uppercase parent", symbol_named(dedupe, "PUBLIC"), nil)
+emit("LSP12_2_DOCSYMBOL_DEDUPE_CANONICAL", "true")
+
+local cache_key_buf, cache_key_uri = make_buffer({ "select * from public.users" })
+symbols._reset_cache()
+local known_symbols = symbols.handle_document_symbol({
+  textDocument = { uri = cache_key_uri },
+}, cache, {
+  client_capabilities = {
+    textDocument = {
+      documentSymbol = {
+        hierarchicalDocumentSymbolSupport = true,
+      },
+    },
+  },
+})
+assert_true("cache identity known schema", child_named(symbol_named(known_symbols, "public"), "users") ~= nil)
+local other_handler = make_handler({ conn_id = "lsp12-2-other" })
+local other_cache = SchemaCache:new(other_handler, "lsp12-2-other")
+other_cache:build_from_metadata_rows({
+  { schema_name = "audit", table_name = "users", obj_type = "table" },
+}, { root_epoch = epoch_ref.value })
+local unknown_symbols = symbols.handle_document_symbol({
+  textDocument = { uri = cache_key_uri },
+}, other_cache, {
+  client_capabilities = {
+    textDocument = {
+      documentSymbol = {
+        hierarchicalDocumentSymbolSupport = true,
+      },
+    },
+  },
+})
+assert_eq("cache identity no stale schema parent", symbol_named(unknown_symbols, "public"), nil)
+assert_true("cache identity reparsed root", symbol_named(unknown_symbols, "public.users") ~= nil)
+emit("LSP12_2_DOCSYMBOL_CACHE_KEY_INCLUDES_CACHE_IDENTITY", "true")
+
+local long_line_buf, long_line_uri = make_buffer({
+  "select * from users " .. string.rep("x", 1024 * 1024 + 128),
+})
+local long_line = request(client, "textDocument/documentSymbol", {
+  textDocument = { uri = long_line_uri },
+})
+assert_true("byte cap retained early ref", symbol_named(long_line, "users") ~= nil)
+emit("LSP12_2_DOCSYMBOL_BYTE_CAP_STREAMED", "true")
+
+local dense_refs = {}
+for i = 1, 2000 do
+  dense_refs[#dense_refs + 1] = "public.t" .. tostring(i)
+end
+local dense_buf, dense_uri = make_buffer({ "select * from " .. table.concat(dense_refs, ", ") })
+local dense_start = (vim.uv or vim.loop).hrtime()
+local dense = symbols.handle_document_symbol({
+  textDocument = { uri = dense_uri },
+}, cache, {
+  client_capabilities = {
+    textDocument = {
+      documentSymbol = {
+        hierarchicalDocumentSymbolSupport = true,
+      },
+    },
+  },
+})
+local dense_elapsed_ms = ((vim.uv or vim.loop).hrtime() - dense_start) / 1e6
+assert_true("dense refs populated", child_named(symbol_named(dense, "public"), "t2000") ~= nil)
+assert_true("dense refs bounded", dense_elapsed_ms < 50)
+emit("LSP12_2_DOCSYMBOL_DENSE_REFS_BOUNDED", "true")
 
 local large_lines = {}
 for i = 1, 10000 do
@@ -440,7 +576,8 @@ local synthetic = {}
 for _, marker in ipairs(rollup.required_lsp12_2_true_markers or {}) do
   synthetic[#synthetic + 1] = marker .. "=true"
 end
-synthetic[#synthetic + 1] = "LSP12_2_PERF_SCENARIOS_COUNT=4"
+synthetic[#synthetic + 1] = "LSP12_2_PERF_SCENARIOS_COUNT=5"
+synthetic[#synthetic + 1] = "LSP12_2_MEASURED_COUNT=100"
 local valid = rollup.evaluate_lsp12_2(synthetic)
 assert_true("rollup valid", valid.ok)
 local duplicate = vim.deepcopy(synthetic)

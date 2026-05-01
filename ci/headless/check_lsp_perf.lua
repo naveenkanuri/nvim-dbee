@@ -2561,6 +2561,7 @@ local function run_lsp12_perf_section()
 end
 
 local LSP12_2_SCENARIOS = {}
+local LSP12_2_MEASURED_COUNT = 100
 
 local function lsp12_2_register(spec)
   LSP12_2_SCENARIOS[#LSP12_2_SCENARIOS + 1] = spec
@@ -2584,11 +2585,34 @@ local function lsp12_2_large_lines()
   return lines
 end
 
+local function lsp12_2_dense_ref_lines()
+  local refs = {}
+  for i = 1, 2000 do
+    refs[#refs + 1] = string.format("SCHEMA_001.TABLE_%06d", i)
+  end
+  return { "SELECT * FROM " .. table.concat(refs, ", ") }
+end
+
 local function lsp12_2_before_document()
   local cache = make_cache(100, DEFAULT_COLUMNS_PER_TABLE, {
     preload_columns = false,
   })
   local bufnr, uri = make_buffer(lsp12_2_large_lines())
+  local client, client_id = start_lsp(cache, bufnr)
+  return {
+    cache = cache,
+    bufnr = bufnr,
+    uri = uri,
+    client = client,
+    client_id = client_id,
+  }
+end
+
+local function lsp12_2_before_dense_document()
+  local cache = make_cache(2000, DEFAULT_COLUMNS_PER_TABLE, {
+    preload_columns = false,
+  })
+  local bufnr, uri = make_buffer(lsp12_2_dense_ref_lines())
   local client, client_id = start_lsp(cache, bufnr)
   return {
     cache = cache,
@@ -2665,6 +2689,22 @@ lsp12_2_register({
 })
 
 lsp12_2_register({
+  slug = "DOCSYMBOL_DENSE_REFS",
+  kind = "document",
+  before = lsp12_2_before_dense_document,
+  before_iteration = function(state)
+    vim.api.nvim_buf_set_lines(state.bufnr, 0, 1, false, lsp12_2_dense_ref_lines())
+  end,
+  run = function(state)
+    local result, elapsed = lsp12_2_document_symbol(state)
+    if not (type(result) == "table" and #result > 0) then
+      error("documentSymbol dense refs returned no symbols")
+    end
+    return elapsed
+  end,
+})
+
+lsp12_2_register({
   slug = "WORKSPACESYMBOL_ALL_MATCH",
   kind = "workspace",
   before = lsp12_2_before_workspace,
@@ -2692,13 +2732,14 @@ lsp12_2_register({
 
 local function run_lsp12_2_perf_section()
   emit("LSP12_2_PERF_SCENARIOS_COUNT", #LSP12_2_SCENARIOS)
+  emit("LSP12_2_MEASURED_COUNT", LSP12_2_MEASURED_COUNT)
   local document_samples = {}
   local workspace_samples = {}
 
   for _, spec in ipairs(LSP12_2_SCENARIOS) do
     local samples = {}
     local state = spec.before()
-    for iteration = 1, WARMUP_COUNT + MEASURED_COUNT do
+    for iteration = 1, WARMUP_COUNT + LSP12_2_MEASURED_COUNT do
       if spec.before_iteration then
         spec.before_iteration(state, iteration)
       end

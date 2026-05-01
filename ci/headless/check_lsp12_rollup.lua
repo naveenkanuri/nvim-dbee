@@ -84,6 +84,14 @@ local required_lsp12_2_true_markers = {
   "LSP12_2_DOCSYMBOL_UNKNOWN_QUALIFIED_FLAT",
   "LSP12_2_DOCSYMBOL_AUTHORITY_NEUTRAL",
   "LSP12_2_DOCSYMBOL_COLUMN_SCOPE_SAFE",
+  "LSP12_2_DOCSYMBOL_MULTILINE_FROM_OK",
+  "LSP12_2_DOCSYMBOL_MULTILINE_JOIN_OK",
+  "LSP12_2_DOCSYMBOL_MULTILINE_COLUMN_OK",
+  "LSP12_2_DOCSYMBOL_DENSE_REFS_BOUNDED",
+  "LSP12_2_DOCSYMBOL_CACHE_KEY_INCLUDES_CACHE_IDENTITY",
+  "LSP12_2_DOCSYMBOL_SELECT_LIST_IDENTIFIERS_ONLY",
+  "LSP12_2_DOCSYMBOL_DEDUPE_CANONICAL",
+  "LSP12_2_DOCSYMBOL_BYTE_CAP_STREAMED",
   "LSP12_2_DOCSYMBOL_FULL_DOC_BOUNDED",
   "LSP12_2_DOCSYMBOL_LARGE_BUFFER_BOUNDED",
   "LSP12_2_DOCSYMBOL_BUFFER_CACHE_INVALIDATED",
@@ -184,12 +192,13 @@ local function evaluate_lsp12_2(lines)
   for _, label in ipairs(required_lsp12_2_true_markers) do
     require_marker(label, { ["true"] = true })
   end
-  require_marker("LSP12_2_PERF_SCENARIOS_COUNT", { ["4"] = true })
+  require_marker("LSP12_2_PERF_SCENARIOS_COUNT", { ["5"] = true })
+  require_marker("LSP12_2_MEASURED_COUNT", { ["100"] = true })
 
   return {
     ok = #failures == 0,
     failures = failures,
-    checked = #required_lsp12_2_true_markers + 1,
+    checked = #required_lsp12_2_true_markers + 2,
   }
 end
 
@@ -243,7 +252,8 @@ local function selftest()
   for _, marker in ipairs(required_lsp12_2_true_markers) do
     lsp12_2_lines[#lsp12_2_lines + 1] = marker .. "=true"
   end
-  lsp12_2_lines[#lsp12_2_lines + 1] = "LSP12_2_PERF_SCENARIOS_COUNT=4"
+  lsp12_2_lines[#lsp12_2_lines + 1] = "LSP12_2_PERF_SCENARIOS_COUNT=5"
+  lsp12_2_lines[#lsp12_2_lines + 1] = "LSP12_2_MEASURED_COUNT=100"
   local lsp12_2_valid = evaluate_lsp12_2(lsp12_2_lines)
   if not lsp12_2_valid.ok then
     fail({ "selftest valid LSP12.2 log failed: " .. table.concat(lsp12_2_valid.failures, "; ") })
