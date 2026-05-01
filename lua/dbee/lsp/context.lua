@@ -691,7 +691,68 @@ local function parse_statement_table_refs(statement)
     end
   end
 
-  for _, keyword in ipairs({ "from", "join", "update", "into" }) do
+  local function first_clause_boundary(text, start_index)
+    local boundary = nil
+    for _, keyword in ipairs({ "where", "join", "on", "group", "order", "having", "limit", "union" }) do
+      local found = text:find("%f[%a]" .. keyword_pattern(keyword) .. "%f[%A]", start_index)
+      if found and (not boundary or found < boundary) then
+        boundary = found
+      end
+    end
+    return boundary
+  end
+
+  local function add_from_list_matches()
+    local pattern = "()%f[%a]" .. keyword_pattern("from") .. "%f[%A]%s+()"
+    local init = 1
+    while true do
+      local match_start, list_start = statement.text:find(pattern, init)
+      if not match_start then
+        break
+      end
+      local boundary = first_clause_boundary(statement.text, list_start)
+      local list_end = boundary and (boundary - 1) or #statement.text
+      local item_start = list_start
+      while item_start <= list_end do
+        local comma = statement.text:find(",", item_start, true)
+        local item_end = comma and math.min(comma - 1, list_end) or list_end
+        local chunk = statement.text:sub(item_start, item_end)
+        local leading, ref, alias = chunk:match("^(%s*)([^%s,;%(%)]+)%s*([%w_]*)")
+        if ref then
+          local ref_start = item_start + #leading
+          local parsed = M.parse_table_ref(ref)
+          if parsed then
+            local alias_lower = alias and alias:lower() or ""
+            if sql_keywords_set[alias_lower] then
+              alias = nil
+              alias_lower = ""
+            end
+            matches[#matches + 1] = {
+              pos = match_start,
+              specificity = 1,
+              ref_start = ref_start,
+              ref_end = ref_start + #ref,
+              ref = ref,
+              alias = alias and alias ~= "" and alias or nil,
+              alias_key = alias_lower ~= "" and alias_lower or nil,
+              schema = parsed.schema,
+              schema_quoted = parsed.schema_quoted,
+              table = parsed.table,
+              table_quoted = parsed.table_quoted,
+            }
+          end
+        end
+        if not comma or comma > list_end then
+          break
+        end
+        item_start = comma + 1
+      end
+      init = list_end + 1
+    end
+  end
+
+  add_from_list_matches()
+  for _, keyword in ipairs({ "join", "update", "into" }) do
     add_matches(keyword, 1)
   end
 

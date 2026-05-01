@@ -281,6 +281,12 @@ local ambiguous_hover = request_hover(client, ambiguous_uri, 0, position_of(ambi
 assert_eq("ambiguous select-list", ambiguous_hover, nil)
 emit("LSP12_HOVER_SELECT_LIST_AMBIGUOUS_NIL", "true")
 
+local comma_from_line = "SELECT id FROM public.users, public.orders"
+local comma_from_buf, comma_from_uri = make_buffer({ comma_from_line })
+local comma_from_hover = request_hover(client, comma_from_uri, 0, position_of(comma_from_line, "id"))
+assert_eq("comma from ambiguous select-list", comma_from_hover, nil)
+emit("LSP12_HOVER_COMMA_FROM_AMBIGUOUS_NIL", "true")
+
 assert_eq("hover sync db calls", handler.counters.sync, 0)
 assert_eq("hover async db calls", handler.counters.async, 0)
 emit("LSP12_HOVER_NO_SYNC_DB", "true")
