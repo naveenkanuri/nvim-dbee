@@ -118,7 +118,16 @@ local function format_table(metadata, markdown)
     "Type: " .. tostring(metadata.table_type or "table"),
   }
   if metadata.column_count ~= nil then
-    lines[#lines + 1] = "Columns loaded: " .. tostring(metadata.column_count)
+    local column_line = "Columns loaded: " .. tostring(metadata.column_count)
+    if metadata.columns_truncated and metadata.columns_truncated_at then
+      column_line = column_line
+        .. " (showing first "
+        .. tostring(metadata.columns_truncated_at)
+        .. " of "
+        .. tostring(metadata.column_count)
+        .. " columns)"
+    end
+    lines[#lines + 1] = column_line
   end
   if metadata.row_count ~= nil then
     lines[#lines + 1] = "Rows: " .. tostring(metadata.row_count)
@@ -134,8 +143,9 @@ local function format_table(metadata, markdown)
       local typ = col.type and (" " .. (markdown and inline_code(col.type) or tostring(col.type))) or ""
       lines[#lines + 1] = "- " .. label .. typ
     end
-    if #columns > limit then
-      lines[#lines + 1] = "- +" .. tostring(#columns - limit) .. " more"
+    local total = metadata.column_count or #columns
+    if total > limit then
+      lines[#lines + 1] = "- +" .. tostring(total - limit) .. " more"
     end
   end
   return join_lines(lines)

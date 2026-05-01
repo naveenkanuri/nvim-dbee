@@ -301,6 +301,29 @@ assert_eq("hover async db calls", handler.counters.async, 0)
 emit("LSP12_HOVER_NO_SYNC_DB", "true")
 emit("LSP12_HOVER_NO_ASYNC_DB", "true")
 
+cache:_upsert_table_index("public", "wide_table", "table")
+local wide_columns = {}
+for i = 1, 250 do
+  wide_columns[#wide_columns + 1] = { name = "col_" .. tostring(i), type = "text" }
+end
+cache:_store_columns("public.wide_table", wide_columns)
+local wide_meta = cache:get_table_metadata("public", "wide_table", {
+  schema_quoted = true,
+  table_quoted = true,
+  max_columns = 20,
+})
+assert_eq("wide table total count", wide_meta.column_count, 250)
+assert_true("wide table copied bounded", #wide_meta.columns <= 20 and wide_meta.columns_copied <= 20)
+assert_true("wide table truncated", wide_meta.columns_truncated == true)
+local wide_docs = docs.format_hover(wide_meta, {})
+assert_true("wide table truncation doc", wide_docs.value:find("showing first 20 of 250 columns", 1, true) ~= nil)
+local wide_col = cache:get_column_metadata("public", "wide_table", "col_250", {
+  schema_quoted = true,
+  table_quoted = true,
+})
+assert_eq("wide column direct lookup", wide_col and wide_col.column, "col_250")
+emit("LSP12_HOVER_WIDE_TABLE_BOUNDED_COPY", "true")
+
 handler.counters.sync = 0
 handler.counters.async = 0
 

@@ -72,6 +72,23 @@ local function copy_items(items)
   return vim.deepcopy(items or {})
 end
 
+---@param columns Column[]?
+---@param max_columns integer?
+---@return Column[]? copied
+---@return integer copied_count
+local function copy_column_preview(columns, max_columns)
+  if not columns then
+    return nil, 0
+  end
+  local limit = math.max(0, tonumber(max_columns) or 20)
+  limit = math.min(#columns, limit)
+  local copied = {}
+  for i = 1, limit do
+    copied[#copied + 1] = vim.deepcopy(columns[i])
+  end
+  return copied, limit
+end
+
 ---@param schema string
 ---@param name string
 ---@param table_type string?
@@ -2124,7 +2141,7 @@ end
 
 ---@param schema string?
 ---@param table_name string
----@param opts? { schema_quoted?: boolean, table_quoted?: boolean }
+---@param opts? { schema_quoted?: boolean, table_quoted?: boolean, max_columns?: integer }
 ---@return table? metadata, string? reason
 function SchemaCache:get_table_metadata(schema, table_name, opts)
   opts = opts or {}
@@ -2150,13 +2167,18 @@ function SchemaCache:get_table_metadata(schema, table_name, opts)
 
   local key = table_key(actual_schema, actual_table)
   local columns = self.columns[key]
+  local copied_columns, copied_count = copy_column_preview(columns, opts.max_columns)
+  local column_count = columns and #columns or nil
   return {
     kind = "table",
     schema = actual_schema,
     table = actual_table,
     table_type = info.type or "table",
-    columns = columns and vim.deepcopy(columns) or nil,
-    column_count = columns and #columns or nil,
+    columns = copied_columns,
+    column_count = column_count,
+    columns_copied = copied_count,
+    columns_truncated = column_count ~= nil and copied_count < column_count,
+    columns_truncated_at = column_count ~= nil and copied_count or nil,
     columns_loaded = columns ~= nil,
   }
 end
@@ -2168,12 +2190,27 @@ end
 ---@return table? metadata, string? reason
 function SchemaCache:get_column_metadata(schema, table_name, column_name, opts)
   opts = opts or {}
-  local table_meta, reason = self:get_table_metadata(schema, table_name, opts)
-  if not table_meta then
+  local scope, reason = self:_fresh_lsp_scope()
+  if not scope then
     return nil, reason
   end
 
-  local key = table_key(table_meta.schema, table_meta.table)
+  local actual_schema, actual_table
+  if schema and schema ~= "" then
+    actual_table, actual_schema = self:find_table_in_schema(schema, table_name, opts)
+  else
+    actual_table, actual_schema = self:find_table(table_name, { table_quoted = opts.table_quoted })
+  end
+  if not actual_schema or not actual_table or not self:schema_in_current_scope(actual_schema, scope) then
+    return nil, "missing_or_filtered"
+  end
+
+  local info = (self.tables[actual_schema] or {})[actual_table]
+  if not info then
+    return nil, "missing"
+  end
+
+  local key = table_key(actual_schema, actual_table)
   local col = self:_find_cached_column(key, column_name, opts.column_quoted)
   if not col then
     return nil, "missing_column"
@@ -2181,8 +2218,8 @@ function SchemaCache:get_column_metadata(schema, table_name, column_name, opts)
 
   local meta = vim.deepcopy(col)
   meta.kind = "column"
-  meta.schema = table_meta.schema
-  meta.table = table_meta.table
+  meta.schema = actual_schema
+  meta.table = actual_table
   meta.column = col.name
   meta.type = col.type
   return meta
