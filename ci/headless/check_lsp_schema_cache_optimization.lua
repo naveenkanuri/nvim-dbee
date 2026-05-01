@@ -52,6 +52,7 @@ end
 assert_true("canonical helper api present", type(schema_name_canonical.canonical) == "function")
 assert_true("canonical equivalent api present", type(schema_name_canonical.equivalent) == "function")
 assert_true("canonical fold api present", type(schema_name_canonical.fold_for) == "function")
+assert_true("canonical probe candidates api present", type(schema_name_canonical.probe_candidates) == "function")
 assert_eq("postgres lower fold", schema_name_canonical.canonical("Public", false, "lower").canonical, "public")
 assert_eq("oracle upper fold", schema_name_canonical.canonical("users", false, "upper").canonical, "USERS")
 assert_eq("quoted preserved", schema_name_canonical.canonical("Public", true, "lower").canonical, "Public")
@@ -104,6 +105,11 @@ assert_true(
 )
 assert_true("schema filter fold no local upper transform", not schema_filter_source:find("value:upper%("))
 assert_true("schema filter fold no local lower transform", not schema_filter_source:find("value:lower%("))
+
+local schema_cache_source = source("lua/dbee/lsp/schema_cache.lua")
+assert_true("schema cache no direct upper transform", not schema_cache_source:find(":upper%("))
+assert_true("schema cache no direct lower transform", not schema_cache_source:find(":lower%("))
+assert_true("schema cache no fixed upper canonical probe", not schema_cache_source:find('canonical%([^%)]-"upper"'))
 
 local cache = SchemaCache:new({}, "lsp11-schema-cache-optimization")
 cache:build_from_metadata_rows({
@@ -242,6 +248,53 @@ clickhouse_cache:build_from_metadata_rows({
 assert_eq("clickhouse schema lookup preserves case", clickhouse_cache:find_schema("Sales"), "Sales")
 assert_eq("clickhouse schema lookup rejects folded case", clickhouse_cache:find_schema("SALES"), nil)
 assert_eq("clickhouse table lookup rejects folded case", clickhouse_cache:find_table_in_schema("Sales", "USERS"), nil)
+
+local function column_probe_calls(conn_type, schema, table_name)
+  local scope = assert(schema_filter.normalize(nil, conn_type))
+  local calls = {}
+  local probe_cache = SchemaCache:new({
+    get_schema_filter_normalized = function()
+      return scope
+    end,
+    connection_get_columns = function(_, _, opts)
+      calls[#calls + 1] = {
+        schema = opts.schema,
+        table = opts.table,
+      }
+      return {}
+    end,
+  }, "lsp11-r6-probe-" .. conn_type)
+  probe_cache:get_columns(schema, table_name, {
+    probe_if_missing = true,
+    schema_quoted = false,
+    table_quoted = false,
+    materializations = { "table" },
+  })
+  return calls
+end
+
+local function has_probe(calls, field, value)
+  for _, call in ipairs(calls) do
+    if call[field] == value then
+      return true
+    end
+  end
+  return false
+end
+
+local pg_probe_calls = column_probe_calls("postgres", "Public", "Users")
+assert_true("postgres probe adds lower schema candidate", has_probe(pg_probe_calls, "schema", "public"))
+assert_true("postgres probe adds lower table candidate", has_probe(pg_probe_calls, "table", "users"))
+assert_true("postgres probe does not add uppercase schema candidate", not has_probe(pg_probe_calls, "schema", "PUBLIC"))
+assert_true("postgres probe does not add uppercase table candidate", not has_probe(pg_probe_calls, "table", "USERS"))
+
+local oracle_probe_calls = column_probe_calls("oracle", "app", "users")
+assert_true("oracle probe adds uppercase schema candidate", has_probe(oracle_probe_calls, "schema", "APP"))
+assert_true("oracle probe adds uppercase table candidate", has_probe(oracle_probe_calls, "table", "USERS"))
+
+local clickhouse_probe_calls = column_probe_calls("clickhouse", "Sales", "Users")
+assert_true("clickhouse probe does not add uppercase schema candidate", not has_probe(clickhouse_probe_calls, "schema", "SALES"))
+assert_true("clickhouse probe does not add uppercase table candidate", not has_probe(clickhouse_probe_calls, "table", "USERS"))
 
 local baseline_all_count = #cache:get_all_table_completion_items()
 local mutable_copy = cache:get_all_table_completion_items()
@@ -420,5 +473,6 @@ print("LSP11_R6_TARGETED_GLOBAL_INDEX_O1=true")
 print("LSP11_R6_LUA_NIL_TERNARY_CLEARED=true")
 print("LSP11_R6_REFRESH_LOADED_STATE_EXACT=true")
 print("LSP11_R6_SCHEMA_FILTER_CANONICAL_ROUTED=true")
+print("LSP11_R6_PROBE_FALLBACK_ADAPTER_AWARE=true")
 
 vim.cmd("qa!")

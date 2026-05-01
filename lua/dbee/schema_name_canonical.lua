@@ -77,6 +77,30 @@ function M.equivalent(a, a_quoted, b, b_quoted, adapter_fold)
 end
 
 ---@param name string?
+---@param quoted boolean?
+---@param adapter_fold string?
+---@return string[]
+function M.probe_candidates(name, quoted, adapter_fold)
+  local exact = tostring(name or "")
+  if exact == "" then
+    return {}
+  end
+
+  local out = {}
+  local seen = {}
+  local function add(value)
+    if value ~= "" and not seen[value] then
+      seen[value] = true
+      out[#out + 1] = value
+    end
+  end
+
+  add(exact)
+  add(M.canonical(exact, quoted == true, adapter_fold).canonical)
+  return out
+end
+
+---@param name string?
 ---@param adapter_fold string?
 ---@return boolean
 function M.is_unquoted_canonical(name, adapter_fold)

@@ -51,19 +51,10 @@ local function table_key(schema, table_name)
   return (schema or "_default") .. "." .. table_name
 end
 
----@param ... string?
----@return string[]
-local function unique_nonempty(...)
-  local out = {}
-  local seen = {}
-  for i = 1, select("#", ...) do
-    local value = select(i, ...)
-    if value and value ~= "" and not seen[value] then
-      seen[value] = true
-      out[#out + 1] = value
-    end
-  end
-  return out
+---@param value string?
+---@return string
+local function case_insensitive_key(value)
+  return schema_name_canonical.canonical(value, false, "case_insensitive").canonical
 end
 
 ---@param materializations string[]
@@ -346,7 +337,7 @@ function SchemaCache:build_from_metadata_rows(rows)
   for _, row in ipairs(rows) do
     local schema, tname, otype
     for k, v in pairs(row) do
-      local lk = k:lower()
+      local lk = case_insensitive_key(k)
       if lk == "schema_name" then
         schema = v
       elseif lk == "table_name" then
@@ -497,6 +488,43 @@ function SchemaCache:_resolve_lookup(exact_lookup, folded_lookup, value, quoted)
     return (folded_lookup and folded_lookup[canonical]) or (exact_lookup and exact_lookup[canonical])
   end
   return (exact_lookup and exact_lookup[value]) or (folded_lookup and folded_lookup[canonical])
+end
+
+---@private
+---@param out string[]
+---@param seen table<string, boolean>
+---@param value string?
+local function add_probe_candidate(out, seen, value)
+  if value and value ~= "" and not seen[value] then
+    seen[value] = true
+    out[#out + 1] = value
+  end
+end
+
+---@private
+---@param value string?
+---@param quoted boolean?
+---@return string[]
+function SchemaCache:_identifier_probe_candidates(value, quoted)
+  return schema_name_canonical.probe_candidates(value, quoted, self.fold_id)
+end
+
+---@private
+---@param schema string?
+---@param quoted boolean?
+---@param include_default boolean?
+---@return string[]
+function SchemaCache:_schema_probe_candidates(schema, quoted, include_default)
+  local out = {}
+  local seen = {}
+  add_probe_candidate(out, seen, self:find_schema(schema, { quoted = quoted }))
+  for _, candidate in ipairs(self:_identifier_probe_candidates(schema, quoted)) do
+    add_probe_candidate(out, seen, candidate)
+  end
+  if include_default then
+    add_probe_candidate(out, seen, "_default")
+  end
+  return out
 end
 
 ---@private
@@ -2143,16 +2171,8 @@ function SchemaCache:get_columns_async(schema, table_name, opts)
   local schema_candidates = { schema }
   local table_candidates = { table_name }
   if opts.probe_if_missing then
-    schema_candidates = unique_nonempty(
-      self:find_schema(schema, { quoted = opts.schema_quoted }),
-      schema,
-      schema_name_canonical.canonical(schema, false, "upper").canonical,
-      "_default"
-    )
-    table_candidates = unique_nonempty(
-      table_name,
-      table_name:upper()
-    )
+    schema_candidates = self:_schema_probe_candidates(schema, opts.schema_quoted, true)
+    table_candidates = self:_identifier_probe_candidates(table_name, opts.table_quoted)
   end
 
   local entry = {
@@ -2430,11 +2450,16 @@ function SchemaCache:get_columns(schema, table_name, opts)
 
   if tbl_info then
     cols = fetch_columns(schema, table_name, tbl_info.type)
-    -- Fallback: Oracle can have both lowercase (quoted) and uppercase entries.
-    -- If lowercase returns no columns, try uppercase.
-    if not cols and table_name:upper() ~= table_name then
-      resolved_table = table_name:upper()
-      cols = fetch_columns(schema, resolved_table, tbl_info.type)
+    if not cols then
+      for _, candidate_table in ipairs(self:_identifier_probe_candidates(table_name, opts.table_quoted)) do
+        if candidate_table ~= table_name then
+          resolved_table = candidate_table
+          cols = fetch_columns(schema, resolved_table, tbl_info.type)
+          if cols then
+            break
+          end
+        end
+      end
     end
   elseif opts.probe_if_missing then
     local schema_candidates, table_candidates = {}, {}
@@ -2462,20 +2487,12 @@ function SchemaCache:get_columns(schema, table_name, opts)
       table_candidates[#table_candidates + 1] = name
     end
 
-    -- Prefer an existing schema with matching case-insensitive name.
-    local matched_schema = nil
-    matched_schema = self:find_schema(schema, { quoted = opts.schema_quoted })
-
-    add_schema_candidate(matched_schema)
-    add_schema_candidate(schema)
-    local upper_schema = schema_name_canonical.canonical(schema, false, "upper").canonical
-    if schema ~= "_default" and upper_schema ~= schema then
-      add_schema_candidate(upper_schema)
+    -- Prefer an existing resolved schema, then adapter-aware canonical candidates.
+    for _, candidate_schema in ipairs(self:_schema_probe_candidates(schema, opts.schema_quoted, false)) do
+      add_schema_candidate(candidate_schema)
     end
-
-    add_table_candidate(table_name)
-    if table_name:upper() ~= table_name then
-      add_table_candidate(table_name:upper())
+    for _, candidate_table in ipairs(self:_identifier_probe_candidates(table_name, opts.table_quoted)) do
+      add_table_candidate(candidate_table)
     end
 
     local materializations = opts.materializations or { "table", "view" }
