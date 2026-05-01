@@ -198,6 +198,18 @@ type columnWrap struct {
 	column *core.Column
 }
 
+type fkRefWrap struct {
+	fk *core.FKRef
+}
+
+type indexWrap struct {
+	index *core.Index
+}
+
+type sequenceWrap struct {
+	sequence *core.Sequence
+}
+
 func WrapColumn(column *core.Column) *columnWrap {
 	return &columnWrap{
 		column: column,
@@ -216,15 +228,116 @@ func WrapColumns(columns []*core.Column) []*columnWrap {
 	return wraps
 }
 
+func wrapFKRefs(refs []*core.FKRef) []*fkRefWrap {
+	wraps := make([]*fkRefWrap, len(refs))
+	for i := range refs {
+		wraps[i] = &fkRefWrap{fk: refs[i]}
+	}
+	return wraps
+}
+
+func WrapIndexes(indexes []*core.Index) []*indexWrap {
+	wraps := make([]*indexWrap, len(indexes))
+	for i := range indexes {
+		wraps[i] = &indexWrap{index: indexes[i]}
+	}
+	return wraps
+}
+
+func WrapSequences(sequences []*core.Sequence) []*sequenceWrap {
+	wraps := make([]*sequenceWrap, len(sequences))
+	for i := range sequences {
+		wraps[i] = &sequenceWrap{sequence: sequences[i]}
+	}
+	return wraps
+}
+
 func (cw *columnWrap) MarshalMsgPack(enc *msgpack.Encoder) error {
 	if cw.column == nil {
 		return enc.Encode(nil)
 	}
 	return enc.Encode(&struct {
-		Name string `msgpack:"name"`
-		Type string `msgpack:"type"`
+		Name              string       `msgpack:"name"`
+		Type              string       `msgpack:"type"`
+		Nullable          *bool        `msgpack:"nullable,omitempty"`
+		PrimaryKey        bool         `msgpack:"primary_key,omitempty"`
+		PrimaryKeyOrdinal int          `msgpack:"primary_key_ordinal,omitempty"`
+		ForeignKeys       []*fkRefWrap `msgpack:"foreign_keys,omitempty"`
 	}{
-		Name: cw.column.Name,
-		Type: cw.column.Type,
+		Name:              cw.column.Name,
+		Type:              cw.column.Type,
+		Nullable:          cw.column.Nullable,
+		PrimaryKey:        cw.column.PrimaryKey,
+		PrimaryKeyOrdinal: cw.column.PrimaryKeyOrdinal,
+		ForeignKeys:       wrapFKRefs(cw.column.ForeignKeys),
+	})
+}
+
+func (fw *fkRefWrap) MarshalMsgPack(enc *msgpack.Encoder) error {
+	if fw.fk == nil {
+		return enc.Encode(nil)
+	}
+	return enc.Encode(&struct {
+		ConstraintName string   `msgpack:"constraint_name,omitempty"`
+		SourceSchema   string   `msgpack:"source_schema,omitempty"`
+		SourceTable    string   `msgpack:"source_table,omitempty"`
+		SourceColumn   string   `msgpack:"source_column,omitempty"`
+		SourceColumns  []string `msgpack:"source_columns,omitempty"`
+		SourceOrdinal  int      `msgpack:"source_ordinal,omitempty"`
+		TargetSchema   string   `msgpack:"target_schema,omitempty"`
+		TargetTable    string   `msgpack:"target_table,omitempty"`
+		TargetColumn   string   `msgpack:"target_column,omitempty"`
+		TargetColumns  []string `msgpack:"target_columns,omitempty"`
+	}{
+		ConstraintName: fw.fk.ConstraintName,
+		SourceSchema:   fw.fk.SourceSchema,
+		SourceTable:    fw.fk.SourceTable,
+		SourceColumn:   fw.fk.SourceColumn,
+		SourceColumns:  fw.fk.SourceColumns,
+		SourceOrdinal:  fw.fk.SourceOrdinal,
+		TargetSchema:   fw.fk.TargetSchema,
+		TargetTable:    fw.fk.TargetTable,
+		TargetColumn:   fw.fk.TargetColumn,
+		TargetColumns:  fw.fk.TargetColumns,
+	})
+}
+
+func (iw *indexWrap) MarshalMsgPack(enc *msgpack.Encoder) error {
+	if iw.index == nil {
+		return enc.Encode(nil)
+	}
+	return enc.Encode(&struct {
+		Name     string   `msgpack:"name"`
+		Schema   string   `msgpack:"schema,omitempty"`
+		Table    string   `msgpack:"table,omitempty"`
+		Columns  []string `msgpack:"columns"`
+		Orders   []string `msgpack:"orders,omitempty"`
+		Unique   bool     `msgpack:"unique,omitempty"`
+		PKBacked bool     `msgpack:"pk_backed,omitempty"`
+	}{
+		Name:     iw.index.Name,
+		Schema:   iw.index.Schema,
+		Table:    iw.index.Table,
+		Columns:  iw.index.Columns,
+		Orders:   iw.index.Orders,
+		Unique:   iw.index.Unique,
+		PKBacked: iw.index.PKBacked,
+	})
+}
+
+func (sw *sequenceWrap) MarshalMsgPack(enc *msgpack.Encoder) error {
+	if sw.sequence == nil {
+		return enc.Encode(nil)
+	}
+	return enc.Encode(&struct {
+		Name      string `msgpack:"name"`
+		Schema    string `msgpack:"schema,omitempty"`
+		Increment int64  `msgpack:"increment,omitempty"`
+		CacheSize int64  `msgpack:"cache_size,omitempty"`
+	}{
+		Name:      sw.sequence.Name,
+		Schema:    sw.sequence.Schema,
+		Increment: sw.sequence.Increment,
+		CacheSize: sw.sequence.CacheSize,
 	})
 }

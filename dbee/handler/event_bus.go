@@ -15,8 +15,33 @@ type eventBus struct {
 	log *plugin.Logger
 }
 
+type structureChildrenPayload struct {
+	ConnID    core.ConnectionID
+	RequestID int
+	BranchID  string
+	RootEpoch int
+	Kind      string
+	Schema    string
+	Table     string
+	Supported bool
+
+	Columns   []*core.Column
+	Indexes   []*core.Index
+	Sequences []*core.Sequence
+
+	Error     string
+	ErrorKind string
+}
+
 func luaStringLiteral(value string) string {
 	return fmt.Sprintf("%q", value)
+}
+
+func luaOptionalString(value string) string {
+	if value == "" {
+		return "nil"
+	}
+	return luaStringLiteral(value)
 }
 
 func (eb *eventBus) callLua(event string, data string) {
@@ -215,25 +240,76 @@ func (eb *eventBus) StructureChildrenLoaded(
 	columns []*core.Column,
 	loadErr error,
 ) {
-	errMsg := "nil"
+	errMsg := ""
 	if loadErr != nil {
-		errMsg = luaStringLiteral(loadErr.Error())
+		errMsg = loadErr.Error()
+	}
+
+	eb.StructureChildrenLoadedPayload(&structureChildrenPayload{
+		ConnID:    id,
+		RequestID: requestID,
+		BranchID:  branchID,
+		RootEpoch: rootEpoch,
+		Kind:      kind,
+		Supported: true,
+		Columns:   columns,
+		Error:     errMsg,
+	})
+}
+
+func (eb *eventBus) StructureChildrenLoadedPayload(payload *structureChildrenPayload) {
+	if payload == nil {
+		return
 	}
 
 	columnsLua := "nil"
-	if columns != nil {
-		columnsLua = columnsToLua(columns)
+	if payload.Columns != nil {
+		columnsLua = columnsToLua(payload.Columns)
+	}
+
+	indexesLua := "nil"
+	if payload.Indexes != nil {
+		indexesLua = indexesToLua(payload.Indexes)
+	}
+
+	sequencesLua := "nil"
+	if payload.Sequences != nil {
+		sequencesLua = sequencesToLua(payload.Sequences)
+	}
+
+	errLua := "nil"
+	if payload.Error != "" {
+		errLua = luaStringLiteral(payload.Error)
 	}
 
 	data := fmt.Sprintf(`{
-		conn_id = %q,
-		request_id = %d,
-		branch_id = %q,
-		root_epoch = %d,
-		kind = %q,
-		columns = %s,
-		error = %s,
-	}`, id, requestID, branchID, rootEpoch, kind, columnsLua, errMsg)
+			conn_id = %q,
+			request_id = %d,
+			branch_id = %q,
+			root_epoch = %d,
+			kind = %q,
+			supported = %t,
+			schema = %s,
+			table = %s,
+			columns = %s,
+			indexes = %s,
+			sequences = %s,
+			error = %s,
+			error_kind = %s,
+		}`,
+		payload.ConnID,
+		payload.RequestID,
+		payload.BranchID,
+		payload.RootEpoch,
+		payload.Kind,
+		payload.Supported,
+		luaOptionalString(payload.Schema),
+		luaOptionalString(payload.Table),
+		columnsLua,
+		indexesLua,
+		sequencesLua,
+		errLua,
+		luaOptionalString(payload.ErrorKind))
 
 	eb.callLua("structure_children_loaded", data)
 }
@@ -289,10 +365,110 @@ func columnsToLua(columns []*core.Column) string {
 		if i > 0 {
 			b.WriteString(",")
 		}
-		b.WriteString(fmt.Sprintf(`{name=%q,type=%q}`, c.Name, c.Type))
+		if c == nil {
+			b.WriteString("nil")
+			continue
+		}
+		b.WriteString(fmt.Sprintf(
+			`{name=%q,type=%q,nullable=%s,primary_key=%t,primary_key_ordinal=%d,foreign_keys=%s}`,
+			c.Name,
+			c.Type,
+			nullableBoolToLua(c.Nullable),
+			c.PrimaryKey,
+			c.PrimaryKeyOrdinal,
+			fkRefsToLua(c.ForeignKeys),
+		))
 	}
 	b.WriteString("}")
 	return b.String()
+}
+
+func fkRefsToLua(refs []*core.FKRef) string {
+	var b strings.Builder
+	b.WriteString("{")
+	for i, ref := range refs {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		if ref == nil {
+			b.WriteString("nil")
+			continue
+		}
+		b.WriteString(fmt.Sprintf(
+			`{constraint_name=%q,source_schema=%q,source_table=%q,source_column=%q,source_columns=%s,source_ordinal=%d,target_schema=%q,target_table=%q,target_column=%q,target_columns=%s}`,
+			ref.ConstraintName,
+			ref.SourceSchema,
+			ref.SourceTable,
+			ref.SourceColumn,
+			stringsToLua(ref.SourceColumns),
+			ref.SourceOrdinal,
+			ref.TargetSchema,
+			ref.TargetTable,
+			ref.TargetColumn,
+			stringsToLua(ref.TargetColumns),
+		))
+	}
+	b.WriteString("}")
+	return b.String()
+}
+
+func indexesToLua(indexes []*core.Index) string {
+	var b strings.Builder
+	b.WriteString("{")
+	for i, index := range indexes {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		if index == nil {
+			b.WriteString("nil")
+			continue
+		}
+		b.WriteString(fmt.Sprintf(
+			`{name=%q,schema=%q,table=%q,columns=%s,orders=%s,unique=%t,pk_backed=%t}`,
+			index.Name,
+			index.Schema,
+			index.Table,
+			stringsToLua(index.Columns),
+			stringsToLua(index.Orders),
+			index.Unique,
+			index.PKBacked,
+		))
+	}
+	b.WriteString("}")
+	return b.String()
+}
+
+func sequencesToLua(sequences []*core.Sequence) string {
+	var b strings.Builder
+	b.WriteString("{")
+	for i, sequence := range sequences {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		if sequence == nil {
+			b.WriteString("nil")
+			continue
+		}
+		b.WriteString(fmt.Sprintf(
+			`{name=%q,schema=%q,increment=%d,cache_size=%d}`,
+			sequence.Name,
+			sequence.Schema,
+			sequence.Increment,
+			sequence.CacheSize,
+		))
+	}
+	b.WriteString("}")
+	return b.String()
+}
+
+func nullableBoolToLua(value *bool) string {
+	if value == nil {
+		return "nil"
+	}
+	if *value {
+		return "true"
+	}
+	return "false"
 }
 
 func schemasToLua(schemas []*core.SchemaInfo) string {

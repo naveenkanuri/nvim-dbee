@@ -44,6 +44,28 @@ type (
 		Close()
 	}
 
+	RichMetadataSupport struct {
+		Columns   bool `json:"columns" msgpack:"columns"`
+		Indexes   bool `json:"indexes" msgpack:"indexes"`
+		Sequences bool `json:"sequences" msgpack:"sequences"`
+	}
+
+	RichMetadataCapability interface {
+		SupportsRichMetadata() RichMetadataSupport
+	}
+
+	RichColumnDriver interface {
+		ColumnsRich(opts *TableOptions) ([]*Column, error)
+	}
+
+	IndexDriver interface {
+		Indexes(opts *TableOptions) ([]*Index, error)
+	}
+
+	SequenceDriver interface {
+		Sequences(schema string) ([]*Sequence, error)
+	}
+
 	// FilteredStructureDriver is implemented by adapters that can apply the
 	// handler-normalized schema scope in the database metadata query itself.
 	FilteredStructureDriver interface {
@@ -257,6 +279,60 @@ func (c *Connection) GetColumns(opts *TableOptions) ([]*Column, error) {
 	}
 
 	return cols, nil
+}
+
+func (c *Connection) SupportsRichMetadata() RichMetadataSupport {
+	if capability, ok := c.driver.(RichMetadataCapability); ok {
+		return capability.SupportsRichMetadata()
+	}
+	return RichMetadataSupport{}
+}
+
+func (c *Connection) GetColumnsRich(opts *TableOptions) ([]*Column, error) {
+	if opts == nil {
+		return nil, fmt.Errorf("opts cannot be nil")
+	}
+
+	driver, ok := c.driver.(RichColumnDriver)
+	if !ok {
+		return nil, ErrSchemaMetadataNotSupported
+	}
+
+	cols, err := driver.ColumnsRich(opts)
+	if err != nil {
+		return nil, fmt.Errorf("c.driver.ColumnsRich: %w", err)
+	}
+	return cols, nil
+}
+
+func (c *Connection) GetIndexes(opts *TableOptions) ([]*Index, error) {
+	if opts == nil {
+		return nil, fmt.Errorf("opts cannot be nil")
+	}
+
+	driver, ok := c.driver.(IndexDriver)
+	if !ok {
+		return nil, ErrSchemaMetadataNotSupported
+	}
+
+	indexes, err := driver.Indexes(opts)
+	if err != nil {
+		return nil, fmt.Errorf("c.driver.Indexes: %w", err)
+	}
+	return indexes, nil
+}
+
+func (c *Connection) GetSequences(schema string) ([]*Sequence, error) {
+	driver, ok := c.driver.(SequenceDriver)
+	if !ok {
+		return nil, ErrSchemaMetadataNotSupported
+	}
+
+	sequences, err := driver.Sequences(schema)
+	if err != nil {
+		return nil, fmt.Errorf("c.driver.Sequences: %w", err)
+	}
+	return sequences, nil
 }
 
 func (c *Connection) GetStructure(opts ...*StructureOptions) ([]*Structure, error) {

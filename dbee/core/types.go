@@ -83,6 +83,8 @@ const (
 	StructureTypeSchema
 	StructureTypeProcedure
 	StructureTypeFunction
+	StructureTypeIndex
+	StructureTypeSequence
 )
 
 // String returns the string representation of the StructureType
@@ -110,6 +112,10 @@ func (s StructureType) String() string {
 		return "procedure"
 	case StructureTypeFunction:
 		return "function"
+	case StructureTypeIndex:
+		return "index"
+	case StructureTypeSequence:
+		return "sequence"
 	default:
 		return ""
 	}
@@ -182,10 +188,26 @@ func StructureTypeFromString(s string) StructureType {
 		return StructureTypeTable
 	case "view":
 		return StructureTypeView
+	case "materialized_view":
+		return StructureTypeMaterializedView
+	case "streaming_table":
+		return StructureTypeStreamingTable
+	case "sink":
+		return StructureTypeSink
+	case "source":
+		return StructureTypeSource
+	case "managed":
+		return StructureTypeManaged
+	case "schema":
+		return StructureTypeSchema
 	case "procedure":
 		return StructureTypeProcedure
 	case "function":
 		return StructureTypeFunction
+	case "index":
+		return StructureTypeIndex
+	case "sequence":
+		return StructureTypeSequence
 	default:
 		return StructureTypeNone
 	}
@@ -204,9 +226,46 @@ type Structure struct {
 
 type Column struct {
 	// Column name
-	Name string
+	Name string `json:"name" msgpack:"name"`
 	// Database data type
-	Type string
+	Type string `json:"type" msgpack:"type"`
+
+	Nullable          *bool    `json:"nullable,omitempty" msgpack:"nullable,omitempty"`
+	PrimaryKey        bool     `json:"primary_key,omitempty" msgpack:"primary_key,omitempty"`
+	PrimaryKeyOrdinal int      `json:"primary_key_ordinal,omitempty" msgpack:"primary_key_ordinal,omitempty"`
+	ForeignKeys       []*FKRef `json:"foreign_keys,omitempty" msgpack:"foreign_keys,omitempty"`
+}
+
+type FKRef struct {
+	ConstraintName string `json:"constraint_name,omitempty" msgpack:"constraint_name,omitempty"`
+
+	SourceSchema  string   `json:"source_schema,omitempty" msgpack:"source_schema,omitempty"`
+	SourceTable   string   `json:"source_table,omitempty" msgpack:"source_table,omitempty"`
+	SourceColumn  string   `json:"source_column,omitempty" msgpack:"source_column,omitempty"`
+	SourceColumns []string `json:"source_columns,omitempty" msgpack:"source_columns,omitempty"`
+	SourceOrdinal int      `json:"source_ordinal,omitempty" msgpack:"source_ordinal,omitempty"`
+
+	TargetSchema  string   `json:"target_schema,omitempty" msgpack:"target_schema,omitempty"`
+	TargetTable   string   `json:"target_table,omitempty" msgpack:"target_table,omitempty"`
+	TargetColumn  string   `json:"target_column,omitempty" msgpack:"target_column,omitempty"`
+	TargetColumns []string `json:"target_columns,omitempty" msgpack:"target_columns,omitempty"`
+}
+
+type Index struct {
+	Name     string   `json:"name" msgpack:"name"`
+	Schema   string   `json:"schema,omitempty" msgpack:"schema,omitempty"`
+	Table    string   `json:"table,omitempty" msgpack:"table,omitempty"`
+	Columns  []string `json:"columns" msgpack:"columns"`
+	Orders   []string `json:"orders,omitempty" msgpack:"orders,omitempty"`
+	Unique   bool     `json:"unique,omitempty" msgpack:"unique,omitempty"`
+	PKBacked bool     `json:"pk_backed,omitempty" msgpack:"pk_backed,omitempty"`
+}
+
+type Sequence struct {
+	Name      string `json:"name" msgpack:"name"`
+	Schema    string `json:"schema,omitempty" msgpack:"schema,omitempty"`
+	Increment int64  `json:"increment,omitempty" msgpack:"increment,omitempty"`
+	CacheSize int64  `json:"cache_size,omitempty" msgpack:"cache_size,omitempty"`
 }
 
 func cloneStrings(values []string) []string {
