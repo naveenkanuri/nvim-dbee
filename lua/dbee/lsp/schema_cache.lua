@@ -230,11 +230,14 @@ end
 ---@private
 ---@return table
 function SchemaCache:_read_normalized_scope()
-  local scope = read_authoritative_scope(self.handler, self.conn_id)
+  local scope, authority_attempted = read_authoritative_scope(self.handler, self.conn_id)
   if scope then
     return scope
   end
-  return self.schema_scope or fail_closed_scope()
+  if authority_attempted then
+    return fail_closed_scope()
+  end
+  return self.schema_scope or schema_filter.normalize(nil, nil)
 end
 
 ---@return boolean changed
@@ -244,6 +247,16 @@ function SchemaCache:refresh_schema_scope()
   self.fold_id = normalized_scope.fold
   self.schema_scope = normalized_scope
   self.schema_filter_signature = normalized_scope.schema_filter_signature
+  if normalized_scope.fail_closed == true then
+    self:cancel_async("schema-filter-authority-unavailable", { conn_id = self.conn_id })
+    self.schemas = {}
+    self.tables = {}
+    self.columns = {}
+    self.column_lru = {}
+    self.loaded_schemas = {}
+    self.root_mode = "full"
+    self:_reset_indexes()
+  end
   return previous_signature ~= nil and previous_signature ~= self.schema_filter_signature
 end
 

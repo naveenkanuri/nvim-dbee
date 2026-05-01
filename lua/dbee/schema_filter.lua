@@ -132,6 +132,14 @@ local function sql_glob_to_lua(pattern)
   return table.concat(out)
 end
 
+local function compile_patterns(patterns)
+  local out = {}
+  for _, pattern in ipairs(patterns or {}) do
+    out[#out + 1] = sql_glob_to_lua(pattern)
+  end
+  return out
+end
+
 function M.fold_id(conn_type)
   return fold_id(conn_type)
 end
@@ -189,6 +197,8 @@ function M.normalize(raw_filter, conn_type)
     connection_type = tostring(conn_type or ""),
     include = vim.deepcopy(include),
     exclude = vim.deepcopy(exclude),
+    include_patterns = compile_patterns(include),
+    exclude_patterns = compile_patterns(exclude),
     implicit_all = implicit_all,
     active = (not implicit_all) or #exclude > 0,
     lazy_per_schema = lazy,
@@ -241,8 +251,9 @@ function M.matches(schema, normalized)
   end
   local folded = fold_value(schema, normalized.fold)
   local include_ok = normalized.implicit_all == true or #(normalized.include or {}) == 0
-  for _, pattern in ipairs(normalized.include or {}) do
-    if folded:match(sql_glob_to_lua(pattern)) then
+  local include_patterns = normalized.include_patterns or compile_patterns(normalized.include)
+  for _, pattern in ipairs(include_patterns) do
+    if folded:match(pattern) then
       include_ok = true
       break
     end
@@ -250,8 +261,9 @@ function M.matches(schema, normalized)
   if not include_ok then
     return false
   end
-  for _, pattern in ipairs(normalized.exclude or {}) do
-    if folded:match(sql_glob_to_lua(pattern)) then
+  local exclude_patterns = normalized.exclude_patterns or compile_patterns(normalized.exclude)
+  for _, pattern in ipairs(exclude_patterns) do
+    if folded:match(pattern) then
       return false
     end
   end
@@ -259,6 +271,9 @@ function M.matches(schema, normalized)
 end
 
 function M.filter_structures(structs, normalized)
+  if normalized and normalized.fail_closed == true then
+    return {}
+  end
   if not normalized or normalized.active ~= true then
     return vim.deepcopy(structs or {})
   end

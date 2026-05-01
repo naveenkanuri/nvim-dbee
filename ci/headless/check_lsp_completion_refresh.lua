@@ -279,6 +279,57 @@ local fail_closed_result = fail_closed_cache:get_columns_async("APP", "SAS_JOBS"
 assert_eq("authority fail closed complete", fail_closed_result.is_incomplete, false)
 assert_eq("authority fail closed no transport", fail_closed_calls, 0)
 
+local mid_session_scope = { value = schema_filter.normalize(nil, nil) }
+local mid_session_calls = 0
+local mid_session_cache = SchemaCache:new({
+  get_schema_filter_normalized = function()
+    return mid_session_scope.value
+  end,
+  get_authoritative_root_epoch = function()
+    return 1
+  end,
+  connection_get_columns_async = function()
+    mid_session_calls = mid_session_calls + 1
+  end,
+}, "refresh-authority-nil-mid-session")
+mid_session_cache:build_from_metadata_rows({
+  { schema_name = "APP", table_name = "SAS_JOBS", obj_type = "table" },
+})
+local before_nil = mid_session_cache:get_columns_async("APP", "SAS_JOBS", {
+  probe_if_missing = true,
+  materializations = { "table" },
+})
+assert_eq("mid-session starts open incomplete", before_nil.is_incomplete, true)
+assert_eq("mid-session starts open transport", mid_session_calls, 1)
+mid_session_scope.value = nil
+assert_true("mid-session nil authority changes scope", mid_session_cache:refresh_schema_scope())
+assert_eq("mid-session nil authority signature", mid_session_cache.schema_filter_signature, "schema-filter-v1|fail-closed")
+assert_eq("mid-session nil authority clears schema", mid_session_cache:find_schema("APP"), nil)
+local after_nil = mid_session_cache:get_columns_async("APP", "SAS_JOBS", {
+  probe_if_missing = true,
+  materializations = { "table" },
+})
+assert_eq("mid-session nil authority complete", after_nil.is_incomplete, false)
+assert_eq("mid-session nil authority no new transport", mid_session_calls, 1)
+
+local error_scope_cache = SchemaCache:new({
+  get_schema_filter_normalized = function()
+    return schema_filter.normalize(nil, nil)
+  end,
+  get_authoritative_root_epoch = function()
+    return 1
+  end,
+  connection_get_columns_async = function() end,
+}, "refresh-authority-error-mid-session")
+error_scope_cache:build_from_metadata_rows({
+  { schema_name = "APP", table_name = "SAS_JOBS", obj_type = "table" },
+})
+error_scope_cache.handler.get_schema_filter_normalized = function()
+  error("params unavailable")
+end
+assert_true("mid-session error authority changes scope", error_scope_cache:refresh_schema_scope())
+assert_eq("mid-session error authority signature", error_scope_cache.schema_filter_signature, "schema-filter-v1|fail-closed")
+
 local root = vim.fn.getcwd()
 local drawer_source = table.concat(vim.fn.readfile(root .. "/lua/dbee/ui/drawer/init.lua"), "\n")
 local lsp_source = table.concat(vim.fn.readfile(root .. "/lua/dbee/lsp/init.lua"), "\n")
@@ -403,5 +454,6 @@ package.loaded["cmp"] = old_cmp
 
 print("ARCH14_LSP_PROBE_SCOPE_OK=true")
 print("ARCH14_FILTER_AUTHORITY_SINGLE_SOURCE_OK=true")
+print("ARCH14_LSP_CACHE_FAIL_CLOSED_ON_AUTHORITY_NIL=true")
 print("LSP_COMPLETION_REFRESH_NOTIFY_OK=true")
 vim.cmd("qa!")

@@ -41,11 +41,47 @@ local function run_normalization_contract()
   )
 
   local normalized = assert(schema_filter.normalize(opts.schema_filter, "postgres"))
+  assert_eq("compiled include patterns", #normalized.include_patterns, 2)
+  assert_eq("compiled exclude patterns", #normalized.exclude_patterns, 1)
   assert_true("include match", schema_filter.matches("FINANCE", normalized))
   assert_true("literal match", schema_filter.matches("hr", normalized))
   assert_true("exclude match", not schema_filter.matches("FIN_TEMP_1", normalized))
   print("ARCH14_SCHEMA_FILTER_MATCHING_OK=true")
   print("ARCH14_SCHEMA_FILTER_SIGNATURE_STABLE=true")
+end
+
+local function run_fail_closed_structure_contract()
+  local fail_closed = {
+    active = true,
+    fail_closed = true,
+    fold = "upper",
+    include = {},
+    exclude = {},
+    implicit_all = false,
+  }
+  local root_schema_less = schema_filter.filter_structures({
+    { type = "table", name = "ROOT_TABLE" },
+  }, fail_closed)
+  assert_eq("fail closed root schema-less", #root_schema_less, 0)
+
+  local nested_schema_less = schema_filter.filter_structures({
+    {
+      type = "",
+      name = "container",
+      children = {
+        { type = "table", name = "NESTED_TABLE" },
+      },
+    },
+  }, fail_closed)
+  assert_eq("fail closed nested schema-less", #nested_schema_less, 0)
+
+  local normal_scope = assert(schema_filter.normalize(nil, "sqlite"))
+  local preserved = schema_filter.filter_structures({
+    { type = "table", name = "ROOT_TABLE" },
+  }, normal_scope)
+  assert_eq("normal schema-less preserved", #preserved, 1)
+  assert_eq("normal schema-less name", preserved[1].name, "ROOT_TABLE")
+  print("ARCH14_FAIL_CLOSED_REJECTS_SCHEMA_LESS=true")
 end
 
 local function run_invalid_pattern_contract()
@@ -157,6 +193,7 @@ local function run_handler_authority_contract()
 end
 
 run_normalization_contract()
+run_fail_closed_structure_contract()
 run_invalid_pattern_contract()
 run_sources_preserve_filter_contract()
 run_handler_authority_contract()
