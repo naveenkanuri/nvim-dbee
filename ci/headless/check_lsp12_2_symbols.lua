@@ -227,6 +227,15 @@ emit("LSP12_2_DOCSYMBOL_AUTHORITY_NEUTRAL", "true")
 
 local users_node = child_named(symbol_named(tree, "public"), "users")
 assert_true("qualified column", child_named(users_node, "id") ~= nil)
+local as_alias_buf, as_alias_uri = make_buffer({ "select u.id from public.users AS u" })
+local as_alias = request(client, "textDocument/documentSymbol", {
+  textDocument = { uri = as_alias_uri },
+})
+local as_alias_users = child_named(symbol_named(as_alias, "public"), "users")
+assert_true("as alias table", as_alias_users ~= nil)
+assert_true("as alias column", child_named(as_alias_users, "id") ~= nil)
+emit("LSP12_2_DOCSYMBOL_AS_ALIAS_COLUMNS_OK", "true")
+
 local ambiguous_buf, ambiguous_uri = make_buffer({ "select id from public.users u join public.orders o on u.email = o.user_id" })
 local ambiguous = request(client, "textDocument/documentSymbol", {
   textDocument = { uri = ambiguous_uri },
@@ -286,6 +295,19 @@ assert_eq("string literal omitted", child_named(identifier_users, "literal"), ni
 assert_eq("alias omitted", child_named(identifier_users, "alias"), nil)
 emit("LSP12_2_DOCSYMBOL_SELECT_LIST_IDENTIFIERS_ONLY", "true")
 
+local ignored_text_buf, ignored_text_uri = make_buffer({
+  "select * from users -- from public.fake",
+  "select 'join public.orders' as s from users",
+  "/* from public.orders */ select * from users",
+})
+local ignored_text = request(client, "textDocument/documentSymbol", {
+  textDocument = { uri = ignored_text_uri },
+})
+assert_true("real users retained", symbol_named(ignored_text, "users") ~= nil)
+assert_eq("comment/string schema omitted", symbol_named(ignored_text, "public"), nil)
+assert_eq("comment/string fake omitted", symbol_named(ignored_text, "public.fake"), nil)
+emit("LSP12_2_DOCSYMBOL_IGNORES_COMMENTS_AND_STRINGS", "true")
+
 local dedupe_buf, dedupe_uri = make_buffer({ "select * from public.users; select * from PUBLIC.USERS" })
 local dedupe = request(client, "textDocument/documentSymbol", {
   textDocument = { uri = dedupe_uri },
@@ -329,6 +351,38 @@ local unknown_symbols = symbols.handle_document_symbol({
 assert_eq("cache identity no stale schema parent", symbol_named(unknown_symbols, "public"), nil)
 assert_true("cache identity reparsed root", symbol_named(unknown_symbols, "public.users") ~= nil)
 emit("LSP12_2_DOCSYMBOL_CACHE_KEY_INCLUDES_CACHE_IDENTITY", "true")
+
+local stale_epoch_buf, stale_epoch_uri = make_buffer({ "select * from public.users" })
+symbols._reset_cache()
+epoch_ref.value = 1
+local stale_fresh = symbols.handle_document_symbol({
+  textDocument = { uri = stale_epoch_uri },
+}, cache, {
+  client_capabilities = {
+    textDocument = {
+      documentSymbol = {
+        hierarchicalDocumentSymbolSupport = true,
+      },
+    },
+  },
+})
+assert_true("stale epoch setup schema parent", child_named(symbol_named(stale_fresh, "public"), "users") ~= nil)
+epoch_ref.value = 2
+local stale_degraded = symbols.handle_document_symbol({
+  textDocument = { uri = stale_epoch_uri },
+}, cache, {
+  client_capabilities = {
+    textDocument = {
+      documentSymbol = {
+        hierarchicalDocumentSymbolSupport = true,
+      },
+    },
+  },
+})
+assert_eq("stale epoch no schema parent", symbol_named(stale_degraded, "public"), nil)
+assert_true("stale epoch source-only table", symbol_named(stale_degraded, "public.users") ~= nil)
+epoch_ref.value = 1
+emit("LSP12_2_DOCSYMBOL_EPOCH_STALE_DEGRADES", "true")
 
 local long_line_buf, long_line_uri = make_buffer({
   "select * from users " .. string.rep("x", 1024 * 1024 + 128),
