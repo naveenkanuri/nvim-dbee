@@ -127,7 +127,9 @@ perf-lsp: perf-bootstrap
 	  check_connection_coordination.lua \
 	  check_wizard_input_visible.lua \
 	  check_connection_wizard.lua \
-	  check_filesource_persistence.lua; \
+	  check_filesource_persistence.lua \
+	  check_folder_persistence.lua \
+	  check_drawer_folders.lua; \
 	do \
 	  run_logged "$$script" env XDG_STATE_HOME="$(LSP01_PERF_STATE_HOME)" \
 	    $(PERF_NVIM_HEADLESS) -c "luafile $(CURDIR)/ci/headless/$$script"; \
