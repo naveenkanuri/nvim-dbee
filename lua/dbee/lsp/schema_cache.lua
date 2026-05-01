@@ -9,6 +9,7 @@
 ---@field private table_items_by_schema table<string, lsp.CompletionItem[]>
 ---@field private all_table_items lsp.CompletionItem[]
 ---@field private all_table_item_source_by_label table<string, string>
+---@field private all_table_item_ambiguous_by_label table<string, boolean>
 ---@field private column_items_by_key table<string, lsp.CompletionItem[]>
 ---@field private schema_lookup_exact table<string, string>
 ---@field private schema_lookup table<string, string>
@@ -150,6 +151,7 @@ function SchemaCache:new(handler, conn_id)
     table_items_by_schema = {},
     all_table_items = {},
     all_table_item_source_by_label = {},
+    all_table_item_ambiguous_by_label = {},
     column_items_by_key = {},
     schema_lookup_exact = {},
     schema_lookup = {},
@@ -631,6 +633,7 @@ function SchemaCache:_reset_indexes()
   self.table_items_by_schema = {}
   self.all_table_items = {}
   self.all_table_item_source_by_label = {}
+  self.all_table_item_ambiguous_by_label = {}
   self.column_items_by_key = {}
   self.schema_lookup_exact = {}
   self.schema_lookup = {}
@@ -652,6 +655,7 @@ function SchemaCache:_rebuild_structure_indexes()
   self.table_items_by_schema = {}
   self.all_table_items = {}
   self.all_table_item_source_by_label = {}
+  self.all_table_item_ambiguous_by_label = {}
   self.schema_lookup_exact = {}
   self.schema_lookup = {}
   self.table_lookup_exact_by_schema = {}
@@ -698,6 +702,7 @@ function SchemaCache:_refresh_global_table_index()
   self.all_table_items = {}
   self.all_table_names = {}
   self.all_table_item_source_by_label = {}
+  self.all_table_item_ambiguous_by_label = {}
 
   local schema_names = vim.tbl_keys(self.schemas)
   table.sort(schema_names)
@@ -741,6 +746,9 @@ function SchemaCache:_update_global_table_index_for_table(schema, name, table_ty
   end
 
   local current_source = self.all_table_item_source_by_label[name]
+  if current_source and current_source ~= schema then
+    self.all_table_item_ambiguous_by_label[name] = true
+  end
   if not current_source or schema < current_source or current_source == schema then
     self.all_table_item_source_by_label[name] = schema
     local item = table_completion_item(schema, name, table_type)
@@ -2325,6 +2333,9 @@ function SchemaCache:get_all_table_completion_items(opts)
     return copy_items(self.all_table_items)
   end
   return self:_copy_items_with_data(self.all_table_items, "table", function(item)
+    if self.all_table_item_ambiguous_by_label[item.label] then
+      return nil
+    end
     local schema = self.all_table_item_source_by_label[item.label]
     if not schema then
       return nil

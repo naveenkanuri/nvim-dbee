@@ -360,6 +360,23 @@ local global_resolved = request_resolve(client, global_id)
 assert_eq("global id passthrough docs", global_resolved.documentation, nil)
 emit("LSP12_RESOLVE_GLOBAL_COLUMN_AMBIGUOUS_PASSTHROUGH", "true")
 
+local table_completion_line = "SELECT * FROM u"
+local table_comp_buf, table_comp_uri = make_buffer({ table_completion_line })
+local table_completion_result = request(client, "textDocument/completion", {
+  textDocument = { uri = table_comp_uri },
+  position = { line = 0, character = #table_completion_line },
+})
+local ambiguous_users = first_label(table_completion_result.items, "users")
+assert_true("ambiguous global users exists", ambiguous_users ~= nil)
+assert_eq("ambiguous global users no data", ambiguous_users.data, nil)
+local ambiguous_users_resolved = request_resolve(client, ambiguous_users)
+assert_eq("ambiguous global users no docs", ambiguous_users_resolved.documentation, nil)
+local unique_orders = first_label(table_completion_result.items, "orders")
+assert_true("unique global orders data", unique_orders and unique_orders.data)
+local unique_orders_resolved = request_resolve(client, unique_orders)
+assert_true("unique global orders docs", unique_orders_resolved.documentation ~= nil)
+emit("LSP12_RESOLVE_AMBIGUOUS_GLOBAL_NO_DOCS", "true")
+
 local public_item = first_label(cache:get_table_completion_items("public", { schema_quoted = true, include_data = true }), "users")
 local mixed_item = first_label(cache:get_table_completion_items("Public", { schema_quoted = true, include_data = true }), "users")
 local public_doc = resolve.handle(public_item, cache, { memo = {} })
