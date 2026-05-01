@@ -10,8 +10,11 @@
 ---@field private all_table_items lsp.CompletionItem[]
 ---@field private all_table_item_source_by_label table<string, string>
 ---@field private column_items_by_key table<string, lsp.CompletionItem[]>
+---@field private schema_lookup_exact table<string, string>
 ---@field private schema_lookup table<string, string>
+---@field private table_lookup_exact_by_schema table<string, table<string, string>>
 ---@field private table_lookup_by_schema table<string, table<string, string>>
+---@field private table_lookup_exact_global table<string, { name: string, schema: string }>
 ---@field private table_lookup_global table<string, { name: string, schema: string }>
 ---@field private async_inflight table<string, table>
 ---@field private async_chains table<string, table>
@@ -163,8 +166,11 @@ function SchemaCache:new(handler, conn_id)
     all_table_items = {},
     all_table_item_source_by_label = {},
     column_items_by_key = {},
+    schema_lookup_exact = {},
     schema_lookup = {},
+    table_lookup_exact_by_schema = {},
     table_lookup_by_schema = {},
+    table_lookup_exact_global = {},
     table_lookup_global = {},
     column_lru = {},
     column_touch_clock = 0,
@@ -407,6 +413,7 @@ function SchemaCache:build_from_schemas(schemas, opts)
   local previous_columns = self.columns or {}
   local previous_lru = self.column_lru or {}
   local previous_loaded = self.loaded_schemas or {}
+  local previous_schema_lookup_exact = self.schema_lookup_exact or {}
   local previous_schema_lookup = self.schema_lookup or {}
 
   self.schemas = {}
@@ -422,7 +429,7 @@ function SchemaCache:build_from_schemas(schemas, opts)
     if type(name) == "string" and name ~= "" and schema_filter.matches(name, self.schema_scope) then
       self.schemas[name] = true
       local folded = self:_fold(name)
-      local previous_name = previous_schema_lookup[folded] or name
+      local previous_name = previous_schema_lookup_exact[name] or previous_schema_lookup[folded] or name
       if preserve_loaded and previous_loaded[folded] and previous_tables[previous_name] then
         self.tables[name] = vim.deepcopy(previous_tables[previous_name])
         self.loaded_schemas[folded] = true
@@ -454,6 +461,77 @@ function SchemaCache:_fold(value)
 end
 
 ---@private
+---@param value string?
+---@return boolean
+function SchemaCache:_can_fold_alias(value)
+  if type(value) ~= "string" or value == "" then
+    return false
+  end
+  if self.fold_id == "lower" or self.fold_id == "upper" then
+    return value == self:_fold(value)
+  end
+  return true
+end
+
+---@private
+---@param schema string
+function SchemaCache:_upsert_schema_lookup(schema)
+  self.schema_lookup_exact[schema] = schema
+  if not self:_can_fold_alias(schema) then
+    return
+  end
+  local folded = self:_fold(schema)
+  local current = self.schema_lookup[folded]
+  if not current or schema < current then
+    self.schema_lookup[folded] = schema
+  end
+end
+
+---@private
+---@param schema string
+---@return table<string, string>, table<string, string>
+function SchemaCache:_ensure_table_lookup(schema)
+  local exact_lookup = self.table_lookup_exact_by_schema[schema]
+  if not exact_lookup then
+    exact_lookup = {}
+    self.table_lookup_exact_by_schema[schema] = exact_lookup
+  end
+
+  local folded_lookup = self.table_lookup_by_schema[schema]
+  if not folded_lookup then
+    folded_lookup = {}
+    self.table_lookup_by_schema[schema] = folded_lookup
+  end
+
+  return exact_lookup, folded_lookup
+end
+
+---@private
+---@param schema string
+---@param name string
+function SchemaCache:_upsert_table_lookup(schema, name)
+  local exact_lookup, folded_lookup = self:_ensure_table_lookup(schema)
+  exact_lookup[name] = name
+  if not self:_can_fold_alias(name) then
+    return
+  end
+  local folded = self:_fold(name)
+  local current = folded_lookup[folded]
+  if not current or name < current then
+    folded_lookup[folded] = name
+  end
+end
+
+---@private
+---@param current { name: string, schema: string }?
+---@param schema string
+---@param name string
+---@return boolean
+function SchemaCache:_global_lookup_precedes(current, schema, name)
+  return not current or schema < current.schema or (schema == current.schema and name <= current.name)
+end
+
+---@private
 function SchemaCache:_reset_indexes()
   self.all_table_names = {}
   self.schema_items = {}
@@ -461,8 +539,11 @@ function SchemaCache:_reset_indexes()
   self.all_table_items = {}
   self.all_table_item_source_by_label = {}
   self.column_items_by_key = {}
+  self.schema_lookup_exact = {}
   self.schema_lookup = {}
+  self.table_lookup_exact_by_schema = {}
   self.table_lookup_by_schema = {}
+  self.table_lookup_exact_global = {}
   self.table_lookup_global = {}
 end
 
@@ -478,15 +559,18 @@ function SchemaCache:_rebuild_structure_indexes()
   self.table_items_by_schema = {}
   self.all_table_items = {}
   self.all_table_item_source_by_label = {}
+  self.schema_lookup_exact = {}
   self.schema_lookup = {}
+  self.table_lookup_exact_by_schema = {}
   self.table_lookup_by_schema = {}
+  self.table_lookup_exact_global = {}
   self.table_lookup_global = {}
 
   local schema_names = vim.tbl_keys(self.schemas)
   table.sort(schema_names)
 
   for _, schema in ipairs(schema_names) do
-    self.schema_lookup[self:_fold(schema)] = self.schema_lookup[self:_fold(schema)] or schema
+    self:_upsert_schema_lookup(schema)
     if schema ~= "_default" then
       self.schema_items[#self.schema_items + 1] = {
         label = schema,
@@ -499,18 +583,15 @@ function SchemaCache:_rebuild_structure_indexes()
 
     local table_names = vim.tbl_keys(self.tables[schema] or {})
     table.sort(table_names)
-    local schema_lookup = {}
     local schema_items = {}
 
     for _, name in ipairs(table_names) do
       local info = self.tables[schema][name] or { type = "table" }
-      local folded = self:_fold(name)
-      schema_lookup[folded] = schema_lookup[folded] or name
+      self:_upsert_table_lookup(schema, name)
 
       schema_items[#schema_items + 1] = table_completion_item(schema, name, info.type)
     end
 
-    self.table_lookup_by_schema[schema] = schema_lookup
     self.table_items_by_schema[schema] = schema_items
   end
 
@@ -519,6 +600,7 @@ end
 
 ---@private
 function SchemaCache:_refresh_global_table_index()
+  self.table_lookup_exact_global = {}
   self.table_lookup_global = {}
   self.all_table_items = {}
   self.all_table_names = {}
@@ -527,26 +609,18 @@ function SchemaCache:_refresh_global_table_index()
   local schema_names = vim.tbl_keys(self.schemas)
   table.sort(schema_names)
 
-  local seen = {}
   for _, schema in ipairs(schema_names) do
-    for _, item in ipairs(self.table_items_by_schema[schema] or {}) do
-      local folded = self:_fold(item.label)
-      self.table_lookup_global[folded] = self.table_lookup_global[folded]
-        or { name = item.label, schema = schema }
-      if not seen[item.label] then
-        seen[item.label] = true
-        self.all_table_item_source_by_label[item.label] = schema
-        self.all_table_items[#self.all_table_items + 1] = vim.deepcopy(item)
-      end
+    local table_names = vim.tbl_keys(self.tables[schema] or {})
+    table.sort(table_names)
+    for _, name in ipairs(table_names) do
+      local info = self.tables[schema][name] or { type = "table" }
+      self:_update_global_table_index_for_table(schema, name, info.type)
     end
   end
 
   table.sort(self.all_table_items, function(a, b)
     return a.label < b.label
   end)
-  for _, item in ipairs(self.all_table_items) do
-    self.all_table_names[#self.all_table_names + 1] = item.label
-  end
 end
 
 ---@private
@@ -554,13 +628,23 @@ end
 ---@param name string
 ---@param table_type string
 function SchemaCache:_update_global_table_index_for_table(schema, name, table_type)
-  local folded = self:_fold(name)
-  local current = self.table_lookup_global[folded]
-  if not current or schema < current.schema or current.schema == schema then
-    self.table_lookup_global[folded] = {
+  local current_exact = self.table_lookup_exact_global[name]
+  if self:_global_lookup_precedes(current_exact, schema, name) then
+    self.table_lookup_exact_global[name] = {
       name = name,
       schema = schema,
     }
+  end
+
+  if self:_can_fold_alias(name) then
+    local folded = self:_fold(name)
+    local current = self.table_lookup_global[folded]
+    if self:_global_lookup_precedes(current, schema, name) then
+      self.table_lookup_global[folded] = {
+        name = name,
+        schema = schema,
+      }
+    end
   end
 
   local current_source = self.all_table_item_source_by_label[name]
@@ -580,7 +664,7 @@ function SchemaCache:_upsert_table_index(schema, name, table_type)
   table_type = table_type or "table"
   local new_schema = not self.schemas[schema]
   self.schemas[schema] = true
-  self.schema_lookup[self:_fold(schema)] = self.schema_lookup[self:_fold(schema)] or schema
+  self:_upsert_schema_lookup(schema)
 
   if not self.tables[schema] then
     self.tables[schema] = {}
@@ -597,12 +681,7 @@ function SchemaCache:_upsert_table_index(schema, name, table_type)
     })
   end
 
-  local schema_lookup = self.table_lookup_by_schema[schema] or {}
-  local folded_name = self:_fold(name)
-  if not schema_lookup[folded_name] or name < schema_lookup[folded_name] then
-    schema_lookup[folded_name] = name
-  end
-  self.table_lookup_by_schema[schema] = schema_lookup
+  self:_upsert_table_lookup(schema, name)
 
   if not self.table_items_by_schema[schema] then
     self.table_items_by_schema[schema] = {}
@@ -1907,7 +1986,7 @@ function SchemaCache:find_schema(schema_name)
   if not schema_name or schema_name == "" then
     return nil
   end
-  return self.schema_lookup[self:_fold(schema_name)]
+  return self.schema_lookup_exact[schema_name] or self.schema_lookup[self:_fold(schema_name)]
 end
 
 --- Get columns through the non-blocking async miss path.
@@ -2364,11 +2443,19 @@ end
 ---@return string? actual_name, string? actual_schema
 function SchemaCache:find_table_in_schema(schema_name, table_name)
   local actual_schema = self:find_schema(schema_name) or schema_name
+  if not table_name or table_name == "" then
+    return nil, actual_schema
+  end
+  local exact_lookup = self.table_lookup_exact_by_schema[actual_schema]
+  local actual_name = exact_lookup and exact_lookup[table_name]
+  if actual_name then
+    return actual_name, actual_schema
+  end
   local schema_lookup = self.table_lookup_by_schema[actual_schema]
   if not schema_lookup then
     return nil, actual_schema
   end
-  local actual_name = schema_lookup[self:_fold(table_name)]
+  actual_name = schema_lookup[self:_fold(table_name)]
   if actual_name then
     return actual_name, actual_schema
   end
@@ -2379,6 +2466,13 @@ end
 ---@param table_name string
 ---@return string? actual_name, string? schema
 function SchemaCache:find_table(table_name)
+  if not table_name or table_name == "" then
+    return nil, nil
+  end
+  local exact_match = self.table_lookup_exact_global[table_name]
+  if exact_match then
+    return exact_match.name, exact_match.schema
+  end
   local match = self.table_lookup_global[self:_fold(table_name)]
   if match then
     return match.name, match.schema

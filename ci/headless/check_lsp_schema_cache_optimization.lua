@@ -28,6 +28,15 @@ local function labels(items)
   return out
 end
 
+local function scoped_cache(conn_type, id)
+  local scope = assert(schema_filter.normalize(nil, conn_type))
+  return SchemaCache:new({
+    get_schema_filter_normalized = function()
+      return scope
+    end,
+  }, id)
+end
+
 local function assert_sorted(label, values)
   local sorted = vim.deepcopy(values)
   table.sort(sorted)
@@ -58,12 +67,7 @@ assert_eq("schema lookup", cache:find_schema("b_schema"), "B_SCHEMA")
 local wrong_table = cache:find_table_in_schema("WRONG_SCHEMA", "VALID_TABLE")
 assert_eq("schema-aware lookup rejects wrong schema", wrong_table, nil)
 
-local pg_scope = assert(schema_filter.normalize(nil, "postgres"))
-local pg_cache = SchemaCache:new({
-  get_schema_filter_normalized = function()
-    return pg_scope
-  end,
-}, "lsp11-r6-case-lookup")
+local pg_cache = scoped_cache("postgres", "lsp11-r6-case-lookup")
 pg_cache:build_from_metadata_rows({
   { schema_name = "public", table_name = "users", obj_type = "table" },
 })
@@ -78,12 +82,41 @@ assert_eq("postgres table lookup folds table", public_users, "users")
 assert_eq("postgres table completion folds schema", #pg_cache:get_table_completion_items("Public"), 1)
 assert_eq("postgres column completion folds schema/table", pg_cache:get_column_completion_items("PUBLIC", "USERS")[1].label, "id")
 
-local clickhouse_scope = assert(schema_filter.normalize(nil, "clickhouse"))
-local clickhouse_cache = SchemaCache:new({
-  get_schema_filter_normalized = function()
-    return clickhouse_scope
-  end,
-}, "lsp11-r6-clickhouse-case-sensitive")
+local pg_quoted_cache = scoped_cache("postgres", "lsp11-r6-pg-quoted-distinct")
+pg_quoted_cache:build_from_metadata_rows({
+  { schema_name = "public", table_name = "Users", obj_type = "table" },
+  { schema_name = "Public", table_name = "users", obj_type = "table" },
+})
+assert_eq("postgres quoted table exact", pg_quoted_cache:find_table_in_schema("PUBLIC", "Users"), "Users")
+assert_eq("postgres quoted table not unquoted folded", pg_quoted_cache:find_table_in_schema("PUBLIC", "USERS"), nil)
+assert_eq("postgres quoted schema exact", pg_quoted_cache:find_schema("Public"), "Public")
+assert_eq("postgres quoted schema not unquoted folded", pg_quoted_cache:find_schema("pUbLiC"), "public")
+
+local oracle_cache = scoped_cache("oracle", "lsp11-r6-oracle-case-lookup")
+oracle_cache:build_from_metadata_rows({
+  { schema_name = "APP", table_name = "USERS", obj_type = "table" },
+})
+assert_eq("oracle schema lookup folds lower", oracle_cache:find_schema("app"), "APP")
+assert_eq("oracle table lookup folds lower", oracle_cache:find_table_in_schema("app", "users"), "USERS")
+
+local oracle_quoted_cache = scoped_cache("oracle", "lsp11-r6-oracle-quoted-distinct")
+oracle_quoted_cache:build_from_metadata_rows({
+  { schema_name = "APP", table_name = "Users", obj_type = "table" },
+  { schema_name = "App", table_name = "USERS", obj_type = "table" },
+})
+assert_eq("oracle quoted table exact", oracle_quoted_cache:find_table_in_schema("app", "Users"), "Users")
+assert_eq("oracle quoted table not unquoted folded", oracle_quoted_cache:find_table_in_schema("app", "users"), nil)
+assert_eq("oracle quoted schema exact", oracle_quoted_cache:find_schema("App"), "App")
+assert_eq("oracle quoted schema not unquoted folded", oracle_quoted_cache:find_schema("aPp"), "APP")
+
+local sqlite_cache = scoped_cache("sqlite", "lsp11-r6-sqlite-case-insensitive")
+sqlite_cache:build_from_metadata_rows({
+  { schema_name = "Main", table_name = "Users", obj_type = "table" },
+})
+assert_eq("sqlite schema lookup case-insensitive", sqlite_cache:find_schema("MAIN"), "Main")
+assert_eq("sqlite table lookup case-insensitive", sqlite_cache:find_table_in_schema("main", "users"), "Users")
+
+local clickhouse_cache = scoped_cache("clickhouse", "lsp11-r6-clickhouse-case-sensitive")
 clickhouse_cache:build_from_metadata_rows({
   { schema_name = "Sales", table_name = "Users", obj_type = "table" },
 })
@@ -127,6 +160,12 @@ local function index_snapshot(target)
   return {
     schemas = vim.deepcopy(target.schemas),
     tables = vim.deepcopy(target.tables),
+    schema_lookup_exact = vim.deepcopy(target.schema_lookup_exact),
+    schema_lookup = vim.deepcopy(target.schema_lookup),
+    table_lookup_exact_by_schema = vim.deepcopy(target.table_lookup_exact_by_schema),
+    table_lookup_by_schema = vim.deepcopy(target.table_lookup_by_schema),
+    table_lookup_exact_global = vim.deepcopy(target.table_lookup_exact_global),
+    table_lookup_global = vim.deepcopy(target.table_lookup_global),
     all_table_names = target:get_all_table_names(),
     schema_items = target:get_schema_completion_items(),
     a_table_items = target:get_table_completion_items("A_SCHEMA"),
@@ -165,6 +204,29 @@ assert_true(
   "incremental table update equals full rebuild",
   vim.deep_equal(index_snapshot(incremental_update_cache), index_snapshot(full_update_cache))
 )
+
+local case_equivalence_rows = {
+  { schema_name = "aA", table_name = "tT", obj_type = "table" },
+  { schema_name = "Aa", table_name = "Tt", obj_type = "table" },
+}
+local full_case_cache = scoped_cache("sqlite", "lsp11-r6-full-case-index")
+full_case_cache:build_from_metadata_rows(case_equivalence_rows)
+local incremental_case_cache = scoped_cache("sqlite", "lsp11-r6-incremental-case-index")
+for _, row in ipairs(case_equivalence_rows) do
+  incremental_case_cache:_upsert_table_index(row.schema_name, row.table_name, row.obj_type)
+end
+assert_true(
+  "incremental case-fold representatives equal full rebuild",
+  vim.deep_equal(index_snapshot(incremental_case_cache), index_snapshot(full_case_cache))
+)
+local expected_case_schema = full_case_cache:find_schema("AA")
+local expected_case_table = full_case_cache:find_table_in_schema("AA", "TT")
+incremental_case_cache:_store_columns(expected_case_schema .. "." .. expected_case_table, {
+  { name = "ID", type = "integer" },
+})
+assert_eq("incremental case-fold schema representative", incremental_case_cache:find_schema("AA"), expected_case_schema)
+assert_eq("incremental case-fold table representative", incremental_case_cache:find_table_in_schema("AA", "TT"), expected_case_table)
+assert_eq("incremental case-fold warm columns", incremental_case_cache:get_column_completion_items("AA", "TT")[1].label, "ID")
 
 local o1_cache = SchemaCache:new({}, "lsp11-r6-targeted-o1")
 local o1_rows = {}
@@ -222,6 +284,8 @@ print("LSP11_LRU_BOUND_HONORED=true")
 print("LSP11_COMPLETION_INDEX_IMMUTABLE=true")
 print("LSP11_INDEX_INCREMENTAL_OK=true")
 print("LSP11_INCREMENTAL_INDEX_EQUIVALENT=true")
+print("LSP11_R6_INC_FULL_REPR_EQUIVALENT=true")
+print("LSP11_R6_QUOTED_VS_UNQUOTED_DISTINCT=true")
 print("LSP11_R6_TARGETED_GLOBAL_INDEX_O1=true")
 print("LSP11_R6_LUA_NIL_TERNARY_CLEARED=true")
 

@@ -20,6 +20,9 @@ local function fold_id(conn_type)
   if conn_type == "sqlserver" or conn_type == "mssql" then
     return "case_insensitive"
   end
+  if conn_type == "sqlite" or conn_type == "sqlite3" then
+    return "case_insensitive"
+  end
   if conn_type == "clickhouse" then
     return "identity"
   end
