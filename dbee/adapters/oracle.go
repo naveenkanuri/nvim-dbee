@@ -20,15 +20,25 @@ var _ core.Adapter = (*Oracle)(nil)
 type Oracle struct{}
 
 func (o *Oracle) Connect(url string) (core.Driver, error) {
-	db, err := sql.Open("oracle", url)
+	driver, _, err := o.ConnectDetailed(url)
+	return driver, err
+}
+
+func (o *Oracle) ConnectDetailed(url string) (core.Driver, *core.ConnectMetadata, error) {
+	preparedURL, walletMeta, err := prepareOracleWalletURL(url)
 	if err != nil {
-		return nil, fmt.Errorf("unable to connect to oracle database: %v", err)
+		return nil, nil, fmt.Errorf("prepare oracle wallet: %w", err)
+	}
+
+	db, err := sql.Open("oracle", preparedURL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("unable to connect to oracle database: %v", err)
 	}
 
 	return &oracleDriver{
 		c:  builders.NewClient(db),
 		db: db,
-	}, nil
+	}, &core.ConnectMetadata{WalletAutoExtract: walletMeta}, nil
 }
 
 func (*Oracle) GetHelpers(opts *core.TableOptions) map[string]string {

@@ -242,9 +242,14 @@ func (h *Handler) ConnectionGetParams(connID core.ConnectionID) (*core.Connectio
 }
 
 func connectionTestParams(params *core.ConnectionParams) error {
+	_, err := connectionTestParamsDetailed(params)
+	return err
+}
+
+func connectionTestParamsDetailed(params *core.ConnectionParams) (*core.ConnectMetadata, error) {
 	temp, err := adapters.NewConnection(params)
 	if err != nil {
-		return fmt.Errorf("adapters.NewConnection: %w", err)
+		return nil, fmt.Errorf("adapters.NewConnection: %w", err)
 	}
 	defer temp.Close()
 
@@ -252,10 +257,10 @@ func connectionTestParams(params *core.ConnectionParams) error {
 	defer cancel()
 
 	if err := temp.Ping(ctx); err != nil {
-		return fmt.Errorf("temp.Ping: %w", err)
+		return temp.GetConnectMetadata(), fmt.Errorf("temp.Ping: %w", err)
 	}
 
-	return nil
+	return temp.GetConnectMetadata(), nil
 }
 
 func (h *Handler) ConnectionTest(connID core.ConnectionID) error {
@@ -273,6 +278,22 @@ func (h *Handler) ConnectionTestSpec(params *core.ConnectionParams) error {
 	}
 
 	return connectionTestParams(params)
+}
+
+func (h *Handler) ConnectionTestSpecDetailed(params *core.ConnectionParams) (*core.ConnectMetadata, error) {
+	if params == nil {
+		return nil, fmt.Errorf("connection params are required")
+	}
+
+	return connectionTestParamsDetailed(params)
+}
+
+func (h *Handler) OracleWalletCacheClear() error {
+	return adapters.ClearOracleWalletCache()
+}
+
+func (h *Handler) OracleWalletSetAutoExtract(enabled bool) {
+	adapters.SetOracleWalletAutoExtract(enabled)
 }
 
 func (h *Handler) ConnectionGetStructure(connID core.ConnectionID, opts ...*core.StructureOptions) ([]*core.Structure, error) {

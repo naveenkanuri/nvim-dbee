@@ -4,3 +4,8 @@ docs/plans/
 CLAUDE.md
 dbee/dbee
 .planning/
+.claude/
+.codex/
+.nvimlog
+canonical_entry
+new_conn_id

@@ -154,6 +154,22 @@ func classifyConnectionTestError(err error) string {
 	}
 }
 
+func connectionMetadataMap(meta *core.ConnectMetadata) map[string]any {
+	out := map[string]any{}
+	if meta == nil {
+		return out
+	}
+	if wallet := meta.WalletAutoExtract; wallet != nil {
+		out["wallet_auto_extract"] = map[string]any{
+			"hash_prefix": wallet.HashPrefix,
+			"cache_hit":   wallet.CacheHit,
+			"extracted":   wallet.Extracted,
+			"file_count":  wallet.FileCount,
+		}
+	}
+	return out
+}
+
 type connectionParamsRPC struct {
 	ID           string                    `msgpack:"id"`
 	URL          string                    `msgpack:"url"`
@@ -329,6 +345,46 @@ func mountEndpoints(p *plugin.Plugin, h *handler.Handler) {
 				"error_kind": classifyConnectionTestError(err),
 				"message":    err.Error(),
 			}, nil
+		})
+
+	p.RegisterEndpoint(
+		"DbeeConnectionTestDetailed",
+		func(args *struct {
+			Opts *connectionParamsRPC `msgpack:",array"`
+		},
+		) (any, error) {
+			meta, err := h.ConnectionTestSpecDetailed(args.Opts.toCore())
+			if err == nil {
+				return map[string]any{
+					"status": "ok",
+					"meta":   connectionMetadataMap(meta),
+				}, nil
+			}
+
+			return map[string]any{
+				"status": "error",
+				"error": map[string]any{
+					"error_kind": classifyConnectionTestError(err),
+					"message":    err.Error(),
+				},
+				"meta": connectionMetadataMap(meta),
+			}, nil
+		})
+
+	p.RegisterEndpoint(
+		"DbeeOracleWalletCacheClear",
+		func() error {
+			return h.OracleWalletCacheClear()
+		})
+
+	p.RegisterEndpoint(
+		"DbeeOracleWalletSetAutoExtract",
+		func(args *struct {
+			Enabled bool `msgpack:",array"`
+		},
+		) error {
+			h.OracleWalletSetAutoExtract(args.Enabled)
+			return nil
 		})
 
 	p.RegisterEndpoint(

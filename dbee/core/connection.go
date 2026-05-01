@@ -29,6 +29,12 @@ type (
 		GetHelpers(opts *TableOptions) map[string]string
 	}
 
+	// DetailedConnectAdapter is implemented by adapters that can return
+	// additive metadata about connection preparation without changing Connect.
+	DetailedConnectAdapter interface {
+		ConnectDetailed(url string) (Driver, *ConnectMetadata, error)
+	}
+
 	// Driver is an interface for a specific database driver.
 	Driver interface {
 		Query(ctx context.Context, query string) (ResultStream, error)
@@ -73,14 +79,26 @@ type QueryExecuteOptions struct {
 	Binds map[string]string
 }
 
+type WalletAutoExtractMetadata struct {
+	HashPrefix string `json:"hash_prefix" msgpack:"hash_prefix"`
+	CacheHit   bool   `json:"cache_hit" msgpack:"cache_hit"`
+	Extracted  bool   `json:"extracted" msgpack:"extracted"`
+	FileCount  int    `json:"file_count" msgpack:"file_count"`
+}
+
+type ConnectMetadata struct {
+	WalletAutoExtract *WalletAutoExtractMetadata `json:"wallet_auto_extract,omitempty" msgpack:"wallet_auto_extract,omitempty"`
+}
+
 type ConnectionID string
 
 type Connection struct {
 	params           *ConnectionParams
 	unexpandedParams *ConnectionParams
 
-	driver  Driver
-	adapter Adapter
+	driver   Driver
+	adapter  Adapter
+	metadata *ConnectMetadata
 }
 
 func (s *Connection) MarshalJSON() ([]byte, error) {
@@ -94,20 +112,43 @@ func NewConnection(params *ConnectionParams, adapter Adapter) (*Connection, erro
 		expanded.ID = ConnectionID(uuid.New().String())
 	}
 
-	driver, err := adapter.Connect(expanded.URL)
-	if err != nil {
-		return nil, fmt.Errorf("adapter.Connect: %w", err)
+	var driver Driver
+	var metadata *ConnectMetadata
+	var err error
+	if detailed, ok := adapter.(DetailedConnectAdapter); ok {
+		driver, metadata, err = detailed.ConnectDetailed(expanded.URL)
+		if err != nil {
+			return nil, fmt.Errorf("adapter.ConnectDetailed: %w", err)
+		}
+	} else {
+		driver, err = adapter.Connect(expanded.URL)
+		if err != nil {
+			return nil, fmt.Errorf("adapter.Connect: %w", err)
+		}
 	}
 
 	c := &Connection{
 		params:           expanded,
 		unexpandedParams: params,
 
-		driver:  driver,
-		adapter: adapter,
+		driver:   driver,
+		adapter:  adapter,
+		metadata: metadata,
 	}
 
 	return c, nil
+}
+
+func (c *Connection) GetConnectMetadata() *ConnectMetadata {
+	if c.metadata == nil {
+		return nil
+	}
+	copied := *c.metadata
+	if c.metadata.WalletAutoExtract != nil {
+		wallet := *c.metadata.WalletAutoExtract
+		copied.WalletAutoExtract = &wallet
+	}
+	return &copied
 }
 
 func (c *Connection) GetID() ConnectionID {
