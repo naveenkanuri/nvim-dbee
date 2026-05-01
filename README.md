@@ -180,6 +180,17 @@ require("dbee").setup({
 })
 ```
 
+Oracle wallet zip auto-extract is enabled by default and can be disabled under
+`oracle`:
+
+```lua
+require("dbee").setup({
+  oracle = {
+    wallet_auto_extract = true,
+  },
+})
+```
+
 Cold table or schema-qualified alias completion now returns promptly while
 columns warm asynchronously. Trigger completion again after warmup to receive
 the full column list. External completion stacks such as `cmp-dbee` remain
@@ -388,6 +399,39 @@ Another option is to use "edit" item in the tree and just edit the source manual
 
 If you aren't satisfied with the default capabilities, you can implement your own source. You just
 need to fill the `Source` interface and pass it to config at setup (`:h dbee.sources`).
+
+#### Oracle Wallet Zip Paths
+
+Oracle Cloud Wallet connections may use a `.zip` wallet path directly. When an Oracle connection
+uses a `wallet=` or `WALLET=` query parameter that points at a zip file, DBee extracts the wallet to
+a managed cache directory before connecting and passes the extracted directory to the Oracle driver.
+Existing directory-based wallet paths continue to pass through unchanged.
+
+The cache root is `${XDG_CACHE_HOME:-os.UserCacheDir()}/nvim-dbee/wallets`, and entries are keyed by
+the wallet zip content hash. Cache hits reuse the extracted directory; a newer zip mtime or missing
+required files triggers re-extraction. A valid extracted wallet must contain `cwallet.sso`,
+`tnsnames.ora`, and `sqlnet.ora`.
+
+Wallet contents are treated as sensitive. Cache directories are created with restrictive
+permissions where the platform supports them, files are written as owner-readable/writable, and test
+success messages show only redacted extraction metadata such as `wallet extracted (7c4a8d... 12
+files)`.
+
+Zip extraction rejects unsafe entries, including absolute paths, `..` traversal, symlinks,
+non-regular files, files larger than 10 MiB, and archives whose total extracted size exceeds 50 MiB.
+
+To opt out and keep the previous manual-unzip behavior:
+
+```lua
+require("dbee").setup({
+  oracle = {
+    wallet_auto_extract = false,
+  },
+})
+```
+
+To clear the managed wallet cache, run `:DBeeWalletCacheClear`,
+`:Dbee wallet_cache_clear`, or `require("dbee").wallet_cache_clear()`.
 
 #### Secrets
 
