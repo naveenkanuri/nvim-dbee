@@ -15,7 +15,6 @@ import (
 	"runtime"
 	"sort"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -32,7 +31,13 @@ const (
 var oracleWalletRequiredFiles = []string{"cwallet.sso", "tnsnames.ora", "sqlnet.ora"}
 
 var oracleWalletAutoExtract atomic.Bool
-var oracleWalletExtractMu sync.Mutex
+
+const (
+	oracleWalletLockWait       = 30 * time.Second
+	oracleWalletLockStaleAfter = 2 * time.Minute
+	oracleWalletLockPollStart  = 10 * time.Millisecond
+	oracleWalletLockPollMax    = 100 * time.Millisecond
+)
 
 func init() {
 	oracleWalletAutoExtract.Store(true)
@@ -247,8 +252,11 @@ func resolveOracleWalletZip(zipPath string) (string, *core.WalletAutoExtractMeta
 	}
 	finalDir := filepath.Join(root, prefix)
 
-	oracleWalletExtractMu.Lock()
-	defer oracleWalletExtractMu.Unlock()
+	unlock, err := acquireOracleWalletHashLock(root, prefix)
+	if err != nil {
+		return "", nil, err
+	}
+	defer unlock()
 
 	if marker, ok := validOracleWalletCache(finalDir, fullHash, info.ModTime()); ok {
 		return finalDir, &core.WalletAutoExtractMetadata{
@@ -270,6 +278,52 @@ func resolveOracleWalletZip(zipPath string) (string, *core.WalletAutoExtractMeta
 		Extracted:  true,
 		FileCount:  fileCount,
 	}, nil
+}
+
+func acquireOracleWalletHashLock(root, prefix string) (func(), error) {
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return nil, fmt.Errorf("create wallet cache root: %w", err)
+	}
+	_ = os.Chmod(root, 0o700)
+
+	lockDir := filepath.Join(root, prefix+".lock")
+	deadline := time.Now().Add(oracleWalletLockWait)
+	delay := oracleWalletLockPollStart
+	for {
+		if err := os.Mkdir(lockDir, 0o700); err == nil {
+			_ = os.Chmod(lockDir, 0o700)
+			return func() {
+				_ = os.Remove(lockDir)
+			}, nil
+		} else if !os.IsExist(err) {
+			return nil, fmt.Errorf("acquire wallet cache lock: %w", err)
+		}
+
+		now := time.Now()
+		if oracleWalletLockIsStale(lockDir, now) {
+			_ = os.RemoveAll(lockDir)
+			continue
+		}
+		if now.After(deadline) {
+			return nil, fmt.Errorf("timeout acquiring wallet cache lock for %s", prefix)
+		}
+
+		time.Sleep(delay)
+		if delay < oracleWalletLockPollMax {
+			delay *= 2
+			if delay > oracleWalletLockPollMax {
+				delay = oracleWalletLockPollMax
+			}
+		}
+	}
+}
+
+func oracleWalletLockIsStale(lockDir string, now time.Time) bool {
+	info, err := os.Stat(lockDir)
+	if err != nil {
+		return false
+	}
+	return now.Sub(info.ModTime()) > oracleWalletLockStaleAfter
 }
 
 func hashFileSHA256(p string) (string, error) {

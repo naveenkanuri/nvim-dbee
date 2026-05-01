@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -276,6 +277,9 @@ func TestOracleWalletZipMarkers(t *testing.T) {
 	assertConcurrentResolve(t, zipPath, cacheDir)
 	emit.True("WALLET_ZIP_CONCURRENT_RESOLVE_OK")
 
+	assertCrossProcessResolve(t, zipPath)
+	emit.True("WALLET_ZIP_CROSS_PROCESS_LOCK_OK")
+
 	emit.True("WALLET_ZIP_NO_LIVE_ORACLE_DEPENDENCY")
 }
 
@@ -364,6 +368,27 @@ func testURLRewriteAndDuplicateKeys(t *testing.T, zipPath, cacheDir string) {
 		t.Fatalf("wallet param was not rewritten to cache dir: %s", prepared)
 	}
 
+	descriptor := "(DESCRIPTION=(ADDRESS_LIST=(ADDRESS=(PROTOCOL=tcps)(HOST=example.com)(PORT=1522)))(CONNECT_DATA=(SERVICE_NAME=db_low)))"
+	connStrURL := "oracle://user:pass@example.com:1522?connStr=" +
+		url.QueryEscape(descriptor) + "&WALLET=" + url.QueryEscape(zipPath) + "&SSL=enable"
+	preparedConnStr, connStrMeta, err := prepareOracleWalletURL(connStrURL)
+	if err != nil {
+		t.Fatalf("rewrite connStr WALLET shape: %v", err)
+	}
+	if connStrMeta == nil {
+		t.Fatalf("expected metadata for connStr WALLET rewrite")
+	}
+	connStrParsed, err := url.Parse(preparedConnStr)
+	if err != nil {
+		t.Fatalf("parse prepared connStr URL: %v", err)
+	}
+	if connStrParsed.Query().Get("connStr") != descriptor {
+		t.Fatalf("connStr descriptor was not preserved: %s", preparedConnStr)
+	}
+	if connStrParsed.Query().Get("WALLET") != cacheDir {
+		t.Fatalf("connStr WALLET param was not rewritten to cache dir: %s", preparedConnStr)
+	}
+
 	conflictURL := "oracle://user:pass@example.com:1522/db_low?wallet=" +
 		url.QueryEscape(zipPath) + "&WALLET=" + url.QueryEscape(zipPath+"x")
 	if _, _, err := prepareOracleWalletURL(conflictURL); err == nil {
@@ -407,6 +432,92 @@ func assertConcurrentResolve(t *testing.T, zipPath, expectedDir string) {
 	}
 }
 
+func assertCrossProcessResolve(t *testing.T, zipPath string) {
+	t.Helper()
+	if err := ClearOracleWalletCache(); err != nil {
+		t.Fatalf("clear cache before cross-process resolve: %v", err)
+	}
+	fullHash, err := hashFileSHA256(zipPath)
+	if err != nil {
+		t.Fatalf("hash zip for cross-process resolve: %v", err)
+	}
+	root, err := oracleWalletCacheRoot()
+	if err != nil {
+		t.Fatalf("cache root for cross-process resolve: %v", err)
+	}
+	expectedDir := filepath.Join(root, fullHash[:oracleWalletHashPrefix])
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 3)
+	start := make(chan struct{})
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			cmd := exec.Command(os.Args[0], "-test.run=^TestOracleWalletCrossProcessLockHelper$", "-test.v")
+			cmd.Env = append(os.Environ(),
+				"NVIM_DBEE_WALLET_CROSS_PROCESS_HELPER=1",
+				"NVIM_DBEE_WALLET_CROSS_PROCESS_ZIP="+zipPath,
+				"NVIM_DBEE_WALLET_CROSS_PROCESS_EXPECTED="+expectedDir,
+			)
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				errs <- fmt.Errorf("helper failed: %w\n%s", err, string(output))
+				return
+			}
+			if !strings.Contains(string(output), "WALLET_CROSS_PROCESS_DIR="+expectedDir) {
+				errs <- fmt.Errorf("helper did not report expected dir %s\n%s", expectedDir, string(output))
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	assertRequiredFiles(t, expectedDir)
+	if _, err := os.Stat(filepath.Join(root, fullHash[:oracleWalletHashPrefix]+".lock")); !os.IsNotExist(err) {
+		t.Fatalf("cross-process lock residue: %v", err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read cache root after cross-process resolve: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".extract-") {
+			t.Fatalf("temp residue after cross-process resolve: %s", entry.Name())
+		}
+	}
+}
+
+func TestOracleWalletCrossProcessLockHelper(t *testing.T) {
+	if os.Getenv("NVIM_DBEE_WALLET_CROSS_PROCESS_HELPER") != "1" {
+		t.Skip("helper process only")
+	}
+	SetOracleWalletAutoExtract(true)
+	zipPath := os.Getenv("NVIM_DBEE_WALLET_CROSS_PROCESS_ZIP")
+	expectedDir := os.Getenv("NVIM_DBEE_WALLET_CROSS_PROCESS_EXPECTED")
+	if zipPath == "" || expectedDir == "" {
+		t.Fatalf("missing helper env")
+	}
+
+	dir, _ := requirePreparedWallet(t, zipPath)
+	if dir != expectedDir {
+		t.Fatalf("unexpected helper dir %s != %s", dir, expectedDir)
+	}
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		assertRequiredFiles(t, dir)
+		time.Sleep(10 * time.Millisecond)
+	}
+	fmt.Printf("WALLET_CROSS_PROCESS_DIR=%s\n", dir)
+}
+
 func TestOracleWalletPerfMarkers(t *testing.T) {
 	emit := newWalletMarkerEmitter(t)
 	withWalletTestCache(t)
@@ -435,17 +546,17 @@ func TestOracleWalletPerfMarkers(t *testing.T) {
 		t.Fatalf("stat zip: %v", err)
 	}
 
-	hitValidation := measureP95(10, 100, func(i int) {
+	hitValidation := measureStats(10, 100, func(i int) {
 		if _, ok := validOracleWalletCache(cacheDir, fullHash, sourceInfo.ModTime()); !ok {
 			t.Fatalf("valid cache failed at iteration %d", i)
 		}
 	})
-	hitTotal := measureP95(10, 100, func(i int) {
+	hitTotal := measureStats(10, 100, func(i int) {
 		if _, _, err := prepareOracleWalletURL(rawURL); err != nil {
 			t.Fatalf("cache hit prepare failed at iteration %d: %v", i, err)
 		}
 	})
-	extract := measureP95(10, 100, func(i int) {
+	extract := measureStats(10, 100, func(i int) {
 		if err := ClearOracleWalletCache(); err != nil {
 			t.Fatalf("clear cache: %v", err)
 		}
@@ -456,7 +567,7 @@ func TestOracleWalletPerfMarkers(t *testing.T) {
 	if _, _, err := prepareOracleWalletURL(rawURL); err != nil {
 		t.Fatalf("re-prime cache: %v", err)
 	}
-	reextract := measureP95(10, 100, func(i int) {
+	reextract := measureStats(10, 100, func(i int) {
 		next := time.Now().Add(time.Duration(i+1) * time.Second)
 		if err := os.Chtimes(zipPath, next, next); err != nil {
 			t.Fatalf("touch zip: %v", err)
@@ -466,27 +577,39 @@ func TestOracleWalletPerfMarkers(t *testing.T) {
 		}
 	})
 
-	if hitValidation >= 5 {
-		t.Fatalf("cache validation P95 %.3fms exceeds 5ms", hitValidation)
+	if hitValidation.p95 >= 5 {
+		t.Fatalf("cache validation P95 %.3fms exceeds 5ms", hitValidation.p95)
 	}
-	if hitTotal >= 30 {
-		t.Fatalf("cache hit total P95 %.3fms exceeds 30ms", hitTotal)
+	if hitTotal.p95 >= 30 {
+		t.Fatalf("cache hit total P95 %.3fms exceeds 30ms", hitTotal.p95)
 	}
-	if extract >= 500 {
-		t.Fatalf("extract P95 %.3fms exceeds 500ms", extract)
+	if extract.p95 >= 500 {
+		t.Fatalf("extract P95 %.3fms exceeds 500ms", extract.p95)
 	}
-	if reextract >= 500 {
-		t.Fatalf("reextract P95 %.3fms exceeds 500ms", reextract)
+	if reextract.p95 >= 500 {
+		t.Fatalf("reextract P95 %.3fms exceeds 500ms", reextract.p95)
 	}
 
 	emit.True("WALLET_ZIP_PERF_DETERMINISTIC")
-	emit.Metric("WALLET_ZIP_CACHE_HIT_MS", hitValidation)
-	emit.Metric("WALLET_ZIP_CACHE_HIT_TOTAL_P95_MS", hitTotal)
-	emit.Metric("WALLET_ZIP_EXTRACT_MS", extract)
-	emit.Metric("WALLET_ZIP_REEXTRACT_MS", reextract)
+	emitStats(emit, "WALLET_ZIP_CACHE_HIT", hitValidation)
+	emitStats(emit, "WALLET_ZIP_CACHE_HIT_TOTAL", hitTotal)
+	emitStats(emit, "WALLET_ZIP_EXTRACT", extract)
+	emitStats(emit, "WALLET_ZIP_REEXTRACT", reextract)
 }
 
-func measureP95(warmup, measured int, fn func(iteration int)) float64 {
+type walletPerfStats struct {
+	p50 float64
+	p95 float64
+	max float64
+}
+
+func emitStats(emit *walletMarkerEmitter, prefix string, stats walletPerfStats) {
+	emit.Metric(prefix+"_P50_MS", stats.p50)
+	emit.Metric(prefix+"_P95_MS", stats.p95)
+	emit.Metric(prefix+"_MAX_MS", stats.max)
+}
+
+func measureStats(warmup, measured int, fn func(iteration int)) walletPerfStats {
 	for i := 0; i < warmup; i++ {
 		fn(-warmup + i)
 	}
@@ -497,7 +620,18 @@ func measureP95(warmup, measured int, fn func(iteration int)) float64 {
 		samples = append(samples, float64(time.Since(start).Microseconds())/1000.0)
 	}
 	sortFloat64s(samples)
-	index := int(float64(len(samples))*0.95 + 0.5)
+	return walletPerfStats{
+		p50: percentile(samples, 0.50),
+		p95: percentile(samples, 0.95),
+		max: samples[len(samples)-1],
+	}
+}
+
+func percentile(samples []float64, pct float64) float64 {
+	index := int(float64(len(samples)-1)*pct + 0.5)
+	if index < 0 {
+		index = 0
+	}
 	if index >= len(samples) {
 		index = len(samples) - 1
 	}
