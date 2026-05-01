@@ -1,4 +1,5 @@
 local context = require("dbee.lsp.context")
+local epoch_authority = require("dbee.lsp.epoch_authority")
 local hover = require("dbee.lsp.hover")
 local resolve = require("dbee.lsp.resolve")
 
@@ -29,12 +30,22 @@ local function completion_result(items, is_incomplete)
   }
 end
 
+---@param cache SchemaCache
+---@return boolean
+local function cache_fresh(cache)
+  local check = epoch_authority.check_fresh(cache, cache and cache.handler, cache and cache.conn_id)
+  return check.fresh
+end
+
 --- Build completion items for table names.
 ---@param cache SchemaCache
 ---@param schema string? specific schema to filter by
 ---@param opts? table
 ---@return lsp.CompletionItem[]
 local function table_completions(cache, schema, opts)
+  if not cache_fresh(cache) then
+    return {}
+  end
   opts = opts or {}
   opts.include_data = true
   if schema then
@@ -50,6 +61,10 @@ end
 ---@param alias_info table? { table: string, schema: string? }
 ---@return table result
 local function column_completions(cache, table_ref, alias_info)
+  if not cache_fresh(cache) then
+    return completion_result({}, false)
+  end
+
   local tbl_name = table_ref
 
   if alias_info then
@@ -118,6 +133,10 @@ end
 ---@param cache SchemaCache
 ---@return lsp.CompletionItem[]
 local function all_column_completions(cache)
+  if not cache_fresh(cache) then
+    return {}
+  end
+
   local items = {}
   local seen = {}
 
@@ -144,6 +163,9 @@ end
 ---@param cache SchemaCache
 ---@return lsp.CompletionItem[]
 local function schema_completions(cache)
+  if not cache_fresh(cache) then
+    return {}
+  end
   return cache:get_schema_completion_items({ include_data = true })
 end
 

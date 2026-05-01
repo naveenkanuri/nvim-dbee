@@ -1924,6 +1924,7 @@ local function run_arch14_schema_dot_advisory()
   cache:on_schema_objects_loaded({
     conn_id = "arch14-lsp-perf",
     schema = "APP",
+    root_epoch = 1,
     objects = {
       { type = "table", schema = "APP", name = "TABLE_A" },
       { type = "view", schema = "APP", name = "VIEW_A" },

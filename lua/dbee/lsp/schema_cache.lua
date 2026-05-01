@@ -28,6 +28,7 @@
 local SchemaCache = {}
 
 local nio = require("nio")
+local epoch_authority = require("dbee.lsp.epoch_authority")
 local schema_filter = require("dbee.schema_filter")
 local schema_filter_authority = require("dbee.schema_filter_authority")
 local schema_name_canonical = require("dbee.schema_name_canonical")
@@ -217,7 +218,7 @@ function SchemaCache:new(handler, conn_id)
   setmetatable(o, self)
   self.__index = self
   o.cache_identity_value = tostring(conn_id or "") .. "|" .. tostring(o)
-  o.metadata_root_epoch_value = o:authoritative_root_epoch()
+  o.metadata_root_epoch_value = epoch_authority.handler_epoch(handler, conn_id)
   return o
 end
 
@@ -229,7 +230,7 @@ function SchemaCache:_bump_metadata_generation(_reason, root_epoch)
   if root_epoch ~= nil then
     self.metadata_root_epoch_value = tonumber(root_epoch) or 0
   else
-    self.metadata_root_epoch_value = self:authoritative_root_epoch()
+    self.metadata_root_epoch_value = epoch_authority.handler_epoch(self.handler, self.conn_id)
   end
 end
 
@@ -290,13 +291,7 @@ end
 --- Hover/resolve use this to fail closed when cache metadata lags connection invalidation.
 ---@return integer
 function SchemaCache:authoritative_root_epoch()
-  if self.handler and type(self.handler.get_authoritative_root_epoch) == "function" then
-    local ok, epoch = pcall(self.handler.get_authoritative_root_epoch, self.handler, self.conn_id)
-    if ok then
-      return tonumber(epoch) or 0
-    end
-  end
-  return 0
+  return epoch_authority.handler_epoch(self.handler, self.conn_id)
 end
 
 ---@private
@@ -329,7 +324,7 @@ function SchemaCache:_queue_completion_refresh_notification(probe, request_id, r
   if type(self.completion_refresh_notifier) ~= "function" then
     return
   end
-  if root_epoch < self:authoritative_root_epoch() then
+  if not epoch_authority.admit_write(self, root_epoch, epoch_authority.handler_epoch(self.handler, self.conn_id)) then
     return
   end
   if not schema_filter.matches(probe.schema, self.schema_scope) then
@@ -364,7 +359,7 @@ function SchemaCache:_queue_completion_refresh_notification(probe, request_id, r
     if type(self.completion_refresh_notifier) ~= "function" then
       return
     end
-    if root_epoch < self:authoritative_root_epoch() then
+    if not epoch_authority.admit_write(self, root_epoch, epoch_authority.handler_epoch(self.handler, self.conn_id)) then
       return
     end
     self.completion_refresh_notifier(vim.deepcopy(payload))
@@ -377,14 +372,18 @@ end
 ---@param opts? { root_epoch?: integer }
 function SchemaCache:build_from_metadata_rows(rows, opts)
   opts = opts or {}
-  self:_bump_metadata_generation("build_from_metadata_rows", opts.root_epoch)
+  local root_epoch = self:_root_epoch(opts)
+  if not epoch_authority.admit_write(self, root_epoch, epoch_authority.handler_epoch(self.handler, self.conn_id)) then
+    return false
+  end
+  self:_bump_metadata_generation("build_from_metadata_rows", root_epoch)
   self.schemas = {}
   self.tables = {}
   self.columns = {}
   self:_reset_indexes()
 
   if not rows or #rows == 0 then
-    return
+    return true
   end
 
   for _, row in ipairs(rows) do
@@ -416,6 +415,7 @@ function SchemaCache:build_from_metadata_rows(rows, opts)
   for schema in pairs(self.schemas) do
     self:_mark_schema_loaded(schema)
   end
+  return true
 end
 
 --- Build the cache from a pre-fetched structure tree.
@@ -424,14 +424,18 @@ end
 ---@param opts? { root_epoch?: integer }
 function SchemaCache:build_from_structure(structs, opts)
   opts = opts or {}
-  self:_bump_metadata_generation("build_from_structure", opts.root_epoch)
+  local root_epoch = self:_root_epoch(opts)
+  if not epoch_authority.admit_write(self, root_epoch, epoch_authority.handler_epoch(self.handler, self.conn_id)) then
+    return false
+  end
+  self:_bump_metadata_generation("build_from_structure", root_epoch)
   self.schemas = {}
   self.tables = {}
   self.columns = {}
   self:_reset_indexes()
 
   if not structs or structs == vim.NIL then
-    return
+    return true
   end
 
   self:_flatten(structs, nil)
@@ -441,14 +445,22 @@ function SchemaCache:build_from_structure(structs, opts)
   for schema in pairs(self.schemas) do
     self:_mark_schema_loaded(schema)
   end
+  return true
 end
 
 ---@param schemas table[] array of {name: string}
 ---@param opts? { preserve_loaded?: boolean, root_epoch?: integer }
 function SchemaCache:build_from_schemas(schemas, opts)
   opts = opts or {}
-  self:_bump_metadata_generation("build_from_schemas", opts.root_epoch)
+  local previous_root_epoch = epoch_authority.cache_epoch(self)
+  local root_epoch = opts.root_epoch ~= nil and (tonumber(opts.root_epoch) or 0)
+    or epoch_authority.handler_epoch(self.handler, self.conn_id)
+  if not epoch_authority.admit_write(self, root_epoch, epoch_authority.handler_epoch(self.handler, self.conn_id)) then
+    return false
+  end
+  self:_bump_metadata_generation("build_from_schemas", root_epoch)
   local preserve_loaded = opts.preserve_loaded ~= false
+    and epoch_authority.admit_write(self, previous_root_epoch, root_epoch)
   local previous_tables = self.tables or {}
   local previous_columns = self.columns or {}
   local previous_lru = self.column_lru or {}
@@ -515,6 +527,7 @@ function SchemaCache:build_from_schemas(schemas, opts)
 
   self:_rebuild_structure_indexes()
   self:_rebuild_column_indexes()
+  return true
 end
 
 ---@private
@@ -886,8 +899,14 @@ end
 ---@private
 ---@param key string
 ---@param cols Column[]
----@param _opts? { root_epoch?: integer }
-function SchemaCache:_store_columns(key, cols, _opts)
+---@param opts? { root_epoch?: integer }
+---@return boolean applied
+function SchemaCache:_store_columns(key, cols, opts)
+  if opts and opts.root_epoch ~= nil
+    and not epoch_authority.admit_write(self, opts.root_epoch, epoch_authority.cache_epoch(self))
+  then
+    return false
+  end
   self:_bump_metadata_generation_preserve_root("_store_columns")
   self.columns[key] = cols
   self:_touch_column(key)
@@ -898,6 +917,7 @@ function SchemaCache:_store_columns(key, cols, _opts)
   end
 
   self:_evict_columns_if_needed()
+  return true
 end
 
 ---@private
@@ -948,10 +968,7 @@ function SchemaCache:_root_epoch(opts)
   if opts and opts.root_epoch ~= nil then
     return tonumber(opts.root_epoch) or 0
   end
-  if self.handler and type(self.handler.get_authoritative_root_epoch) == "function" then
-    return tonumber(self.handler:get_authoritative_root_epoch(self.conn_id)) or 0
-  end
-  return 0
+  return epoch_authority.handler_epoch(self.handler, self.conn_id)
 end
 
 ---@private
@@ -1378,7 +1395,7 @@ function SchemaCache:_load_column_file(path, prefix)
       self:_remove_corrupt_file(path, "loading column cache")
       return false
     end
-    if root_epoch ~= tonumber(self:metadata_root_epoch() or 0) then
+    if not epoch_authority.admit_write(self, root_epoch, epoch_authority.cache_epoch(self)) then
       os.remove(path)
       return false
     end
@@ -1397,8 +1414,7 @@ function SchemaCache:_load_column_file(path, prefix)
 
   local fname = vim.fn.fnamemodify(path, ":t:r")
   local key = fname:sub(#prefix + 1)
-  self:_store_columns(key, cols, { root_epoch = root_epoch })
-  return true
+  return self:_store_columns(key, cols, { root_epoch = root_epoch })
 end
 
 ---@private
@@ -1710,7 +1726,7 @@ function SchemaCache:save_to_disk()
     version = SCHEMA_CACHE_VERSION,
     conn_id = self.conn_id,
     schema_filter_signature = self.schema_filter_signature,
-    root_epoch = self:metadata_root_epoch(),
+    root_epoch = epoch_authority.cache_epoch(self),
     root_mode = self.root_mode or "full",
     root_loaded_schemas = vim.tbl_keys(self.loaded_schemas or {}),
     schemas = vim.tbl_keys(self.schemas),
@@ -1849,7 +1865,7 @@ function SchemaCache:_save_columns_to_disk(key, cols)
   self:_atomic_write_json(path, {
     version = SCHEMA_CACHE_VERSION,
     schema_filter_signature = self.schema_filter_signature,
-    root_epoch = self:metadata_root_epoch(),
+    root_epoch = epoch_authority.cache_epoch(self),
     columns = cols,
   }, "saving columns")
 end
@@ -2105,7 +2121,7 @@ function SchemaCache:_completion_data(kind, identity)
     }, "."),
     cache_identity = self:cache_identity(),
     cache_generation = self:generation(),
-    root_epoch = self:metadata_root_epoch(),
+    root_epoch = epoch_authority.cache_epoch(self),
   }
 end
 
@@ -2162,6 +2178,10 @@ function SchemaCache:_fresh_lsp_scope()
   local authority = self:read_lsp_authority()
   if authority.status == "authority_unavailable" then
     return nil, "authority_unavailable"
+  end
+  local epoch_check = epoch_authority.check_fresh(self, self.handler, self.conn_id)
+  if not epoch_check.fresh then
+    return nil, "stale_root_epoch"
   end
   if authority.status == "api_absent_legacy" then
     return schema_filter_authority.legacy_implicit_all(), nil
@@ -2307,12 +2327,14 @@ end
 ---@param opts? { include_data?: boolean }
 ---@return lsp.CompletionItem[]
 function SchemaCache:get_schema_completion_items(opts)
-  if not (opts and opts.include_data == true) then
-    return copy_items(self.schema_items)
-  end
-  return self:_copy_items_with_data(self.schema_items, "schema", function(item)
-    return { schema = item.label }
-  end)
+  return epoch_authority.read_with_freshness(self, self.handler, self.conn_id, function()
+    if not (opts and opts.include_data == true) then
+      return copy_items(self.schema_items)
+    end
+    return self:_copy_items_with_data(self.schema_items, "schema", function(item)
+      return { schema = item.label }
+    end)
+  end) or {}
 end
 
 --- Get precomputed table completion items for a schema.
@@ -2321,16 +2343,18 @@ end
 ---@return lsp.CompletionItem[]
 function SchemaCache:get_table_completion_items(schema, opts)
   opts = opts or {}
-  local actual_schema = self:find_schema(schema, { quoted = quoted_option(opts, "schema_quoted", "quoted") }) or schema
-  if opts.include_data ~= true then
-    return copy_items(self.table_items_by_schema[actual_schema])
-  end
-  return self:_copy_items_with_data(self.table_items_by_schema[actual_schema], "table", function(item)
-    return {
-      schema = actual_schema,
-      table = item.label,
-    }
-  end)
+  return epoch_authority.read_with_freshness(self, self.handler, self.conn_id, function()
+    local actual_schema = self:find_schema(schema, { quoted = quoted_option(opts, "schema_quoted", "quoted") }) or schema
+    if opts.include_data ~= true then
+      return copy_items(self.table_items_by_schema[actual_schema])
+    end
+    return self:_copy_items_with_data(self.table_items_by_schema[actual_schema], "table", function(item)
+      return {
+        schema = actual_schema,
+        table = item.label,
+      }
+    end)
+  end) or {}
 end
 
 ---@param schema string
@@ -2365,6 +2389,15 @@ end
 ---@param schema string
 ---@param opts? { schema_quoted?: boolean, quoted?: boolean }
 function SchemaCache:get_schema_table_completion_async(schema, opts)
+  local epoch_check = epoch_authority.check_fresh(self, self.handler, self.conn_id)
+  if not epoch_check.fresh then
+    return {
+      items = {},
+      is_incomplete = false,
+      reason = "stale_root_epoch",
+    }
+  end
+
   local status, actual_schema = self:schema_status(schema, opts)
   if status == "loaded" then
     return {
@@ -2423,22 +2456,24 @@ end
 ---@param opts? { include_data?: boolean }
 ---@return lsp.CompletionItem[]
 function SchemaCache:get_all_table_completion_items(opts)
-  if not (opts and opts.include_data == true) then
-    return copy_items(self.all_table_items)
-  end
-  return self:_copy_items_with_data(self.all_table_items, "table", function(item)
-    if self.all_table_item_ambiguous_by_label[item.label] then
-      return nil
+  return epoch_authority.read_with_freshness(self, self.handler, self.conn_id, function()
+    if not (opts and opts.include_data == true) then
+      return copy_items(self.all_table_items)
     end
-    local schema = self.all_table_item_source_by_label[item.label]
-    if not schema then
-      return nil
-    end
-    return {
-      schema = schema,
-      table = item.label,
-    }
-  end)
+    return self:_copy_items_with_data(self.all_table_items, "table", function(item)
+      if self.all_table_item_ambiguous_by_label[item.label] then
+        return nil
+      end
+      local schema = self.all_table_item_source_by_label[item.label]
+      if not schema then
+        return nil
+      end
+      return {
+        schema = schema,
+        table = item.label,
+      }
+    end)
+  end) or {}
 end
 
 --- Get precomputed column completion items for a table.
@@ -2448,21 +2483,23 @@ end
 ---@return lsp.CompletionItem[]
 function SchemaCache:get_column_completion_items(schema, table_name, opts)
   opts = opts or {}
-  local actual_schema = self:find_schema(schema, { quoted = opts.schema_quoted }) or schema or "_default"
-  local actual_table = self:find_table_in_schema(actual_schema, table_name, {
-    schema_quoted = true,
-    table_quoted = opts.table_quoted,
-  }) or table_name
-  if opts.include_data ~= true then
-    return copy_items(self.column_items_by_key[table_key(actual_schema, actual_table)])
-  end
-  return self:_copy_items_with_data(self.column_items_by_key[table_key(actual_schema, actual_table)], "column", function(item)
-    return {
-      schema = actual_schema,
-      table = actual_table,
-      column = item.label,
-    }
-  end)
+  return epoch_authority.read_with_freshness(self, self.handler, self.conn_id, function()
+    local actual_schema = self:find_schema(schema, { quoted = opts.schema_quoted }) or schema or "_default"
+    local actual_table = self:find_table_in_schema(actual_schema, table_name, {
+      schema_quoted = true,
+      table_quoted = opts.table_quoted,
+    }) or table_name
+    if opts.include_data ~= true then
+      return copy_items(self.column_items_by_key[table_key(actual_schema, actual_table)])
+    end
+    return self:_copy_items_with_data(self.column_items_by_key[table_key(actual_schema, actual_table)], "column", function(item)
+      return {
+        schema = actual_schema,
+        table = actual_table,
+        column = item.label,
+      }
+    end)
+  end) or {}
 end
 
 --- Find a schema name using exact or folded semantics.
@@ -2483,6 +2520,16 @@ end
 ---@return { columns: Column[], is_incomplete: boolean, in_flight: boolean, reason?: string, resolved_schema?: string, resolved_name?: string }
 function SchemaCache:get_columns_async(schema, table_name, opts)
   opts = opts or {}
+  local epoch_check = epoch_authority.check_fresh(self, self.handler, self.conn_id)
+  if not epoch_check.fresh then
+    return {
+      columns = {},
+      is_incomplete = false,
+      in_flight = false,
+      reason = "stale_root_epoch",
+    }
+  end
+
   schema = self:find_schema(schema, { quoted = opts.schema_quoted }) or schema or "_default"
   table_name = table_name or ""
 
@@ -2516,16 +2563,7 @@ function SchemaCache:get_columns_async(schema, table_name, opts)
   end
 
   local root_epoch = self:_root_epoch(opts)
-  local metadata_root_epoch = tonumber(self:metadata_root_epoch() or 0)
-  if metadata_root_epoch ~= self:authoritative_root_epoch() then
-    return {
-      columns = {},
-      is_incomplete = false,
-      in_flight = false,
-      reason = "stale_root_epoch",
-    }
-  end
-  if root_epoch ~= metadata_root_epoch then
+  if not epoch_authority.admit_write(self, root_epoch, epoch_check.cache_epoch) then
     return {
       columns = {},
       is_incomplete = false,
@@ -2643,10 +2681,10 @@ function SchemaCache:on_columns_loaded(data)
   end
 
   local payload_epoch = tonumber(data.root_epoch) or 0
-  if payload_epoch ~= tonumber(self:metadata_root_epoch() or 0) then
+  if not epoch_authority.admit_write(self, payload_epoch, epoch_authority.cache_epoch(self)) then
     return false
   end
-  if payload_epoch < self:authoritative_root_epoch() then
+  if not epoch_authority.admit_write(self, payload_epoch, epoch_authority.handler_epoch(self.handler, self.conn_id)) then
     return false
   end
 
@@ -2707,7 +2745,9 @@ function SchemaCache:on_columns_loaded(data)
     })
   end
   local key = table_key(probe.schema, probe.table_name)
-  self:_store_columns(key, cols, { root_epoch = payload_epoch })
+  if not self:_store_columns(key, cols, { root_epoch = payload_epoch }) then
+    return false
+  end
   self:_save_columns_to_disk(key, cols)
   local should_notify = self:_consume_completion_refresh_eligible(entries)
   for _, entry in ipairs(entries) do
@@ -2734,8 +2774,15 @@ function SchemaCache:on_schema_objects_loaded(data)
   if not schema_filter.matches(schema, self.schema_scope) then
     return false
   end
+  local payload_epoch = tonumber(data.root_epoch) or 0
+  if not epoch_authority.admit_write(self, payload_epoch, epoch_authority.cache_epoch(self)) then
+    return false
+  end
+  if not epoch_authority.admit_write(self, payload_epoch, epoch_authority.handler_epoch(self.handler, self.conn_id)) then
+    return false
+  end
 
-  self:_bump_metadata_generation("on_schema_objects_loaded", data.root_epoch)
+  self:_bump_metadata_generation("on_schema_objects_loaded", payload_epoch)
   self.schemas[schema] = true
   self.tables[schema] = self.tables[schema] or {}
   local filtered_objects = schema_filter.filter_structures(data.objects or {}, self.schema_scope)
@@ -2783,6 +2830,10 @@ end
 ---@return Column[]
 function SchemaCache:get_columns(schema, table_name, opts)
   opts = opts or {}
+  local epoch_check = epoch_authority.check_fresh(self, self.handler, self.conn_id)
+  if not epoch_check.fresh then
+    return {}
+  end
   schema = schema or "_default"
 
   -- Normalize schema casing against known cache entries.
@@ -2938,7 +2989,7 @@ function SchemaCache:get_columns(schema, table_name, opts)
   self:_rebuild_structure_indexes()
 
   key = table_key(resolved_schema, resolved_table)
-  self:_store_columns(key, cols)
+  self:_store_columns(key, cols, { root_epoch = epoch_check.cache_epoch })
   self:_save_columns_to_disk(key, cols)
   return cols
 end
@@ -2946,7 +2997,9 @@ end
 --- Get all columns that are already cached (no lazy loading).
 ---@return table<string, Column[]> keyed by "schema.table"
 function SchemaCache:get_cached_columns()
-  return self.columns
+  return epoch_authority.read_with_freshness(self, self.handler, self.conn_id, function()
+    return self.columns
+  end) or {}
 end
 
 --- Find a table within a specific schema.

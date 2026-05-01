@@ -12,6 +12,7 @@ local server = require("dbee.lsp.server")
 local hover = require("dbee.lsp.hover")
 local resolve = require("dbee.lsp.resolve")
 local docs = require("dbee.lsp.object_docs")
+local epoch_authority = require("dbee.lsp.epoch_authority")
 local schema_filter = require("dbee.schema_filter")
 
 local function fail(msg)
@@ -184,6 +185,44 @@ local function memo_entry_count(memo)
     end
   end
   return count
+end
+
+do
+  local helper_cache, helper_handler = make_cache("lsp12-epoch-helper")
+  assert_true("epoch helper check_fresh", type(epoch_authority.check_fresh) == "function")
+  assert_true("epoch helper read", type(epoch_authority.read_with_freshness) == "function")
+  assert_true("epoch helper admit", type(epoch_authority.admit_write) == "function")
+  emit("LSP12_EPOCH_HELPER_PRESENT", "true")
+
+  local fresh_value = epoch_authority.read_with_freshness(helper_cache, helper_handler, "lsp12-epoch-helper", function()
+    return "fresh"
+  end)
+  assert_eq("epoch helper fresh true", fresh_value, "fresh")
+  emit("LSP12_EPOCH_HELPER_FRESH_TRUE", "true")
+
+  epoch_ref.value = 2
+  local stale_value = epoch_authority.read_with_freshness(helper_cache, helper_handler, "lsp12-epoch-helper", function()
+    return "stale"
+  end)
+  assert_eq("epoch helper fresh false", stale_value, nil)
+  emit("LSP12_EPOCH_HELPER_FRESH_FALSE", "true")
+
+  assert_true("epoch helper admit ok", epoch_authority.admit_write(helper_cache, 2, 2))
+  emit("LSP12_EPOCH_HELPER_ADMIT_OK", "true")
+  assert_false("epoch helper admit reject", epoch_authority.admit_write(helper_cache, 1, 2))
+  emit("LSP12_EPOCH_HELPER_ADMIT_REJECT", "true")
+
+  epoch_ref.value = 2
+  local stale_metadata_handler = make_handler()
+  local stale_metadata_cache = SchemaCache:new(stale_metadata_handler, "lsp12-stale-metadata")
+  assert_false(
+    "stale metadata rows rejected",
+    stale_metadata_cache:build_from_metadata_rows(rows(), { root_epoch = 1 })
+  )
+  assert_eq("stale metadata rows no schema", stale_metadata_cache:find_schema("public"), nil)
+  assert_eq("stale metadata rows preserve epoch", stale_metadata_cache:metadata_root_epoch(), 2)
+  emit("LSP12_METADATA_ROWS_STALE_EPOCH_REJECTED", "true")
+  epoch_ref.value = 1
 end
 
 local cache, handler = make_cache("lsp12-main")
@@ -501,7 +540,30 @@ local function synthetic_table_item(test_cache, generation, schema, table_name)
       table_quoted = true,
       cache_identity = test_cache:cache_identity(),
       cache_generation = generation,
-      root_epoch = test_cache:authoritative_root_epoch(),
+      root_epoch = epoch_authority.cache_epoch(test_cache),
+    },
+  }
+end
+
+local function synthetic_column_item(test_cache, generation, schema, table_name, column_name)
+  return {
+    label = column_name,
+    data = {
+      source = "dbee",
+      version = 1,
+      kind = "column",
+      schema = schema,
+      table = table_name,
+      column = column_name,
+      schema_exact = schema,
+      table_exact = table_name,
+      column_exact = column_name,
+      schema_quoted = true,
+      table_quoted = true,
+      column_quoted = true,
+      cache_identity = test_cache:cache_identity(),
+      cache_generation = generation,
+      root_epoch = epoch_authority.cache_epoch(test_cache),
     },
   }
 end
@@ -584,11 +646,12 @@ do
   }, lag_cache)
   assert_eq("hover invalidation lag no docs", lag_hover, nil)
   emit("LSP12_HOVER_INVALIDATION_LAG_FAIL_CLOSED", "true")
-  local lag_item = first_label(lag_cache:get_table_completion_items("public", {
+  local lag_items = lag_cache:get_table_completion_items("public", {
     schema_quoted = true,
     include_data = true,
-  }), "users")
-  assert_true("invalidation lag item data", lag_item and lag_item.data)
+  })
+  assert_eq("invalidation lag completions suppressed", #lag_items, 0)
+  local lag_item = synthetic_table_item(lag_cache, lag_cache:generation(), "public", "users")
   assert_eq("invalidation lag cache-owned epoch", lag_item.data.root_epoch, 1)
   local lag_resolved = resolve.handle(lag_item, lag_cache, { memo = {} })
   assert_eq("invalidation lag no docs", lag_resolved.documentation, nil)
@@ -619,24 +682,34 @@ do
   }, loaded_cache)
   assert_eq("disk stale hover no docs", disk_hover, nil)
 
-  local disk_table_item = first_label(loaded_cache:get_table_completion_items("public", {
+  local disk_table_items = loaded_cache:get_table_completion_items("public", {
     schema_quoted = true,
     include_data = true,
-  }), "users")
-  assert_true("disk stale table item", disk_table_item and disk_table_item.data)
+  })
+  assert_eq("disk stale table completions suppressed", #disk_table_items, 0)
+  local disk_table_item = synthetic_table_item(loaded_cache, loaded_cache:generation(), "public", "users")
   local disk_table_resolved = resolve.handle(disk_table_item, loaded_cache, { memo = {} })
   assert_eq("disk stale table no docs", disk_table_resolved.documentation, nil)
   assert_eq("disk stale table incomplete", disk_table_resolved.data.dbee_resolve_status, "incomplete")
 
-  local disk_column_item = first_label(loaded_cache:get_column_completion_items("public", "users", {
+  local disk_column_items = loaded_cache:get_column_completion_items("public", "users", {
     schema_quoted = true,
     table_quoted = true,
     include_data = true,
-  }), "id")
-  assert_true("disk stale column item", disk_column_item and disk_column_item.data)
+  })
+  assert_eq("disk stale column completions suppressed", #disk_column_items, 0)
+  local disk_column_item = synthetic_column_item(loaded_cache, loaded_cache:generation(), "public", "users", "id")
   local disk_column_resolved = resolve.handle(disk_column_item, loaded_cache, { memo = {} })
   assert_eq("disk stale column no docs", disk_column_resolved.documentation, nil)
   assert_eq("disk stale column incomplete", disk_column_resolved.data.dbee_resolve_status, "incomplete")
+
+  local stale_cached_hit = loaded_cache:get_columns_async("public", "users", {
+    schema_quoted = true,
+    table_quoted = true,
+  })
+  assert_eq("disk stale cached column hit suppressed", stale_cached_hit.reason, "stale_root_epoch")
+  assert_eq("disk stale cached column hit empty", #stale_cached_hit.columns, 0)
+  emit("LSP12_COLUMNS_CACHED_HIT_FAIL_CLOSED", "true")
 
   local stale_async_result = loaded_cache:get_columns_async("public", "orders", {
     schema_quoted = true,
@@ -673,17 +746,38 @@ do
   assert_eq("disk stale column callback preserved root", loaded_cache:metadata_root_epoch(), 1)
   assert_eq("disk stale column callback did not store", loaded_cache.columns["public.orders"], nil)
 
-  local launder_table_item = first_label(loaded_cache:get_table_completion_items("public", {
-    schema_quoted = true,
-    include_data = true,
-  }), "orders")
-  assert_true("disk stale launder table item", launder_table_item and launder_table_item.data)
+  local launder_table_item = synthetic_table_item(loaded_cache, loaded_cache:generation(), "public", "orders")
   local launder_resolved = resolve.handle(launder_table_item, loaded_cache, { memo = {} })
   assert_eq("disk stale launder no docs", launder_resolved.documentation, nil)
   assert_eq("disk stale launder incomplete", launder_resolved.data.dbee_resolve_status, "incomplete")
   epoch_ref.value = 1
   emit("LSP12_DISK_CACHE_EPOCH_FAIL_CLOSED", "true")
   emit("LSP12_COLUMN_LOAD_NO_EPOCH_LAUNDER", "true")
+end
+
+do
+  local preserve_same = make_cache("lsp12-preserve-same")
+  preserve_same:build_from_schemas({ "public" }, {
+    preserve_loaded = true,
+    root_epoch = epoch_authority.cache_epoch(preserve_same),
+  })
+  assert_true("preserve same epoch keeps columns", preserve_same.columns["public.users"] ~= nil)
+
+  local preserve_changed = make_cache("lsp12-preserve-changed")
+  epoch_ref.value = 2
+  preserve_changed:build_from_schemas({ "public" }, {
+    preserve_loaded = true,
+    root_epoch = 2,
+  })
+  assert_eq("preserve changed epoch updates root", preserve_changed:metadata_root_epoch(), 2)
+  assert_eq("preserve changed epoch drops columns", preserve_changed.columns["public.users"], nil)
+  local preserve_columns = preserve_changed:get_columns_async("public", "users", {
+    schema_quoted = true,
+    table_quoted = true,
+  })
+  assert_eq("preserve changed epoch no stale columns", preserve_columns.reason, "unresolved_table")
+  epoch_ref.value = 1
+  emit("LSP12_SCHEMAS_REFRESH_PRESERVE_LOADED_ATOMIC", "true")
 end
 
 local function assert_path_generation(label, before_cache, mutate, fresh_item, destructive)
@@ -727,6 +821,7 @@ do
     target:on_schema_objects_loaded({
       conn_id = "lsp12-gen-schema-list",
       schema = "public",
+      root_epoch = epoch_authority.cache_epoch(target),
       objects = {
         { type = "table", schema = "public", name = "users" },
       },
@@ -769,6 +864,7 @@ do
     target:on_schema_objects_loaded({
       conn_id = "lsp12-gen-schema-objects",
       schema = "public",
+      root_epoch = epoch_authority.cache_epoch(target),
       objects = {
         { type = "table", schema = "public", name = "users" },
       },
@@ -834,6 +930,24 @@ local prune_stale = resolve.handle(prune_item, prune_cache, { memo = prune_memo 
 assert_eq("memo prune stale", prune_stale.data.dbee_resolve_status, "incomplete")
 assert_eq("memo pruned", memo_entry_count(prune_memo), 0)
 emit("LSP12_RESOLVE_MEMO_PRUNED_ON_GEN_BUMP", "true")
+
+do
+  local root = vim.fn.getcwd()
+  local files = vim.fn.globpath(root, "lua/dbee/lsp/*.lua", false, true)
+  for _, path in ipairs(files) do
+    if not path:match("epoch_authority%.lua$") then
+      local rel = path:gsub("^" .. vim.pesc(root .. "/"), "")
+      for line_no, line in ipairs(vim.fn.readfile(path)) do
+        if line:find(":authoritative_root_epoch%(")
+          and not line:find("function%s+SchemaCache:authoritative_root_epoch%(")
+        then
+          fail("epoch helper routing bypass: " .. rel .. ":" .. tostring(line_no))
+        end
+      end
+    end
+  end
+  emit("LSP12_EPOCH_HELPER_ALL_CONSUMERS_ROUTED", "true")
+end
 
 assert_eq("resolve sync db calls", handler.counters.sync, 0)
 assert_eq("resolve async db calls", handler.counters.async, 0)

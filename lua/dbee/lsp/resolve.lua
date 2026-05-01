@@ -1,4 +1,5 @@
 local docs = require("dbee.lsp.object_docs")
+local epoch_authority = require("dbee.lsp.epoch_authority")
 local schema_filter_authority = require("dbee.schema_filter_authority")
 
 local M = {}
@@ -172,9 +173,11 @@ function M.handle(item, cache, opts)
   if data.dbee_ambiguous == true then
     return incomplete(item, "ambiguous")
   end
+  local epoch_check = epoch_authority.check_fresh(cache, cache.handler, cache.conn_id)
   if data.cache_identity ~= cache:cache_identity()
     or tonumber(data.cache_generation) ~= current_generation
-    or tonumber(data.root_epoch or 0) ~= cache:authoritative_root_epoch()
+    or not epoch_check.fresh
+    or tonumber(data.root_epoch or 0) ~= epoch_check.cache_epoch
   then
     return incomplete(item, "stale_generation")
   end

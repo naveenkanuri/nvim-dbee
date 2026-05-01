@@ -1,5 +1,6 @@
 local state = require("dbee.api.state")
 local context = require("dbee.lsp.context")
+local epoch_authority = require("dbee.lsp.epoch_authority")
 local SchemaCache = require("dbee.lsp.schema_cache")
 local server = require("dbee.lsp.server")
 local schema_filter = require("dbee.schema_filter")
@@ -58,7 +59,7 @@ METADATA_QUERIES["mssql"] = METADATA_QUERIES.sqlserver
 ---@field private _pending_bufs table<integer, boolean>
 ---@field private _async_requested table<connection_id, boolean>
 ---@field private _metadata_scheduled table<connection_id, boolean>
----@field private _metadata_call_ids table<call_id, connection_id>
+---@field private _metadata_call_ids table<call_id, { conn_id: connection_id, root_epoch: integer }>
 ---@field private _bootstrap_consumer_id string
 ---@field private _pending_connection_invalidations ConnectionInvalidatedEvent[]
 ---@field private _connection_invalidation_flush_scheduled boolean
@@ -131,7 +132,8 @@ local function clear_connection_tracking(conn_id)
   if conn_id and conn_id ~= "" then
     M._async_requested[conn_id] = nil
     M._metadata_scheduled[conn_id] = nil
-    for call_id, mapped_conn_id in pairs(M._metadata_call_ids) do
+    for call_id, mapped in pairs(M._metadata_call_ids) do
+      local mapped_conn_id = type(mapped) == "table" and mapped.conn_id or mapped
       if mapped_conn_id == conn_id then
         M._metadata_call_ids[call_id] = nil
       end
@@ -468,7 +470,7 @@ function M._on_structure_loaded(handler, data)
   end
 
   local payload_epoch = tonumber(data.root_epoch) or 0
-  if payload_epoch < handler:get_authoritative_root_epoch(data.conn_id) then
+  if not epoch_authority.admit_write(M._cache, payload_epoch, epoch_authority.handler_epoch(handler, data.conn_id)) then
     return
   end
 
@@ -521,7 +523,7 @@ function M._on_schemas_loaded(handler, data)
   end
 
   local payload_epoch = tonumber(data.root_epoch) or 0
-  if payload_epoch < handler:get_authoritative_root_epoch(data.conn_id) then
+  if not epoch_authority.admit_write(M._cache, payload_epoch, epoch_authority.handler_epoch(handler, data.conn_id)) then
     return
   end
   local conn = handler:get_current_connection()
@@ -825,6 +827,7 @@ function M._execute_metadata_query(handler, conn_id, conn_type)
   if not sql then
     return
   end
+  local root_epoch = epoch_authority.handler_epoch(handler, conn_id)
 
   local normalized, authority_unavailable = read_startup_schema_scope(handler, conn_id)
   if authority_unavailable or (normalized and normalized.fail_closed == true) then
@@ -836,7 +839,10 @@ function M._execute_metadata_query(handler, conn_id, conn_type)
     return
   end
 
-  M._metadata_call_ids[call.id] = conn_id
+  M._metadata_call_ids[call.id] = {
+    conn_id = conn_id,
+    root_epoch = root_epoch,
+  }
 end
 
 --- Process metadata query results after call reaches archived state.
@@ -844,7 +850,14 @@ end
 ---@param handler Handler
 ---@param call_id call_id
 ---@param conn_id connection_id
-function M._process_metadata_result(handler, call_id, conn_id)
+---@param root_epoch integer?
+function M._process_metadata_result(handler, call_id, conn_id, root_epoch)
+  root_epoch = root_epoch ~= nil and (tonumber(root_epoch) or 0)
+    or epoch_authority.handler_epoch(handler, conn_id)
+  if not epoch_authority.admit_write(nil, root_epoch, epoch_authority.handler_epoch(handler, conn_id)) then
+    return
+  end
+
   local tmp = os.tmpname() .. ".json"
 
   local ok = pcall(handler.call_store_result, handler, call_id, "json", "file", { extra_arg = tmp })
@@ -866,7 +879,9 @@ function M._process_metadata_result(handler, call_id, conn_id)
   end
 
   local cache = SchemaCache:new(handler, conn_id)
-  cache:build_from_metadata_rows(rows)
+  if not cache:build_from_metadata_rows(rows, { root_epoch = root_epoch }) then
+    return
+  end
   cache:save_to_disk()
 
   if not M._client_id then
@@ -1041,10 +1056,12 @@ function M.register_events()
       return
     end
 
-    local conn_id = M._metadata_call_ids[data.call.id]
-    if not conn_id then
+    local metadata_call = M._metadata_call_ids[data.call.id]
+    if not metadata_call then
       return
     end
+    local conn_id = type(metadata_call) == "table" and metadata_call.conn_id or metadata_call
+    local root_epoch = type(metadata_call) == "table" and metadata_call.root_epoch or nil
 
     if data.call.state == "archived" then
       M._metadata_call_ids[data.call.id] = nil
@@ -1053,7 +1070,7 @@ function M.register_events()
       if not conn or conn.id ~= conn_id then
         return
       end
-      M._process_metadata_result(handler, data.call.id, conn_id)
+      M._process_metadata_result(handler, data.call.id, conn_id, root_epoch)
     elseif data.call.state == "executing_failed"
       or data.call.state == "archive_failed"
       or data.call.state == "canceled" then
@@ -1069,7 +1086,7 @@ function M.register_events()
       return
     end
     local payload_epoch = tonumber(data.root_epoch) or 0
-    if payload_epoch < handler:get_authoritative_root_epoch(data.conn_id) then
+    if not epoch_authority.admit_write(M._cache, payload_epoch, epoch_authority.handler_epoch(handler, data.conn_id)) then
       return
     end
     M._cache:on_columns_loaded(data)

@@ -1,5 +1,6 @@
 local context = require("dbee.lsp.context")
 local docs = require("dbee.lsp.object_docs")
+local epoch_authority = require("dbee.lsp.epoch_authority")
 local schema_filter_authority = require("dbee.schema_filter_authority")
 
 local M = {}
@@ -25,13 +26,8 @@ end
 ---@param cache SchemaCache
 ---@return boolean
 local function cache_fresh(cache)
-  if not cache
-    or type(cache.metadata_root_epoch) ~= "function"
-    or type(cache.authoritative_root_epoch) ~= "function"
-  then
-    return false
-  end
-  return tonumber(cache:metadata_root_epoch() or 0) == tonumber(cache:authoritative_root_epoch() or 0)
+  local check = epoch_authority.check_fresh(cache, cache and cache.handler, cache and cache.conn_id)
+  return check.fresh
 end
 
 ---@param cache SchemaCache
