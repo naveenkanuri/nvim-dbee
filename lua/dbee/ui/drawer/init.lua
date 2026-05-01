@@ -616,7 +616,9 @@ local function searchable_node_to_tree_node(ui, node, inherited_conn_id, childre
       end,
     })
   elseif node.type == "folder" and node.source_meta and node.folder_id then
-    convert.decorate_folder_node(tree_node, ui.handler, node.source_meta, node.folder_id)
+    convert.decorate_folder_node(tree_node, ui.handler, node.source_meta, node.folder_id, function()
+      invalidate_authoritative_caches(ui)
+    end)
   elseif SEARCHABLE_TYPES[node.type] then
     local struct_meta = node.struct_meta or {
       id = node.id,
@@ -3888,7 +3890,9 @@ function DrawerUI:refresh()
       }, children)
 
       if model_node.type == "folder" and model_node.source_meta and model_node.folder_id then
-        convert.decorate_folder_node(node, self.handler, model_node.source_meta, model_node.folder_id)
+        convert.decorate_folder_node(node, self.handler, model_node.source_meta, model_node.folder_id, function()
+          invalidate_authoritative_caches(self)
+        end)
       end
 
       if children and #children > 0 then

@@ -458,6 +458,17 @@ local function run_drawer_action_contracts()
   assert_true("folder expansion preserved", restored_folder and restored_folder:is_expanded())
   print("FOLDER15_DRAWER_FOLDER_EXPANSION_PRESERVED=true")
 
+  fixture.source.fail_folder_mutation = true
+  fixture.drawer.cached_search_model = { sentinel = true }
+  local row_rename_done = false
+  restored_folder.action_2(function()
+    row_rename_done = true
+  end, nil, function(opts)
+    opts.on_confirm("Row Rename")
+  end)
+  assert_true("folder row rename cb", row_rename_done)
+  assert_eq("folder row rename clears search cache", fixture.drawer.cached_search_model, nil)
+
   local ok_snapshot, snapshot_err = fixture.drawer:capture_filter_snapshot()
   assert_true("snapshot captured: " .. tostring(snapshot_err), ok_snapshot)
   local folder_snapshot = find_snapshot_node(fixture.drawer.filter_restore_snapshot, function(node)
@@ -483,6 +494,20 @@ local function run_drawer_action_contracts()
   assert_true("filtered folder decorated", type(filtered_folder.action_2) == "function" and type(filtered_folder.action_3) == "function")
   print("FOLDER15_DRAWER_FOLDER_FILTER_VISIBLE=true")
   print("FOLDER15_FILTERED_FOLDER_DECORATION_OK=true")
+
+  fixture.drawer.cached_search_model = { sentinel = true }
+  local row_delete_done = false
+  filtered_folder.action_3(function()
+    row_delete_done = true
+  end, function(opts)
+    opts.on_confirm("Delete (members ungrouped)")
+  end)
+  assert_true("folder row delete cb", row_delete_done)
+  assert_eq("folder row delete clears search cache", fixture.drawer.cached_search_model, nil)
+  fixture.source.fail_folder_mutation = false
+  clear_notifications()
+  print("FOLDER15_DRAWER_FOLDER_ROW_ACTIONS_INVALIDATE_SEARCH_OK=true")
+
   session:submit("")
   Harness.drain()
 

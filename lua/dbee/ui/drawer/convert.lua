@@ -230,7 +230,8 @@ end
 ---@param handler Handler
 ---@param source_meta { id: string }
 ---@param folder_id string
-function M.decorate_folder_node(node, handler, source_meta, folder_id)
+---@param invalidate_cb? fun()
+function M.decorate_folder_node(node, handler, source_meta, folder_id, invalidate_cb)
   node.action_2 = function(cb, _, input)
     input {
       title = "Rename folder: " .. tostring(node.raw_name or ""),
@@ -241,6 +242,9 @@ function M.decorate_folder_node(node, handler, source_meta, folder_id)
           if not ok then
             utils.log("error", "rename folder: " .. tostring(err))
           end
+        end
+        if invalidate_cb then
+          invalidate_cb()
         end
         cb()
       end,
@@ -258,6 +262,9 @@ function M.decorate_folder_node(node, handler, source_meta, folder_id)
           if not ok then
             utils.log("error", "delete folder: " .. tostring(err))
           end
+        end
+        if invalidate_cb then
+          invalidate_cb()
         end
         cb()
       end,
