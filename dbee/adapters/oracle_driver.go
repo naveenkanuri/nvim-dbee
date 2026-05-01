@@ -30,6 +30,10 @@ var (
 	_ core.FilteredStructureDriver = (*oracleDriver)(nil)
 	_ core.SchemaListDriver        = (*oracleDriver)(nil)
 	_ core.SchemaStructureDriver   = (*oracleDriver)(nil)
+	_ core.RichMetadataCapability  = (*oracleDriver)(nil)
+	_ core.RichColumnDriver        = (*oracleDriver)(nil)
+	_ core.IndexDriver             = (*oracleDriver)(nil)
+	_ core.SequenceDriver          = (*oracleDriver)(nil)
 )
 
 type oracleDriver struct {
@@ -385,6 +389,520 @@ func (d *oracleDriver) Columns(opts *core.TableOptions) ([]*core.Column, error) 
 
 		opts.Schema,
 		opts.Table)
+}
+
+const oracleColumnsRichSQL = `
+	SELECT col.column_name,
+	       col.data_type,
+	       col.nullable
+	FROM all_tab_columns col
+	WHERE col.owner = :schema
+	  AND col.table_name = :table
+	ORDER BY col.column_id`
+
+const oraclePrimaryKeysSQL = `
+	SELECT acc.column_name,
+	       acc.position
+	FROM all_constraints ac
+	JOIN all_cons_columns acc
+	  ON ac.owner = acc.owner
+	 AND ac.constraint_name = acc.constraint_name
+	WHERE ac.constraint_type = 'P'
+	  AND ac.owner = :schema
+	  AND ac.table_name = :table
+	ORDER BY acc.position`
+
+const oracleForeignKeysSQL = `
+	SELECT ac.constraint_name,
+	       acc.column_name AS source_column,
+	       acc.position AS ordinal,
+	       rac.owner AS target_schema,
+	       rac.table_name AS target_table,
+	       racc.column_name AS target_column
+	FROM all_constraints ac
+	JOIN all_cons_columns acc
+	  ON ac.owner = acc.owner
+	 AND ac.constraint_name = acc.constraint_name
+	JOIN all_constraints rac
+	  ON ac.r_owner = rac.owner
+	 AND ac.r_constraint_name = rac.constraint_name
+	JOIN all_cons_columns racc
+	  ON rac.owner = racc.owner
+	 AND rac.constraint_name = racc.constraint_name
+	 AND racc.position = acc.position
+	WHERE ac.constraint_type = 'R'
+	  AND ac.owner = :schema
+	  AND ac.table_name = :table
+	ORDER BY ac.constraint_name, acc.position`
+
+const oracleIndexesSQL = `
+	SELECT i.index_name,
+	       i.owner AS index_owner,
+	       i.table_owner,
+	       i.table_name,
+	       i.uniqueness,
+	       ic.column_name,
+	       ic.descend,
+	       ic.column_position,
+	       CASE WHEN ac.constraint_name IS NULL THEN 0 ELSE 1 END AS pk_backed
+	FROM all_indexes i
+	JOIN all_ind_columns ic
+	  ON ic.index_owner = i.owner
+	 AND ic.index_name = i.index_name
+	LEFT JOIN all_constraints ac
+	  ON ac.owner = i.table_owner
+	 AND ac.table_name = i.table_name
+	 AND ac.index_owner = i.owner
+	 AND ac.index_name = i.index_name
+	 AND ac.constraint_type = 'P'
+	WHERE i.table_owner = :schema
+	  AND i.table_name = :table
+	ORDER BY i.index_name, ic.column_position`
+
+const oracleSequencesSQL = `
+	SELECT sequence_name, increment_by, cache_size
+	FROM all_sequences
+	WHERE sequence_owner = :schema
+	ORDER BY sequence_name`
+
+func (d *oracleDriver) SupportsRichMetadata() core.RichMetadataSupport {
+	return core.RichMetadataSupport{
+		Columns:   true,
+		Indexes:   true,
+		Sequences: true,
+	}
+}
+
+func (d *oracleDriver) ColumnsRich(opts *core.TableOptions) ([]*core.Column, error) {
+	if opts == nil {
+		return nil, fmt.Errorf("opts cannot be nil")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	rows, err := d.c.QueryWithArgs(ctx, oracleColumnsRichSQL, sql.Named("schema", opts.Schema), sql.Named("table", opts.Table))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	columns := []*core.Column{}
+	byName := map[string]*core.Column{}
+	for rows.HasNext() {
+		row, err := rows.Next()
+		if err != nil {
+			return nil, err
+		}
+		if len(row) < 3 {
+			return nil, fmt.Errorf("oracle columns rich: expected 3 columns, got %d", len(row))
+		}
+		name, err := oracleStringValue(row[0])
+		if err != nil {
+			return nil, fmt.Errorf("oracle columns rich column name: %w", err)
+		}
+		typ, err := oracleStringValue(row[1])
+		if err != nil {
+			return nil, fmt.Errorf("oracle columns rich data type: %w", err)
+		}
+		nullableRaw, err := oracleStringValue(row[2])
+		if err != nil {
+			return nil, fmt.Errorf("oracle columns rich nullable: %w", err)
+		}
+		nullable := !strings.EqualFold(nullableRaw, "N")
+		col := &core.Column{
+			Name:     name,
+			Type:     typ,
+			Nullable: &nullable,
+		}
+		columns = append(columns, col)
+		byName[name] = col
+	}
+
+	if err := d.applyOraclePrimaryKeys(ctx, opts, byName); err != nil {
+		return nil, err
+	}
+	if err := d.applyOracleForeignKeys(ctx, opts, byName); err != nil {
+		return nil, err
+	}
+
+	return columns, nil
+}
+
+func (d *oracleDriver) applyOraclePrimaryKeys(ctx context.Context, opts *core.TableOptions, byName map[string]*core.Column) error {
+	rows, err := d.c.QueryWithArgs(ctx, oraclePrimaryKeysSQL, sql.Named("schema", opts.Schema), sql.Named("table", opts.Table))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.HasNext() {
+		row, err := rows.Next()
+		if err != nil {
+			return err
+		}
+		if len(row) < 2 {
+			return fmt.Errorf("oracle primary keys: expected 2 columns, got %d", len(row))
+		}
+		name, err := oracleStringValue(row[0])
+		if err != nil {
+			return fmt.Errorf("oracle primary key column name: %w", err)
+		}
+		position, err := oracleIntValue(row[1])
+		if err != nil {
+			return fmt.Errorf("oracle primary key position: %w", err)
+		}
+		if col := byName[name]; col != nil {
+			col.PrimaryKey = true
+			col.PrimaryKeyOrdinal = position
+		}
+	}
+	return nil
+}
+
+type oracleFKRow struct {
+	constraintName string
+	sourceColumn   string
+	ordinal        int
+	targetSchema   string
+	targetTable    string
+	targetColumn   string
+}
+
+func (d *oracleDriver) applyOracleForeignKeys(ctx context.Context, opts *core.TableOptions, byName map[string]*core.Column) error {
+	rows, err := d.c.QueryWithArgs(ctx, oracleForeignKeysSQL, sql.Named("schema", opts.Schema), sql.Named("table", opts.Table))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	groups := map[string][]oracleFKRow{}
+	for rows.HasNext() {
+		row, err := rows.Next()
+		if err != nil {
+			return err
+		}
+		if len(row) < 6 {
+			return fmt.Errorf("oracle foreign keys: expected 6 columns, got %d", len(row))
+		}
+		constraintName, err := oracleStringValue(row[0])
+		if err != nil {
+			return fmt.Errorf("oracle foreign key constraint: %w", err)
+		}
+		sourceColumn, err := oracleStringValue(row[1])
+		if err != nil {
+			return fmt.Errorf("oracle foreign key source column: %w", err)
+		}
+		ordinal, err := oracleIntValue(row[2])
+		if err != nil {
+			return fmt.Errorf("oracle foreign key ordinal: %w", err)
+		}
+		targetSchema, err := oracleStringValue(row[3])
+		if err != nil {
+			return fmt.Errorf("oracle foreign key target schema: %w", err)
+		}
+		targetTable, err := oracleStringValue(row[4])
+		if err != nil {
+			return fmt.Errorf("oracle foreign key target table: %w", err)
+		}
+		targetColumn, err := oracleStringValue(row[5])
+		if err != nil {
+			return fmt.Errorf("oracle foreign key target column: %w", err)
+		}
+		groups[constraintName] = append(groups[constraintName], oracleFKRow{
+			constraintName: constraintName,
+			sourceColumn:   sourceColumn,
+			ordinal:        ordinal,
+			targetSchema:   targetSchema,
+			targetTable:    targetTable,
+			targetColumn:   targetColumn,
+		})
+	}
+
+	for constraintName, group := range groups {
+		sort.SliceStable(group, func(i, j int) bool {
+			return group[i].ordinal < group[j].ordinal
+		})
+		sourceColumns := make([]string, len(group))
+		targetColumns := make([]string, len(group))
+		for i, fk := range group {
+			sourceColumns[i] = fk.sourceColumn
+			targetColumns[i] = fk.targetColumn
+		}
+		for _, fk := range group {
+			col := byName[fk.sourceColumn]
+			if col == nil {
+				continue
+			}
+			ref := &core.FKRef{
+				ConstraintName: constraintName,
+				SourceSchema:   opts.Schema,
+				SourceTable:    opts.Table,
+				SourceColumn:   fk.sourceColumn,
+				SourceColumns:  cloneStrings(sourceColumns),
+				SourceOrdinal:  fk.ordinal,
+				TargetSchema:   fk.targetSchema,
+				TargetTable:    fk.targetTable,
+				TargetColumn:   fk.targetColumn,
+				TargetColumns:  cloneStrings(targetColumns),
+			}
+			col.ForeignKeys = append(col.ForeignKeys, ref)
+		}
+	}
+
+	return nil
+}
+
+func (d *oracleDriver) Indexes(opts *core.TableOptions) ([]*core.Index, error) {
+	if opts == nil {
+		return nil, fmt.Errorf("opts cannot be nil")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	rows, err := d.c.QueryWithArgs(ctx, oracleIndexesSQL, sql.Named("schema", opts.Schema), sql.Named("table", opts.Table))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type indexedRow struct {
+		key      string
+		position int
+		column   string
+		order    string
+	}
+
+	byKey := map[string]*core.Index{}
+	var ordered []*core.Index
+	var indexedRows []indexedRow
+	for rows.HasNext() {
+		row, err := rows.Next()
+		if err != nil {
+			return nil, err
+		}
+		if len(row) < 9 {
+			return nil, fmt.Errorf("oracle indexes: expected 9 columns, got %d", len(row))
+		}
+		name, err := oracleStringValue(row[0])
+		if err != nil {
+			return nil, fmt.Errorf("oracle index name: %w", err)
+		}
+		owner, err := oracleStringValue(row[1])
+		if err != nil {
+			return nil, fmt.Errorf("oracle index owner: %w", err)
+		}
+		tableOwner, err := oracleStringValue(row[2])
+		if err != nil {
+			return nil, fmt.Errorf("oracle index table owner: %w", err)
+		}
+		tableName, err := oracleStringValue(row[3])
+		if err != nil {
+			return nil, fmt.Errorf("oracle index table name: %w", err)
+		}
+		uniqueness, err := oracleStringValue(row[4])
+		if err != nil {
+			return nil, fmt.Errorf("oracle index uniqueness: %w", err)
+		}
+		column, err := oracleStringValue(row[5])
+		if err != nil {
+			return nil, fmt.Errorf("oracle index column: %w", err)
+		}
+		order, err := oracleStringValue(row[6])
+		if err != nil {
+			return nil, fmt.Errorf("oracle index order: %w", err)
+		}
+		position, err := oracleIntValue(row[7])
+		if err != nil {
+			return nil, fmt.Errorf("oracle index column position: %w", err)
+		}
+		pkBacked, err := oracleBoolValue(row[8])
+		if err != nil {
+			return nil, fmt.Errorf("oracle index pk_backed: %w", err)
+		}
+
+		key := owner + "." + name
+		index := byKey[key]
+		if index == nil {
+			index = &core.Index{
+				Name:     name,
+				Schema:   tableOwner,
+				Table:    tableName,
+				Unique:   strings.EqualFold(uniqueness, "UNIQUE"),
+				PKBacked: pkBacked,
+			}
+			byKey[key] = index
+			ordered = append(ordered, index)
+		}
+		indexedRows = append(indexedRows, indexedRow{
+			key:      key,
+			position: position,
+			column:   column,
+			order:    oracleIndexOrder(order),
+		})
+	}
+
+	sort.SliceStable(indexedRows, func(i, j int) bool {
+		if indexedRows[i].key == indexedRows[j].key {
+			return indexedRows[i].position < indexedRows[j].position
+		}
+		return indexedRows[i].key < indexedRows[j].key
+	})
+	for _, row := range indexedRows {
+		index := byKey[row.key]
+		index.Columns = append(index.Columns, row.column)
+		index.Orders = append(index.Orders, row.order)
+	}
+
+	return ordered, nil
+}
+
+func (d *oracleDriver) Sequences(schema string) ([]*core.Sequence, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	rows, err := d.c.QueryWithArgs(ctx, oracleSequencesSQL, sql.Named("schema", schema))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var sequences []*core.Sequence
+	for rows.HasNext() {
+		row, err := rows.Next()
+		if err != nil {
+			return nil, err
+		}
+		if len(row) < 3 {
+			return nil, fmt.Errorf("oracle sequences: expected 3 columns, got %d", len(row))
+		}
+		name, err := oracleStringValue(row[0])
+		if err != nil {
+			return nil, fmt.Errorf("oracle sequence name: %w", err)
+		}
+		increment, err := oracleInt64Value(row[1])
+		if err != nil {
+			return nil, fmt.Errorf("oracle sequence increment: %w", err)
+		}
+		cacheSize, err := oracleInt64Value(row[2])
+		if err != nil {
+			return nil, fmt.Errorf("oracle sequence cache size: %w", err)
+		}
+		sequences = append(sequences, &core.Sequence{
+			Name:      name,
+			Schema:    schema,
+			Increment: increment,
+			CacheSize: cacheSize,
+		})
+	}
+	return sequences, nil
+}
+
+func oracleStringValue(value any) (string, error) {
+	switch v := value.(type) {
+	case string:
+		return v, nil
+	case []byte:
+		return string(v), nil
+	case fmt.Stringer:
+		return v.String(), nil
+	case nil:
+		return "", fmt.Errorf("expected string, got nil")
+	default:
+		return "", fmt.Errorf("expected string, got %T", value)
+	}
+}
+
+func oracleIntValue(value any) (int, error) {
+	n, err := oracleInt64Value(value)
+	if err != nil {
+		return 0, err
+	}
+	return int(n), nil
+}
+
+func oracleInt64Value(value any) (int64, error) {
+	switch v := value.(type) {
+	case int:
+		return int64(v), nil
+	case int8:
+		return int64(v), nil
+	case int16:
+		return int64(v), nil
+	case int32:
+		return int64(v), nil
+	case int64:
+		return v, nil
+	case uint:
+		return int64(v), nil
+	case uint8:
+		return int64(v), nil
+	case uint16:
+		return int64(v), nil
+	case uint32:
+		return int64(v), nil
+	case uint64:
+		if v > math.MaxInt64 {
+			return 0, fmt.Errorf("integer overflows int64: %d", v)
+		}
+		return int64(v), nil
+	case float64:
+		if math.Trunc(v) != v {
+			return 0, fmt.Errorf("expected integer, got %v", v)
+		}
+		return int64(v), nil
+	case string:
+		n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+		if err != nil {
+			return 0, err
+		}
+		return n, nil
+	case []byte:
+		n, err := strconv.ParseInt(strings.TrimSpace(string(v)), 10, 64)
+		if err != nil {
+			return 0, err
+		}
+		return n, nil
+	default:
+		return 0, fmt.Errorf("expected integer, got %T", value)
+	}
+}
+
+func oracleBoolValue(value any) (bool, error) {
+	switch v := value.(type) {
+	case bool:
+		return v, nil
+	case int:
+		return v != 0, nil
+	case int64:
+		return v != 0, nil
+	case float64:
+		return v != 0, nil
+	case string:
+		trimmed := strings.TrimSpace(strings.ToUpper(v))
+		return trimmed == "1" || trimmed == "Y" || trimmed == "YES" || trimmed == "TRUE", nil
+	case []byte:
+		return oracleBoolValue(string(v))
+	default:
+		return false, fmt.Errorf("expected bool-ish value, got %T", value)
+	}
+}
+
+func oracleIndexOrder(descend string) string {
+	if strings.EqualFold(strings.TrimSpace(descend), "DESC") {
+		return "DESC"
+	}
+	return "ASC"
+}
+
+func cloneStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, len(values))
+	copy(out, values)
+	return out
 }
 
 func (d *oracleDriver) Structure() ([]*core.Structure, error) {
