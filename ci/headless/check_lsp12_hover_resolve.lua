@@ -212,6 +212,23 @@ do
   assert_false("epoch helper admit reject", epoch_authority.admit_write(helper_cache, 1, 2))
   emit("LSP12_EPOCH_HELPER_ADMIT_REJECT", "true")
 
+  local unavailable_read_invoked = false
+  local unavailable_handler = {
+    get_authoritative_root_epoch = function()
+      error("epoch API unavailable")
+    end,
+  }
+  local unavailable_check = epoch_authority.check_fresh(helper_cache, unavailable_handler, "lsp12-epoch-helper")
+  assert_false("epoch helper unavailable fresh", unavailable_check.fresh)
+  assert_false("epoch helper unavailable available", unavailable_check.available)
+  local unavailable_value = epoch_authority.read_with_freshness(helper_cache, unavailable_handler, "lsp12-epoch-helper", function()
+    unavailable_read_invoked = true
+    return "unavailable"
+  end)
+  assert_eq("epoch helper unavailable read", unavailable_value, nil)
+  assert_false("epoch helper unavailable did not read", unavailable_read_invoked)
+  emit("LSP12_EPOCH_HELPER_UNAVAILABLE_FAIL_CLOSED", "true")
+
   epoch_ref.value = 2
   local stale_metadata_handler = make_handler()
   local stale_metadata_cache = SchemaCache:new(stale_metadata_handler, "lsp12-stale-metadata")
