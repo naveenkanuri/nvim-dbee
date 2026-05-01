@@ -606,7 +606,8 @@ do
   disk_cache:save_to_disk()
   disk_cache:_save_columns_to_disk("public.users", disk_cache.columns["public.users"])
   epoch_ref.value = 2
-  local loaded_cache = SchemaCache:new(make_handler(), "lsp12-disk-epoch")
+  local loaded_handler = make_handler()
+  local loaded_cache = SchemaCache:new(loaded_handler, "lsp12-disk-epoch")
   assert_true("disk epoch stale cache loads", loaded_cache:load_from_disk())
   assert_eq("disk epoch restored from disk", loaded_cache:metadata_root_epoch(), 1)
 
@@ -636,8 +637,53 @@ do
   local disk_column_resolved = resolve.handle(disk_column_item, loaded_cache, { memo = {} })
   assert_eq("disk stale column no docs", disk_column_resolved.documentation, nil)
   assert_eq("disk stale column incomplete", disk_column_resolved.data.dbee_resolve_status, "incomplete")
+
+  local stale_async_result = loaded_cache:get_columns_async("public", "orders", {
+    schema_quoted = true,
+    table_quoted = true,
+  })
+  assert_eq("disk stale column async suppressed", stale_async_result.reason, "stale_root_epoch")
+  assert_eq("disk stale column async not called", loaded_handler.counters.async, 0)
+
+  local launder_active_key = loaded_cache:_async_key("lsp12-disk-epoch", "public", "orders", "table", 2)
+  local launder_entry = {
+    chain_key = "lsp12-column-launder-chain",
+    active_key = launder_active_key,
+  }
+  loaded_cache.async_inflight[launder_active_key] = {
+    active_key = launder_active_key,
+    conn_id = "lsp12-disk-epoch",
+    request_id = 42001,
+    branch_id = "lsp12-column-launder",
+    root_epoch = 2,
+    schema = "public",
+    table_name = "orders",
+    materialization = "table",
+    entries = { launder_entry },
+  }
+  loaded_cache.async_chains[launder_entry.chain_key] = launder_entry
+  assert_false("disk stale column callback rejected", loaded_cache:on_columns_loaded({
+    conn_id = "lsp12-disk-epoch",
+    kind = "columns",
+    request_id = 42001,
+    branch_id = "lsp12-column-launder",
+    root_epoch = 2,
+    columns = { { name = "laundered", type = "text" } },
+  }))
+  assert_eq("disk stale column callback preserved root", loaded_cache:metadata_root_epoch(), 1)
+  assert_eq("disk stale column callback did not store", loaded_cache.columns["public.orders"], nil)
+
+  local launder_table_item = first_label(loaded_cache:get_table_completion_items("public", {
+    schema_quoted = true,
+    include_data = true,
+  }), "orders")
+  assert_true("disk stale launder table item", launder_table_item and launder_table_item.data)
+  local launder_resolved = resolve.handle(launder_table_item, loaded_cache, { memo = {} })
+  assert_eq("disk stale launder no docs", launder_resolved.documentation, nil)
+  assert_eq("disk stale launder incomplete", launder_resolved.data.dbee_resolve_status, "incomplete")
   epoch_ref.value = 1
   emit("LSP12_DISK_CACHE_EPOCH_FAIL_CLOSED", "true")
+  emit("LSP12_COLUMN_LOAD_NO_EPOCH_LAUNDER", "true")
 end
 
 local function assert_path_generation(label, before_cache, mutate, fresh_item, destructive)

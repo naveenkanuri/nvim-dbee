@@ -234,6 +234,12 @@ function SchemaCache:_bump_metadata_generation(_reason, root_epoch)
 end
 
 ---@private
+---@param _reason string?
+function SchemaCache:_bump_metadata_generation_preserve_root(_reason)
+  self.metadata_generation = (self.metadata_generation or 0) + 1
+end
+
+---@private
 ---@return table
 function SchemaCache:_read_normalized_scope()
   local authority = schema_filter_authority.read(self.handler, self.conn_id)
@@ -792,8 +798,13 @@ end
 ---@param schema string
 ---@param name string
 ---@param table_type string
-function SchemaCache:_upsert_table_index(schema, name, table_type)
-  self:_bump_metadata_generation("_upsert_table_index")
+---@param opts? { preserve_root_epoch?: boolean }
+function SchemaCache:_upsert_table_index(schema, name, table_type, opts)
+  if opts and opts.preserve_root_epoch == true then
+    self:_bump_metadata_generation_preserve_root("_upsert_table_index")
+  else
+    self:_bump_metadata_generation("_upsert_table_index")
+  end
   table_type = table_type or "table"
   local new_schema = not self.schemas[schema]
   self.schemas[schema] = true
@@ -875,10 +886,9 @@ end
 ---@private
 ---@param key string
 ---@param cols Column[]
----@param opts? { root_epoch?: integer }
-function SchemaCache:_store_columns(key, cols, opts)
-  opts = opts or {}
-  self:_bump_metadata_generation("_store_columns", opts.root_epoch)
+---@param _opts? { root_epoch?: integer }
+function SchemaCache:_store_columns(key, cols, _opts)
+  self:_bump_metadata_generation_preserve_root("_store_columns")
   self.columns[key] = cols
   self:_touch_column(key)
 
@@ -2506,6 +2516,23 @@ function SchemaCache:get_columns_async(schema, table_name, opts)
   end
 
   local root_epoch = self:_root_epoch(opts)
+  local metadata_root_epoch = tonumber(self:metadata_root_epoch() or 0)
+  if metadata_root_epoch ~= self:authoritative_root_epoch() then
+    return {
+      columns = {},
+      is_incomplete = false,
+      in_flight = false,
+      reason = "stale_root_epoch",
+    }
+  end
+  if root_epoch ~= metadata_root_epoch then
+    return {
+      columns = {},
+      is_incomplete = false,
+      in_flight = false,
+      reason = "root_epoch_mismatch",
+    }
+  end
   local materializations = opts.materializations
     or (opts.materialization and { opts.materialization })
     or MATERIALIZATIONS
@@ -2616,6 +2643,9 @@ function SchemaCache:on_columns_loaded(data)
   end
 
   local payload_epoch = tonumber(data.root_epoch) or 0
+  if payload_epoch ~= tonumber(self:metadata_root_epoch() or 0) then
+    return false
+  end
   if payload_epoch < self:authoritative_root_epoch() then
     return false
   end
@@ -2672,7 +2702,9 @@ function SchemaCache:on_columns_loaded(data)
   end
 
   if not (self.tables[probe.schema] and self.tables[probe.schema][probe.table_name]) then
-    self:_upsert_table_index(probe.schema, probe.table_name, probe.materialization)
+    self:_upsert_table_index(probe.schema, probe.table_name, probe.materialization, {
+      preserve_root_epoch = true,
+    })
   end
   local key = table_key(probe.schema, probe.table_name)
   self:_store_columns(key, cols, { root_epoch = payload_epoch })
