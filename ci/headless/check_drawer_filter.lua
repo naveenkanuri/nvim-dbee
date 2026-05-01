@@ -533,6 +533,13 @@ local function new_fixture(opts)
       delete = function() end,
       file = function() return "source1.json" end,
     },
+    {
+      name = function() return "source2" end,
+      create = function() end,
+      update = function() end,
+      delete = function() end,
+      file = function() return "source2.json" end,
+    },
   }
 
   local source_connections = opts.source_connections or {
