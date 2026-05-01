@@ -63,6 +63,21 @@ local function memo_key(data, markdown_kind)
   }, "|")
 end
 
+---@param memo table?
+---@param generation integer
+function M.prune_memo(memo, generation)
+  if type(memo) ~= "table" then
+    return
+  end
+  if rawget(memo, "__dbee_generation") == generation then
+    return
+  end
+  for key in pairs(memo) do
+    memo[key] = nil
+  end
+  memo.__dbee_generation = generation
+end
+
 ---@param item table
 ---@param rendered table
 ---@return table
@@ -148,14 +163,20 @@ function M.handle(item, cache, opts)
   if not cache then
     return incomplete(item, "cache_missing")
   end
+  local memo = opts.memo or {}
+  local current_generation = cache:generation()
+  M.prune_memo(memo, current_generation)
+  if not authority_available(cache) then
+    return incomplete(item, "authority_unavailable")
+  end
+  if data.dbee_ambiguous == true then
+    return incomplete(item, "ambiguous")
+  end
   if data.cache_identity ~= cache:cache_identity()
-    or tonumber(data.cache_generation) ~= cache:generation()
+    or tonumber(data.cache_generation) ~= current_generation
     or tonumber(data.root_epoch or 0) ~= cache:_authoritative_root_epoch()
   then
     return incomplete(item, "stale_generation")
-  end
-  if not authority_available(cache) then
-    return incomplete(item, "authority_unavailable")
   end
 
   local metadata = metadata_for(cache, data)
@@ -163,7 +184,6 @@ function M.handle(item, cache, opts)
     return incomplete(item, "metadata_missing")
   end
 
-  local memo = opts.memo or {}
   local kind = markdown_kind(opts.client_capabilities)
   local key = memo_key(data, kind)
   if memo[key] then

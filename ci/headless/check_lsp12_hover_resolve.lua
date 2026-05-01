@@ -49,9 +49,11 @@ local function make_handler()
     counters = {
       sync = 0,
       async = 0,
+      authority = 0,
     },
   }
   function handler:get_schema_filter_normalized()
+    handler.counters.authority = handler.counters.authority + 1
     return scope_ref.value
   end
   function handler:get_authoritative_root_epoch()
@@ -165,6 +167,16 @@ local function first_label(items, label)
     end
   end
   return nil
+end
+
+local function memo_entry_count(memo)
+  local count = 0
+  for key in pairs(memo or {}) do
+    if key ~= "__dbee_generation" then
+      count = count + 1
+    end
+  end
+  return count
 end
 
 local cache, handler = make_cache("lsp12-main")
@@ -444,6 +456,22 @@ assert_eq("generation scrub docs", scrubbed_gen.documentation, nil)
 assert_eq("generation scrub detail", scrubbed_gen.detail, nil)
 emit("LSP12_RESOLVE_GEN_BUMP_SCRUBS_PRIOR_DOCS", "true")
 
+local stale_authority_cache, stale_authority_handler = make_cache("lsp12-stale-authority")
+local stale_authority_item = first_label(stale_authority_cache:get_table_completion_items("public", {
+  schema_quoted = true,
+  include_data = true,
+}), "users")
+stale_authority_cache:_store_columns("public.users", {
+  { name = "id", type = "integer" },
+  { name = "email", type = "text" },
+  { name = "authority_probe", type = "text" },
+})
+stale_authority_handler.counters.authority = 0
+local stale_authority_result = resolve.handle(stale_authority_item, stale_authority_cache, { memo = {} })
+assert_eq("stale authority status", stale_authority_result.data.dbee_resolve_status, "incomplete")
+assert_true("stale path checked authority", stale_authority_handler.counters.authority > 0)
+emit("LSP12_RESOLVE_STALE_PATH_CHECKS_AUTHORITY", "true")
+
 local function synthetic_table_item(test_cache, generation, schema, table_name)
   return {
     label = table_name,
@@ -621,6 +649,24 @@ cache:_store_columns("public.users", {
 local memo_stale = resolve.handle(memo_gen_item, cache, { memo = {} })
 assert_eq("memo generation stale", memo_stale.data.dbee_resolve_status, "incomplete")
 emit("LSP12_RESOLVE_MEMO_PER_GENERATION_OK", "true")
+
+local prune_cache = make_cache("lsp12-memo-prune")
+local prune_item = first_label(prune_cache:get_table_completion_items("public", {
+  schema_quoted = true,
+  include_data = true,
+}), "users")
+local prune_memo = {}
+resolve.handle(prune_item, prune_cache, { memo = prune_memo })
+assert_true("memo filled", memo_entry_count(prune_memo) > 0)
+prune_cache:_store_columns("public.users", {
+  { name = "id", type = "integer" },
+  { name = "email", type = "text" },
+  { name = "memo_prune", type = "text" },
+})
+local prune_stale = resolve.handle(prune_item, prune_cache, { memo = prune_memo })
+assert_eq("memo prune stale", prune_stale.data.dbee_resolve_status, "incomplete")
+assert_eq("memo pruned", memo_entry_count(prune_memo), 0)
+emit("LSP12_RESOLVE_MEMO_PRUNED_ON_GEN_BUMP", "true")
 
 assert_eq("resolve sync db calls", handler.counters.sync, 0)
 assert_eq("resolve async db calls", handler.counters.async, 0)
