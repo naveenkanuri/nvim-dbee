@@ -173,7 +173,7 @@ local required_lsp12_3_true_markers = {
 }
 
 local required_lsp12_3_metric_markers = {
-  LSP12_3_PERF_SCENARIOS_COUNT = "7",
+  LSP12_3_PERF_SCENARIOS_COUNT = "8",
   LSP12_3_MEASURED_COUNT = "100",
   LSP12_3_CODEACTION_EMPTY_REFACTOR_RANGE_P95_MS = "number",
   LSP12_3_CODEACTION_EXPAND_SELECT_STAR_P95_MS = "number",
@@ -181,6 +181,7 @@ local required_lsp12_3_metric_markers = {
   LSP12_3_CODEACTION_SOURCE_COMMANDS_P95_MS = "number",
   LSP12_3_CODEACTION_LARGE_BUFFER_P95_MS = "number",
   LSP12_3_CODEACTION_MANY_SCHEMAS_P95_MS = "number",
+  LSP12_3_CODEACTION_NO_ONLY_FILTER_P95_MS = "number",
   LSP12_3_CODEACTION_DENSE_REFS_P95_MS = "number",
 }
 

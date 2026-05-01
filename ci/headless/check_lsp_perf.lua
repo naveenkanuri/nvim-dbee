@@ -2808,6 +2808,40 @@ lsp12_3_register({
 })
 
 lsp12_3_register({
+  slug = "CODEACTION_NO_ONLY_FILTER",
+  before = function()
+    local lines = {}
+    for i = 1, 1000 do
+      lines[i] = "-- filler"
+    end
+    lines[500] = "SELECT * FROM TABLE_000001"
+    return lsp12_3_before(lines, {
+      columns_per_table = 200,
+    })
+  end,
+  run = function(state)
+    local line = "SELECT * FROM TABLE_000001"
+    local star_pos = lsp12_3_position(line, "*")
+    local table_end = lsp12_3_position(line, "TABLE_000001") + #"TABLE_000001"
+    local before_sync = state.handler.counters.connection_get_columns or 0
+    local before_async = state.handler.counters.connection_get_columns_async or 0
+    local result, elapsed = lsp12_3_code_action(state, 499, star_pos, table_end, nil)
+    if type(result) ~= "table" or #result ~= 4 then
+      error("no-only code action discovery expected all four action types")
+    end
+    if result[1].title ~= "Expand SELECT * -> list columns"
+      or not result[2].title:find("Qualify identifier", 1, true)
+      or result[3].command.command ~= "dbee/reload_table"
+      or result[4].command.command ~= "dbee/refresh_schema"
+    then
+      error("no-only code action ordering mismatch")
+    end
+    lsp12_3_assert_no_request_db(state, before_sync, before_async, "CODEACTION_NO_ONLY_FILTER")
+    return elapsed
+  end,
+})
+
+lsp12_3_register({
   slug = "CODEACTION_DENSE_REFS",
   before = function()
     local parts = { "SELECT COL_001 FROM TABLE_000001 t1" }
