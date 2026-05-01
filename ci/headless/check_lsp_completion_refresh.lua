@@ -330,6 +330,136 @@ end
 assert_true("mid-session error authority changes scope", error_scope_cache:refresh_schema_scope())
 assert_eq("mid-session error authority signature", error_scope_cache.schema_filter_signature, "schema-filter-v1|fail-closed")
 
+local state_module = package.loaded["dbee.api.state"]
+local saved_start_lsp = lsp_init._start_lsp
+local saved_client_id = lsp_init._client_id
+local saved_cache = lsp_init._cache
+local saved_conn_id = lsp_init._conn_id
+local saved_attached_bufs = lsp_init._attached_bufs
+local saved_pending_bufs = lsp_init._pending_bufs
+local saved_async_requested = lsp_init._async_requested
+local saved_metadata_scheduled = lsp_init._metadata_scheduled
+local saved_metadata_call_ids = lsp_init._metadata_call_ids
+local saved_connection_consumer_live = lsp_init._connection_invalidated_consumer_live
+local saved_pending_invalidations = lsp_init._pending_connection_invalidations
+local saved_invalidation_scheduled = lsp_init._connection_invalidation_flush_scheduled
+local saved_is_core_loaded = state_module.is_core_loaded
+local saved_state_handler = state_module.handler
+local saved_defer_fn = vim.defer_fn
+
+local function reset_lsp_startup_state()
+  lsp_init._client_id = nil
+  lsp_init._cache = nil
+  lsp_init._conn_id = nil
+  lsp_init._attached_bufs = {}
+  lsp_init._pending_bufs = {}
+  lsp_init._async_requested = {}
+  lsp_init._metadata_scheduled = {}
+  lsp_init._metadata_call_ids = {}
+  lsp_init._connection_invalidated_consumer_live = false
+  lsp_init._pending_connection_invalidations = {}
+  lsp_init._connection_invalidation_flush_scheduled = false
+end
+
+local function restore_lsp_startup_state()
+  lsp_init._start_lsp = saved_start_lsp
+  lsp_init._client_id = saved_client_id
+  lsp_init._cache = saved_cache
+  lsp_init._conn_id = saved_conn_id
+  lsp_init._attached_bufs = saved_attached_bufs
+  lsp_init._pending_bufs = saved_pending_bufs
+  lsp_init._async_requested = saved_async_requested
+  lsp_init._metadata_scheduled = saved_metadata_scheduled
+  lsp_init._metadata_call_ids = saved_metadata_call_ids
+  lsp_init._connection_invalidated_consumer_live = saved_connection_consumer_live
+  lsp_init._pending_connection_invalidations = saved_pending_invalidations
+  lsp_init._connection_invalidation_flush_scheduled = saved_invalidation_scheduled
+  state_module.is_core_loaded = saved_is_core_loaded
+  state_module.handler = saved_state_handler
+  vim.defer_fn = saved_defer_fn
+end
+
+local function make_startup_handler(opts)
+  opts = opts or {}
+  local handler = {
+    structure_requests = 0,
+    metadata_requests = 0,
+    conn_id = opts.conn_id or "startup-authority",
+  }
+  function handler:get_current_connection()
+    return {
+      id = self.conn_id,
+      type = "postgres",
+    }
+  end
+  if opts.authority_present then
+    function handler:get_schema_filter_normalized()
+      if opts.authority_error then
+        error("params unavailable")
+      end
+      return opts.scope
+    end
+  end
+  function handler:connection_get_structure_singleflight()
+    self.structure_requests = self.structure_requests + 1
+  end
+  function handler:connection_execute(_, _)
+    self.metadata_requests = self.metadata_requests + 1
+    return {
+      id = "startup-metadata-call-" .. tostring(self.metadata_requests),
+      state = "archived",
+    }
+  end
+  return handler
+end
+
+vim.defer_fn = function(fn, _)
+  fn()
+end
+state_module.is_core_loaded = function()
+  return true
+end
+
+local startup_started_signature = nil
+lsp_init._start_lsp = function(cache, conn_id)
+  startup_started_signature = cache and cache.schema_filter_signature or nil
+  lsp_init._client_id = 9001
+  lsp_init._cache = cache
+  lsp_init._conn_id = conn_id
+  return true
+end
+
+reset_lsp_startup_state()
+local authority_nil_handler = make_startup_handler({
+  authority_present = true,
+  scope = nil,
+  conn_id = "startup-authority-nil",
+})
+state_module.handler = function()
+  return authority_nil_handler
+end
+lsp_init._try_start()
+lsp_init._request_root_refresh(authority_nil_handler, "startup-authority-nil")
+lsp_init._execute_metadata_query(authority_nil_handler, "startup-authority-nil", "postgres")
+assert_eq("startup nil authority fail-closed signature", startup_started_signature, "schema-filter-v1|fail-closed")
+assert_eq("startup nil authority no structure refresh", authority_nil_handler.structure_requests, 0)
+assert_eq("startup nil authority no metadata SQL", authority_nil_handler.metadata_requests, 0)
+
+reset_lsp_startup_state()
+startup_started_signature = nil
+local legacy_handler = make_startup_handler({
+  authority_present = false,
+  conn_id = "startup-legacy-api-absent",
+})
+state_module.handler = function()
+  return legacy_handler
+end
+lsp_init._try_start()
+assert_eq("startup legacy root refresh preserved", legacy_handler.structure_requests, 1)
+assert_eq("startup legacy metadata preserved", legacy_handler.metadata_requests, 1)
+
+restore_lsp_startup_state()
+
 local root = vim.fn.getcwd()
 local drawer_source = table.concat(vim.fn.readfile(root .. "/lua/dbee/ui/drawer/init.lua"), "\n")
 local lsp_source = table.concat(vim.fn.readfile(root .. "/lua/dbee/lsp/init.lua"), "\n")
@@ -455,5 +585,6 @@ package.loaded["cmp"] = old_cmp
 print("ARCH14_LSP_PROBE_SCOPE_OK=true")
 print("ARCH14_FILTER_AUTHORITY_SINGLE_SOURCE_OK=true")
 print("ARCH14_LSP_CACHE_FAIL_CLOSED_ON_AUTHORITY_NIL=true")
+print("ARCH14_LSP_STARTUP_AUTHORITY_NIL_NO_METADATA_SQL=true")
 print("LSP_COMPLETION_REFRESH_NOTIFY_OK=true")
 vim.cmd("qa!")

@@ -122,21 +122,34 @@ local function clear_connection_tracking(conn_id)
   M._metadata_call_ids = {}
 end
 
+local function read_startup_schema_scope(handler, conn_id)
+  if handler and type(handler.get_schema_filter_normalized) == "function" and conn_id then
+    local ok, scope = pcall(handler.get_schema_filter_normalized, handler, conn_id)
+    if ok and scope then
+      return scope, false
+    end
+    return nil, true
+  end
+  return nil, false
+end
+
 local function connection_uses_lazy_schema_root(handler, conn)
   if not conn then
-    return false
+    return false, false
   end
 
-  local normalized
-  if handler and type(handler.get_schema_filter_normalized) == "function" and conn.id then
-    local ok, scope = pcall(handler.get_schema_filter_normalized, handler, conn.id)
-    if ok and scope then
-      normalized = scope
-    end
+  local normalized, authority_unavailable = read_startup_schema_scope(handler, conn.id)
+  if authority_unavailable or (normalized and normalized.fail_closed == true) then
+    return false, true
   end
 
   local caps = schema_filter.capabilities((normalized and normalized.connection_type) or conn.type or nil)
-  return normalized and normalized.lazy_per_schema == true and caps.list_schemas == true and caps.structure_for_schema == true
+  local lazy_root = normalized
+    and normalized.lazy_per_schema == true
+    and caps.list_schemas == true
+    and caps.structure_for_schema == true
+    or false
+  return lazy_root, false
 end
 
 ---@param data ConnectionInvalidatedEvent
@@ -545,7 +558,12 @@ function M._request_root_refresh(handler, conn_id)
   end
   conn = conn or { id = conn_id }
 
-  if connection_uses_lazy_schema_root(handler, conn) then
+  local lazy_root, authority_unavailable = connection_uses_lazy_schema_root(handler, conn)
+  if authority_unavailable then
+    return
+  end
+
+  if lazy_root then
     M._request_schema_list_refresh(handler, conn_id)
   else
     M._request_structure_refresh(handler, conn_id)
@@ -696,10 +714,15 @@ function M._try_start()
   if not conn then
     return
   end
-  local lazy_root = connection_uses_lazy_schema_root(handler, conn)
+  local lazy_root, authority_unavailable = connection_uses_lazy_schema_root(handler, conn)
 
   -- 1. Try disk cache (instant)
   local cache = SchemaCache:new(handler, conn.id)
+  if authority_unavailable or (cache.schema_scope and cache.schema_scope.fail_closed == true) then
+    M._start_lsp(cache, conn.id)
+    return
+  end
+
   if cache:load_from_disk() then
     M._start_lsp(cache, conn.id)
     -- also trigger async refresh in background to keep cache fresh
@@ -749,6 +772,11 @@ end
 function M._execute_metadata_query(handler, conn_id, conn_type)
   local sql = METADATA_QUERIES[conn_type]
   if not sql then
+    return
+  end
+
+  local normalized, authority_unavailable = read_startup_schema_scope(handler, conn_id)
+  if authority_unavailable or (normalized and normalized.fail_closed == true) then
     return
   end
 
