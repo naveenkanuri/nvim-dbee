@@ -26,8 +26,14 @@ UX13_ROLLUP_LOG ?= $(UX13_ROLLUP_ARTIFACT_DIR)/ux13-rollup-stdout.log
 LSP12_ROLLUP_SCRIPT ?= $(CURDIR)/ci/headless/check_lsp12_rollup.lua
 ARCH14_ROLLUP_SCRIPT ?= $(CURDIR)/ci/headless/check_arch14_rollup.lua
 ARCH14_ROLLUP_LOG ?= $(UX13_ROLLUP_LOG)
+WALLET_PLATFORM ?= $(if $(filter Darwin,$(UNAME_S)),macos,linux)
+WALLET_ARTIFACT_ROOT ?= $(if $(RUNNER_TEMP),$(RUNNER_TEMP)/wallet-test,$(if $(TMPDIR),$(TMPDIR)nvim-dbee-wallet-test,/tmp/nvim-dbee-wallet-test))
+WALLET_ARTIFACT_DIR ?= $(WALLET_ARTIFACT_ROOT)/$(WALLET_PLATFORM)
+WALLET_GO_LOG ?= $(WALLET_ARTIFACT_DIR)/wallet-go.log
+WALLET_LUA_LOG ?= $(WALLET_ARTIFACT_DIR)/wallet-lua.log
+WALLET_ROLLUP_SCRIPT ?= $(CURDIR)/ci/headless/check_oracle_wallet_zip.lua
 
-.PHONY: perf perf-lsp perf-all
+.PHONY: perf perf-lsp perf-all wallet-test
 
 perf: perf-bootstrap
 	@set -eu; \
@@ -145,3 +151,30 @@ perf-lsp: perf-bootstrap
 	  $(PERF_NVIM_HEADLESS) -c "luafile $(ARCH14_ROLLUP_SCRIPT)"
 
 perf-all: perf perf-lsp
+
+wallet-test: perf-bootstrap
+	@set -eu; \
+	mkdir -p "$(WALLET_ARTIFACT_DIR)"; \
+	: > "$(WALLET_GO_LOG)"; \
+	: > "$(WALLET_LUA_LOG)"; \
+	run_logged() { \
+	  label="$$1"; \
+	  log="$$2"; \
+	  shift 2; \
+	  tmp="$$(mktemp)"; \
+	  "$$@" >"$$tmp" 2>&1; \
+	  status="$$?"; \
+	  cat "$$tmp"; \
+	  cat "$$tmp" >> "$$log"; \
+	  rm -f "$$tmp"; \
+	  if [ "$$status" -ne 0 ]; then \
+	    printf '%s\n' "$$label failed with status $$status" >&2; \
+	    printf '%s\n' "log path: $$log" >&2; \
+	    exit "$$status"; \
+	  fi; \
+	}; \
+	printf '%s\n' "Running: WALLET_PLATFORM=$(WALLET_PLATFORM) WALLET_ARTIFACT_DIR=$(WALLET_ARTIFACT_DIR)"; \
+	run_logged "wallet-go" "$(WALLET_GO_LOG)" env GOCACHE="$(WALLET_ARTIFACT_DIR)/go-cache" \
+	  go -C dbee test -count=1 -v ./adapters -run 'TestOracleWallet'; \
+	run_logged "wallet-rollup" "$(WALLET_LUA_LOG)" env WALLET_GO_LOG="$(WALLET_GO_LOG)" \
+	  $(PERF_NVIM_HEADLESS) -c "luafile $(WALLET_ROLLUP_SCRIPT)"
