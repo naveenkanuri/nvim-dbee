@@ -27,6 +27,18 @@ local uv = vim.loop
 ---@field update? fun(self: Source, id: connection_id, details: ConnectionParams) update provided connection (optional)
 ---@field get_record? fun(self: Source, id: connection_id):table|nil return the raw persisted record for a connection id (optional)
 ---@field file? fun(self: Source):string function which returns a source file to edit (optional)
+---@field supports_folders? fun(self: Source):boolean return true when source supports folder grouping (optional)
+---@field load_folders? fun(self: Source):Folder[] return source-local folders (optional)
+---@field add_folder? fun(self: Source, name: string):string add folder and return id (optional)
+---@field rename_folder? fun(self: Source, folder_id: string, new_name: string) rename folder (optional)
+---@field remove_folder? fun(self: Source, folder_id: string) remove folder (optional)
+---@field move_connection? fun(self: Source, conn_id: connection_id, target_folder_id?: string) move connection into folder or ungroup (optional)
+---@field reload_folders? fun(self: Source) invalidate folder cache (optional)
+
+---@class Folder
+---@field id string
+---@field name string
+---@field connection_ids connection_id[]
 
 local sources = {}
 
@@ -216,6 +228,10 @@ function sources.FileSource:new(path)
   end
   local o = {
     path = path,
+    _folders_load_state = "unloaded",
+    _folders_load_error = nil,
+    _folders_cache = nil,
+    _folders_path = nil,
   }
   setmetatable(o, self)
   self.__index = self
@@ -240,6 +256,327 @@ function sources.FileSource:load()
   end
 
   return conns
+end
+
+---@package
+---@return boolean
+function sources.FileSource:supports_folders()
+  return true
+end
+
+---@package
+---@return string
+function sources.FileSource:folders_path()
+  if self._folders_path then
+    return self._folders_path
+  end
+
+  if self.path:sub(-5) == ".json" and self.path:sub(-13) ~= ".folders.json" then
+    self._folders_path = self.path:sub(1, -6) .. ".folders.json"
+  else
+    self._folders_path = self.path .. ".folders.json"
+  end
+
+  return self._folders_path
+end
+
+---@package
+---@param raw Folder[]
+---@param conns ConnectionParams[]
+---@return Folder[]
+function sources.FileSource:_normalize_folders(raw, conns)
+  local conn_ids = {}
+  for _, conn in ipairs(conns or {}) do
+    if conn and conn.id then
+      conn_ids[conn.id] = true
+    end
+  end
+
+  local seen_conn_ids = {}
+  local normalized = {}
+  for index, folder in ipairs(raw or {}) do
+    local id = folder.id
+    if type(id) ~= "string" or vim.trim(id) == "" then
+      id = "folder_" .. utils.random_string()
+      utils.log("warn", "folder at index " .. tostring(index) .. " is missing an id; generated " .. id)
+    end
+
+    local name = folder.name
+    if type(name) ~= "string" or vim.trim(name) == "" then
+      name = "Folder"
+      utils.log("warn", "folder " .. tostring(id) .. " is missing a name; using Folder")
+    end
+
+    local connection_ids = {}
+    for _, conn_id in ipairs(folder.connection_ids or {}) do
+      if not conn_ids[conn_id] then
+        utils.log("warn", "folder " .. tostring(id) .. " references missing connection " .. tostring(conn_id))
+      elseif seen_conn_ids[conn_id] then
+        utils.log("warn", "connection " .. tostring(conn_id) .. " appears in multiple folders; keeping first")
+      else
+        seen_conn_ids[conn_id] = true
+        connection_ids[#connection_ids + 1] = conn_id
+      end
+    end
+
+    normalized[#normalized + 1] = {
+      id = id,
+      name = name,
+      connection_ids = connection_ids,
+    }
+  end
+
+  return normalized
+end
+
+---@package
+---@return boolean
+function sources.FileSource:_ensure_folders_loaded()
+  if self._folders_load_state == "loaded_ok" then
+    return true
+  end
+  if self._folders_load_state == "load_failed" then
+    return false
+  end
+
+  local path = self:folders_path()
+  if not uv.fs_stat(path) then
+    self._folders_cache = {}
+    self._folders_load_state = "loaded_ok"
+    self._folders_load_error = nil
+    return true
+  end
+
+  local file, open_err = io.open(path, "r")
+  if not file then
+    self._folders_cache = {}
+    self._folders_load_state = "load_failed"
+    self._folders_load_error = "could not open folders sidecar: " .. tostring(open_err)
+    utils.log("warn", self._folders_load_error)
+    return false
+  end
+
+  local content = file:read("*a")
+  file:close()
+  if content == "" then
+    self._folders_cache = {}
+    self._folders_load_state = "loaded_ok"
+    self._folders_load_error = nil
+    return true
+  end
+
+  local decode_ok, decoded = pcall(vim.json.decode, content)
+  if not decode_ok then
+    self._folders_cache = {}
+    self._folders_load_state = "load_failed"
+    self._folders_load_error = "folders sidecar JSON decode failed"
+    utils.log("warn", self._folders_load_error)
+    return false
+  end
+
+  local malformed = type(decoded) ~= "table" or not vim.islist(decoded)
+  if not malformed then
+    for _, folder in ipairs(decoded) do
+      if
+        type(folder) ~= "table"
+        or type(folder.connection_ids) ~= "table"
+        or not vim.islist(folder.connection_ids)
+      then
+        malformed = true
+        break
+      end
+    end
+  end
+  if malformed then
+    self._folders_cache = {}
+    self._folders_load_state = "load_failed"
+    self._folders_load_error = "folders sidecar has malformed shape"
+    utils.log("warn", self._folders_load_error)
+    return false
+  end
+
+  self._folders_cache = self:_normalize_folders(decoded, self:load())
+  self._folders_load_state = "loaded_ok"
+  self._folders_load_error = nil
+  return true
+end
+
+---@package
+---@return Folder[]
+function sources.FileSource:load_folders()
+  if not self:_ensure_folders_loaded() then
+    utils.log("warn", "folders sidecar corrupt; rendering without folders")
+    return {}
+  end
+
+  return self._folders_cache or {}
+end
+
+---@package
+function sources.FileSource:_require_folders_writeable()
+  self:_ensure_folders_loaded()
+  if self._folders_load_state == "load_failed" then
+    error({ message = "folders sidecar is corrupt; refusing to overwrite", cache_corrupt = true })
+  end
+end
+
+---@package
+---@param name string
+---@return string
+function sources.FileSource:add_folder(name)
+  self:_require_folders_writeable()
+
+  if type(name) ~= "string" or vim.trim(name) == "" then
+    error("folder name is required")
+  end
+
+  local normalized_name = vim.trim(name)
+  local key = normalized_name:lower()
+  for _, folder in ipairs(self._folders_cache or {}) do
+    if tostring(folder.name or ""):lower() == key then
+      error("folder name already exists: " .. normalized_name)
+    end
+  end
+
+  local existing_ids = {}
+  for _, folder in ipairs(self._folders_cache or {}) do
+    existing_ids[folder.id] = true
+  end
+
+  local id = "folder_" .. utils.random_string()
+  while existing_ids[id] do
+    id = "folder_" .. utils.random_string()
+  end
+
+  self._folders_cache[#self._folders_cache + 1] = {
+    id = id,
+    name = normalized_name,
+    connection_ids = {},
+  }
+  write_records_atomically(self:folders_path(), self._folders_cache)
+
+  return id
+end
+
+---@package
+---@param folder_id string
+---@param new_name string
+function sources.FileSource:rename_folder(folder_id, new_name)
+  self:_require_folders_writeable()
+
+  if not folder_id or folder_id == "" then
+    error("folder id is required")
+  end
+  if type(new_name) ~= "string" or vim.trim(new_name) == "" then
+    error("folder name is required")
+  end
+
+  local normalized_name = vim.trim(new_name)
+  local key = normalized_name:lower()
+  local target = nil
+  for _, folder in ipairs(self._folders_cache or {}) do
+    if folder.id == folder_id then
+      target = folder
+    elseif tostring(folder.name or ""):lower() == key then
+      error("folder name already exists: " .. normalized_name)
+    end
+  end
+
+  if not target then
+    error("folder id not found: " .. tostring(folder_id))
+  end
+
+  target.name = normalized_name
+  write_records_atomically(self:folders_path(), self._folders_cache)
+end
+
+---@package
+---@param folder_id string
+function sources.FileSource:remove_folder(folder_id)
+  self:_require_folders_writeable()
+
+  if not folder_id or folder_id == "" then
+    error("folder id is required")
+  end
+
+  local found = false
+  local next_folders = {}
+  for _, folder in ipairs(self._folders_cache or {}) do
+    if folder.id == folder_id then
+      found = true
+    else
+      next_folders[#next_folders + 1] = folder
+    end
+  end
+
+  if not found then
+    error("folder id not found: " .. tostring(folder_id))
+  end
+
+  self._folders_cache = next_folders
+  write_records_atomically(self:folders_path(), self._folders_cache)
+end
+
+---@package
+---@param conn_id connection_id
+---@param target_folder_id? string
+function sources.FileSource:move_connection(conn_id, target_folder_id)
+  self:_require_folders_writeable()
+
+  if not conn_id or conn_id == "" then
+    error("connection id is required")
+  end
+
+  local target_folder = nil
+  local current_folder_id = nil
+  if target_folder_id ~= nil then
+    for _, folder in ipairs(self._folders_cache or {}) do
+      if folder.id == target_folder_id then
+        target_folder = folder
+        break
+      end
+    end
+    if not target_folder then
+      error("folder id not found: " .. tostring(target_folder_id))
+    end
+  end
+
+  for _, folder in ipairs(self._folders_cache or {}) do
+    for _, current_conn_id in ipairs(folder.connection_ids or {}) do
+      if current_conn_id == conn_id then
+        current_folder_id = folder.id
+        break
+      end
+    end
+    if current_folder_id then
+      break
+    end
+  end
+
+  if current_folder_id == target_folder_id then
+    return
+  end
+
+  for _, folder in ipairs(self._folders_cache or {}) do
+    for index = #(folder.connection_ids or {}), 1, -1 do
+      if folder.connection_ids[index] == conn_id then
+        table.remove(folder.connection_ids, index)
+      end
+    end
+  end
+
+  if target_folder then
+    target_folder.connection_ids[#target_folder.connection_ids + 1] = conn_id
+  end
+
+  write_records_atomically(self:folders_path(), self._folders_cache)
+end
+
+---@package
+function sources.FileSource:reload_folders()
+  self._folders_load_state = "unloaded"
+  self._folders_load_error = nil
+  self._folders_cache = nil
 end
 
 ---@package
@@ -268,6 +605,72 @@ function sources.FileSource:delete(id)
     error("no id passed to delete function")
   end
 
+  local prior_load_failed = self._folders_load_state == "load_failed"
+  local pre_read_ok = false
+  local was_member = false
+  local raw_folders = nil
+  local ok, content = pcall(function()
+    local file = io.open(self:folders_path(), "r")
+    if not file then
+      return nil
+    end
+    local sidecar = file:read("*a")
+    file:close()
+    return sidecar
+  end)
+
+  if ok and content and content ~= "" then
+    local decode_ok, decoded = pcall(vim.json.decode, content)
+    if decode_ok and type(decoded) == "table" then
+      raw_folders = decoded
+      pre_read_ok = true
+      for _, folder in ipairs(raw_folders) do
+        if type(folder) == "table" and type(folder.connection_ids) == "table" then
+          for _, conn_id in ipairs(folder.connection_ids) do
+            if conn_id == id then
+              was_member = true
+              break
+            end
+          end
+        end
+        if was_member then
+          break
+        end
+      end
+    else
+      self._folders_load_state = "load_failed"
+      self._folders_load_error = "JSON decode failed during delete pre-read"
+      self._folders_cache = {}
+      utils.log("warn", "folders sidecar corrupt (decode failed); conn delete proceeds, folder prune skipped")
+    end
+  end
+
+  if pre_read_ok then
+    local saw_malformed = false
+    if type(raw_folders) ~= "table" or not vim.islist(raw_folders) then
+      saw_malformed = true
+    else
+      for _, folder in ipairs(raw_folders) do
+        if
+          type(folder) ~= "table"
+          or type(folder.connection_ids) ~= "table"
+          or not vim.islist(folder.connection_ids)
+        then
+          saw_malformed = true
+          break
+        end
+      end
+    end
+
+    if saw_malformed then
+      self._folders_load_state = "load_failed"
+      self._folders_load_error = "malformed folder entries during delete pre-read"
+      self._folders_cache = {}
+      utils.log("warn", "folders sidecar has malformed entries; conn delete proceeds, folder prune SKIPPED")
+      pre_read_ok = false
+    end
+  end
+
   local existing = read_json_records(self.path)
   local new = {}
   for _, ex in ipairs(existing) do
@@ -277,6 +680,31 @@ function sources.FileSource:delete(id)
   end
 
   write_records_atomically(self.path, new)
+
+  if pre_read_ok and was_member and not prior_load_failed then
+    for _, folder in ipairs(raw_folders or {}) do
+      if type(folder) == "table" and type(folder.connection_ids) == "table" then
+        for index = #folder.connection_ids, 1, -1 do
+          if folder.connection_ids[index] == id then
+            table.remove(folder.connection_ids, index)
+          end
+        end
+      end
+    end
+
+    local write_ok, write_err = pcall(write_records_atomically, self:folders_path(), raw_folders)
+    if not write_ok then
+      utils.log("error", "folder prune write failed: " .. tostring(write_err))
+    elseif self._folders_load_state == "loaded_ok" then
+      for _, folder in ipairs(self._folders_cache or {}) do
+        for index = #(folder.connection_ids or {}), 1, -1 do
+          if folder.connection_ids[index] == id then
+            table.remove(folder.connection_ids, index)
+          end
+        end
+      end
+    end
+  end
 end
 
 ---@package
