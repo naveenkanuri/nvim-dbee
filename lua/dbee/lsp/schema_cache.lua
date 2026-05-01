@@ -171,6 +171,8 @@ function SchemaCache:new(handler, conn_id)
     all_table_names = {},
     schema_items = {},
     table_items_by_schema = {},
+    schema_table_preview_by_schema = {},
+    schema_table_count_by_schema = {},
     all_table_items = {},
     all_table_item_source_by_label = {},
     all_table_item_ambiguous_by_label = {},

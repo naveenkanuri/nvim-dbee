@@ -23,7 +23,11 @@ local function assert_eq(label, actual, expected)
   end
 end
 
-local cache = SchemaCache:new({}, "diagnostics-correctness")
+local cache = SchemaCache:new({
+  get_authoritative_root_epoch = function()
+    return 1
+  end,
+}, "diagnostics-correctness")
 cache:build_from_metadata_rows({
   { schema_name = "VALID_SCHEMA", table_name = "VALID_TABLE", obj_type = "table" },
   { schema_name = "OTHER_SCHEMA", table_name = "VALID_TABLE", obj_type = "table" },

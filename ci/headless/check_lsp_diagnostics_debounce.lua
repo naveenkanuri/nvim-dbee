@@ -38,7 +38,11 @@ local function set_lsp_config(mode, debounce_ms)
   }
 end
 
-local cache = SchemaCache:new({}, "diagnostics-debounce")
+local cache = SchemaCache:new({
+  get_authoritative_root_epoch = function()
+    return 1
+  end,
+}, "diagnostics-debounce")
 cache:build_from_metadata_rows({
   { schema_name = "S", table_name = "VALID_TABLE", obj_type = "table" },
 })

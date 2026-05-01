@@ -51,15 +51,23 @@ end
 local root = vim.fn.tempname()
 vim.fn.mkdir(root, "p")
 
+local function handler()
+  return {
+    get_authoritative_root_epoch = function()
+      return 1
+    end,
+  }
+end
+
 local function new_cache(conn_id)
-  local cache = SchemaCache:new({}, conn_id)
+  local cache = SchemaCache:new(handler(), conn_id)
   cache.cache_dir = root .. "/lsp_cache"
   vim.fn.mkdir(cache.cache_dir, "p")
   return cache
 end
 
 local function new_isolated_cache(conn_id)
-  local cache = SchemaCache:new({}, conn_id)
+  local cache = SchemaCache:new(handler(), conn_id)
   cache.cache_dir = root .. "/" .. conn_id .. "/lsp_cache"
   vim.fn.mkdir(cache.cache_dir, "p")
   return cache

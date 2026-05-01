@@ -402,7 +402,11 @@ for i = 1, 100 do
     { name = "COL_" .. table_name, type = "NUMBER" },
   })
 end
-local full_global_cache = SchemaCache:new({}, "async-global-index-full")
+local full_global_cache = SchemaCache:new({
+  get_authoritative_root_epoch = function()
+    return 1
+  end,
+}, "async-global-index-full")
 full_global_cache:build_from_metadata_rows(global_rows)
 assert_eq("async global full refresh count", global_full_refreshes, 0)
 assert_true(

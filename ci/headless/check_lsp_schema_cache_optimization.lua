@@ -30,9 +30,20 @@ local function labels(items)
   return out
 end
 
+local function unscoped_handler()
+  return {
+    get_authoritative_root_epoch = function()
+      return 1
+    end,
+  }
+end
+
 local function scoped_cache(conn_type, id)
   local scope = assert(schema_filter.normalize(nil, conn_type))
   return SchemaCache:new({
+    get_authoritative_root_epoch = function()
+      return 1
+    end,
     get_schema_filter_normalized = function()
       return scope
     end,
@@ -111,7 +122,7 @@ assert_true("schema cache no direct upper transform", not schema_cache_source:fi
 assert_true("schema cache no direct lower transform", not schema_cache_source:find(":lower%("))
 assert_true("schema cache no fixed upper canonical probe", not schema_cache_source:find('canonical%([^%)]-"upper"'))
 
-local cache = SchemaCache:new({}, "lsp11-schema-cache-optimization")
+local cache = SchemaCache:new(unscoped_handler(), "lsp11-schema-cache-optimization")
 cache:build_from_metadata_rows({
   { schema_name = "B_SCHEMA", table_name = "VALID_TABLE", obj_type = "table" },
   { schema_name = "A_SCHEMA", table_name = "DUP_TABLE", obj_type = "table" },
@@ -179,6 +190,7 @@ pg_loaded_cache:build_from_schemas({ "public", "Public" }, { preserve_loaded = f
 pg_loaded_cache:on_schema_objects_loaded({
   conn_id = "lsp11-r6-loaded-exact-aware",
   schema = "public",
+  root_epoch = 1,
   objects = {
     { type = "table", schema = "public", name = "users" },
   },
@@ -191,6 +203,7 @@ pg_refresh_cache:build_from_schemas({ "public" }, { preserve_loaded = false })
 pg_refresh_cache:on_schema_objects_loaded({
   conn_id = "lsp11-r6-refresh-exact-aware",
   schema = "public",
+  root_epoch = 1,
   objects = {
     { type = "table", schema = "public", name = "users" },
   },
@@ -205,6 +218,7 @@ sqlite_refresh_cache:build_from_schemas({ "Main" }, { preserve_loaded = false })
 sqlite_refresh_cache:on_schema_objects_loaded({
   conn_id = "lsp11-r6-refresh-case-insensitive",
   schema = "Main",
+  root_epoch = 1,
   objects = {
     { type = "table", schema = "Main", name = "Users" },
   },
@@ -253,6 +267,9 @@ local function column_probe_calls(conn_type, schema, table_name)
   local scope = assert(schema_filter.normalize(nil, conn_type))
   local calls = {}
   local probe_cache = SchemaCache:new({
+    get_authoritative_root_epoch = function()
+      return 1
+    end,
     get_schema_filter_normalized = function()
       return scope
     end,
@@ -354,9 +371,9 @@ local equivalence_rows = {
   { schema_name = "A_SCHEMA", table_name = "Z_TABLE", obj_type = "table" },
   { schema_name = "C_SCHEMA", table_name = "A_TABLE", obj_type = "view" },
 }
-local full_index_cache = SchemaCache:new({}, "lsp11-full-index")
+local full_index_cache = SchemaCache:new(unscoped_handler(), "lsp11-full-index")
 full_index_cache:build_from_metadata_rows(equivalence_rows)
-local incremental_index_cache = SchemaCache:new({}, "lsp11-incremental-index")
+local incremental_index_cache = SchemaCache:new(unscoped_handler(), "lsp11-incremental-index")
 for _, row in ipairs(equivalence_rows) do
   incremental_index_cache:_upsert_table_index(row.schema_name, row.table_name, row.obj_type)
 end
@@ -365,11 +382,11 @@ assert_true(
   vim.deep_equal(index_snapshot(incremental_index_cache), index_snapshot(full_index_cache))
 )
 
-local full_update_cache = SchemaCache:new({}, "lsp11-full-update-index")
+local full_update_cache = SchemaCache:new(unscoped_handler(), "lsp11-full-update-index")
 full_update_cache:build_from_metadata_rows({
   { schema_name = "A_SCHEMA", table_name = "CHANGE_ME", obj_type = "view" },
 })
-local incremental_update_cache = SchemaCache:new({}, "lsp11-incremental-update-index")
+local incremental_update_cache = SchemaCache:new(unscoped_handler(), "lsp11-incremental-update-index")
 incremental_update_cache:_upsert_table_index("A_SCHEMA", "CHANGE_ME", "table")
 incremental_update_cache:_upsert_table_index("A_SCHEMA", "CHANGE_ME", "view")
 assert_true(
@@ -400,7 +417,7 @@ assert_eq("incremental case-fold schema representative", incremental_case_cache:
 assert_eq("incremental case-fold table representative", incremental_case_cache:find_table_in_schema("AA", "TT"), expected_case_table)
 assert_eq("incremental case-fold warm columns", incremental_case_cache:get_column_completion_items("AA", "TT")[1].label, "ID")
 
-local o1_cache = SchemaCache:new({}, "lsp11-r6-targeted-o1")
+local o1_cache = SchemaCache:new(unscoped_handler(), "lsp11-r6-targeted-o1")
 local o1_rows = {}
 for i = 1, 100 do
   o1_rows[#o1_rows + 1] = {
