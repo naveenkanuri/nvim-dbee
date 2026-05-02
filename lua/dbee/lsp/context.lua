@@ -1340,6 +1340,54 @@ local function parse_statement_table_refs(statement, opts)
     end
   end
 
+  -- Collect CTE alias names defined via WITH name AS (...). These are NOT real tables;
+  -- they're statement-local aliases. Excluding them prevents spurious "Unknown table"
+  -- diagnostics on every CTE reference.
+  -- Pattern: WITH [RECURSIVE] name1 [(col_list)] AS (...) [, name2 AS (...)]* <main_stmt>
+  -- Heuristic: at depth 0, between WITH and the first SELECT/INSERT/UPDATE/DELETE/MERGE
+  -- at depth 0 that follows the closing paren of the LAST CTE body, every identifier
+  -- immediately preceding `AS` at depth 0 is a CTE alias.
+  local cte_aliases = {}
+  do
+    local with_index = nil
+    for i, t in ipairs(tokens) do
+      local lower = token_lower(t)
+      if lower == "with" and t.depth == 0 then
+        with_index = i
+        break
+      end
+      -- WITH must be the leading keyword; if any non-WITH depth-0 SQL statement
+      -- starter appears first, there's no CTE.
+      if t.depth == 0 and lower and (lower == "select" or lower == "insert"
+          or lower == "update" or lower == "delete" or lower == "merge"
+          or lower == "create" or lower == "alter" or lower == "drop") then
+        break
+      end
+    end
+    if with_index then
+      -- Walk forward collecting identifiers immediately preceding `AS` at depth 0.
+      -- Handle both `name AS (...)` and `name(col_list) AS (...)` (recursive CTE column list).
+      local i = with_index + 1
+      while i <= #tokens do
+        local t = tokens[i]
+        local lower = token_lower(t)
+        if t and t.depth == 0 and lower == "as" then
+          -- Walk back, skipping any depth>0 tokens (the optional column list contents),
+          -- to find the depth-0 identifier that names the CTE.
+          local j = i - 1
+          while j >= 1 and tokens[j].depth > 0 do
+            j = j - 1
+          end
+          local prev = tokens[j]
+          if prev and prev.depth == 0 and prev.name and not token_keyword(prev) then
+            cte_aliases[prev.name:lower()] = true
+          end
+        end
+        i = i + 1
+      end
+    end
+  end
+
   local index = 1
   while index <= #tokens do
     local lower = token_lower(tokens[index])
@@ -1349,6 +1397,19 @@ local function parse_statement_table_refs(statement, opts)
       parse_single_after(lower, index + 1, 1, tokens[index].depth)
     end
     index = index + 1
+  end
+
+  -- Filter out matches whose ref is a statement-local CTE alias.
+  if next(cte_aliases) ~= nil then
+    local filtered = {}
+    for _, m in ipairs(matches) do
+      local ref_name = m.table or m.ref
+      local lower = ref_name and ref_name:lower()
+      if not (lower and cte_aliases[lower] and not m.schema) then
+        filtered[#filtered + 1] = m
+      end
+    end
+    matches = filtered
   end
 
   table.sort(matches, function(a, b)

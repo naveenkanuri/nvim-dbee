@@ -390,6 +390,31 @@ oracle_client.terminate()
 scope_ref.value = prior_scope
 emit("LSP12_2_DIAGNOSTICS_FUNCTION_CALL_NOT_TABLE_REF", "true")
 
+-- CTE alias names must NOT be extracted as table refs (they're statement-local).
+local cte_simple = context.statement_table_refs({
+  text = "WITH e AS (SELECT 1 AS x FROM DUAL) SELECT * FROM e",
+  start = { line = 0, character = 0 },
+})
+assert_eq("cte alias filtered count", #cte_simple, 1)
+assert_eq("cte alias filtered ref", cte_simple[1].ref, "DUAL")
+
+local cte_recursive = context.statement_table_refs({
+  text = "WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM t WHERE n<5) SELECT * FROM t",
+  start = { line = 0, character = 0 },
+})
+assert_eq("cte recursive alias filtered count", #cte_recursive, 0)
+
+local cte_with_real = context.statement_table_refs({
+  text = "WITH e AS (SELECT 1 FROM DUAL) SELECT * FROM e, real_table",
+  start = { line = 0, character = 0 },
+})
+assert_eq("cte with real table count", #cte_with_real, 2)
+local cte_real_names = { cte_with_real[1].ref, cte_with_real[2].ref }
+table.sort(cte_real_names)
+assert_eq("cte real ref 1", cte_real_names[1], "DUAL")
+assert_eq("cte real ref 2", cte_real_names[2], "real_table")
+emit("LSP12_2_DIAGNOSTICS_CTE_ALIAS_NOT_TABLE_REF", "true")
+
 local dedupe_buf, dedupe_uri = make_buffer({ "select * from public.users; select * from PUBLIC.USERS" })
 local dedupe = request(client, "textDocument/documentSymbol", {
   textDocument = { uri = dedupe_uri },
