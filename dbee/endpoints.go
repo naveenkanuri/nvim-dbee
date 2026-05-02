@@ -534,6 +534,97 @@ func mountEndpoints(p *plugin.Plugin, h *handler.Handler) {
 		return nil, nil
 	})
 
+	p.RegisterEndpoint("DbeeConnectionGetRichMetadataSupport", func(args *struct {
+		ID core.ConnectionID `msgpack:",array"`
+	},
+	) (any, error) {
+		return h.ConnectionGetRichMetadataSupport(args.ID)
+	})
+
+	p.RegisterEndpoint("DbeeConnectionGetColumnsRichAsync", func(args *struct {
+		ID        core.ConnectionID `msgpack:",array"`
+		RequestID int
+		BranchID  string
+		RootEpoch int
+		Opts      *struct {
+			Table           string `msgpack:"table"`
+			Schema          string `msgpack:"schema"`
+			Materialization string `msgpack:"materialization"`
+		}
+	},
+	) (any, error) {
+		if args.Opts == nil {
+			return nil, fmt.Errorf("missing async rich column options")
+		}
+
+		h.ConnectionGetColumnsRichAsync(
+			args.ID,
+			args.RequestID,
+			args.BranchID,
+			args.RootEpoch,
+			&core.TableOptions{
+				Table:           args.Opts.Table,
+				Schema:          args.Opts.Schema,
+				Materialization: core.StructureTypeFromString(args.Opts.Materialization),
+			},
+		)
+		return nil, nil
+	})
+
+	p.RegisterEndpoint("DbeeConnectionGetIndexesAsync", func(args *struct {
+		ID        core.ConnectionID `msgpack:",array"`
+		RequestID int
+		BranchID  string
+		RootEpoch int
+		Opts      *struct {
+			Table           string `msgpack:"table"`
+			Schema          string `msgpack:"schema"`
+			Materialization string `msgpack:"materialization"`
+		}
+	},
+	) (any, error) {
+		if args.Opts == nil {
+			return nil, fmt.Errorf("missing async index options")
+		}
+
+		h.ConnectionGetIndexesAsync(
+			args.ID,
+			args.RequestID,
+			args.BranchID,
+			args.RootEpoch,
+			&core.TableOptions{
+				Table:           args.Opts.Table,
+				Schema:          args.Opts.Schema,
+				Materialization: core.StructureTypeFromString(args.Opts.Materialization),
+			},
+		)
+		return nil, nil
+	})
+
+	p.RegisterEndpoint("DbeeConnectionGetSequencesAsync", func(args *struct {
+		ID        core.ConnectionID `msgpack:",array"`
+		RequestID int
+		BranchID  string
+		RootEpoch int
+		Opts      *struct {
+			Schema string `msgpack:"schema"`
+		}
+	},
+	) (any, error) {
+		if args.Opts == nil {
+			return nil, fmt.Errorf("missing async sequence options")
+		}
+
+		h.ConnectionGetSequencesAsync(
+			args.ID,
+			args.RequestID,
+			args.BranchID,
+			args.RootEpoch,
+			args.Opts.Schema,
+		)
+		return nil, nil
+	})
+
 	p.RegisterEndpoint(
 		"DbeeConnectionListDatabases",
 		func(args *struct {

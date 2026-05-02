@@ -13,11 +13,43 @@
 ---@class Column
 ---@field name string name of the column
 ---@field type string database type of the column
+---@field nullable? boolean nullable flag when adapter supports rich metadata
+---@field primary_key? boolean primary key membership
+---@field primary_key_ordinal? integer primary-key ordinal
+---@field foreign_keys? FKRef[] foreign key references
 
 ---Table Materialization.
 ---@alias materialization
 ---| '"table"'
 ---| '"view"'
+---| '"materialized_view"'
+
+---@class FKRef
+---@field constraint_name? string
+---@field source_schema? string
+---@field source_table? string
+---@field source_column? string
+---@field source_columns? string[]
+---@field source_ordinal? integer
+---@field target_schema? string
+---@field target_table? string
+---@field target_column? string
+---@field target_columns? string[]
+
+---@class DBIndex
+---@field name string
+---@field schema? string
+---@field table? string
+---@field columns string[]
+---@field orders? string[]
+---@field unique? boolean
+---@field pk_backed? boolean
+
+---@class DBSequence
+---@field name string
+---@field schema? string
+---@field increment? integer
+---@field cache_size? integer
 
 ---Options for gathering table specific info.
 ---@class TableOpts
@@ -213,7 +245,7 @@
 ---| '"schemas_loaded"' {conn_id, request_id, root_epoch?, caller_token?, schemas, error}
 ---| '"schema_objects_loaded"' {conn_id, request_id, root_epoch, caller_token?, schema, objects, error}
 ---| '"structure_loaded"' {conn_id, request_id, root_epoch?, caller_token?, structures, error}
----| '"structure_children_loaded"' {conn_id, request_id, branch_id, root_epoch, kind = "columns", columns, error}
+---| '"structure_children_loaded"' {conn_id, request_id, branch_id, root_epoch, kind = "columns"|"columns_rich"|"indexes"|"sequences", supported?: boolean, schema?: string, table?: string, columns?: Column[], indexes?: DBIndex[], sequences?: DBSequence[], error?: string, error_kind?: string}
 
 ---Editor-owned SQL diagnostics are rendered inside connection-scoped namespaces
 ---named like `dbee-<conn_id>`.

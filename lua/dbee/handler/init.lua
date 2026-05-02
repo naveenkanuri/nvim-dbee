@@ -8,6 +8,16 @@ local register_remote_plugin = require("dbee.api.__register")
 local SINGLEFLIGHT_CALLER_TOKEN = "__singleflight"
 local BOOTSTRAP_BUFFER_LIMIT = 64
 local BOOTSTRAP_OVERFLOW_MAX = 3
+local RICH_METADATA_MAX_ACTIVE = 8
+local RICH_METADATA_MAX_QUEUE = 128
+local RICH_COLUMNS_KIND = "columns_rich"
+local RICH_INDEXES_KIND = "indexes"
+local RICH_SEQUENCES_KIND = "sequences"
+local RICH_METADATA_KINDS = {
+  [RICH_COLUMNS_KIND] = true,
+  [RICH_INDEXES_KIND] = true,
+  [RICH_SEQUENCES_KIND] = true,
+}
 
 ---@param err any
 ---@return boolean
@@ -351,6 +361,10 @@ end
 ---@field private _next_singleflight_request_id integer
 ---@field private _structure_flights table<string, { conn_id: connection_id, epoch: integer, request_id: integer, waiters: table[], consumer_slots: table<string, true>, alias_conn_ids?: table<string, true> }>
 ---@field private _structure_request_lookup table<integer, string>
+---@field private _rich_metadata_support_cache table<connection_id, { capability_payload: table, generation: integer }>
+---@field private _rich_metadata_flights table<string, table>
+---@field private _rich_metadata_request_lookup table<integer, string>
+---@field private _rich_metadata_queues table<connection_id, table>
 ---@field private _connection_invalidated_consumers table<string, { listener: event_listener, state: string, generation: integer, buffer?: { events: table[], last_drain_size: integer }, consecutive_overflows: integer, warning?: table }>
 local Handler = {}
 
@@ -373,6 +387,11 @@ function Handler:new(sources, opts)
     _schema_object_request_lookup = {},
     _schema_object_queues = {},
     _schema_spec_request_lookup = {},
+    _rich_metadata_support_cache = {},
+    _rich_metadata_support_generation = 0,
+    _rich_metadata_flights = {},
+    _rich_metadata_request_lookup = {},
+    _rich_metadata_queues = {},
     _connection_invalidated_consumers = {},
     _before_source_load = opts.before_source_load,
   }
@@ -387,6 +406,9 @@ function Handler:new(sources, opts)
   end)
   event_bus.register("schema_objects_loaded", function(data)
     o:_on_schema_objects_loaded(data)
+  end)
+  event_bus.register("structure_children_loaded", function(data)
+    o:_on_rich_metadata_loaded(data)
   end)
   event_bus.register("connection_invalidated", function(data)
     o:_dispatch_connection_invalidated(data)
@@ -467,6 +489,7 @@ function Handler:_bump_authoritative_root_epoch(conn_ids)
   for _, conn_id in ipairs(ordered) do
     self:_supersede_structure_flights(conn_id, next_epoch)
     self:_supersede_schema_flights(conn_id, next_epoch, "superseded")
+    self:_supersede_rich_metadata_flights(conn_id, next_epoch, "superseded")
   end
 
   return next_epoch
@@ -742,6 +765,55 @@ local function schema_object_key(conn_id, schema, epoch)
   return table.concat({ tostring(conn_id or ""), tostring(schema or ""), tostring(epoch or 0) }, "\x1f")
 end
 
+---@param kind string
+---@param conn_id connection_id
+---@param schema string
+---@param table_name string?
+---@param materialization string?
+---@param epoch integer
+---@param signature string
+---@return string
+local function rich_metadata_key(kind, conn_id, schema, table_name, materialization, epoch, signature)
+  if kind == RICH_SEQUENCES_KIND then
+    return table.concat({
+      tostring(conn_id or ""),
+      tostring(schema or ""),
+      tostring(epoch or 0),
+      tostring(signature or ""),
+      kind,
+    }, "\x1f")
+  end
+  return table.concat({
+    tostring(conn_id or ""),
+    tostring(schema or ""),
+    tostring(table_name or ""),
+    tostring(materialization or ""),
+    tostring(epoch or 0),
+    tostring(signature or ""),
+    kind,
+  }, "\x1f")
+end
+
+---@param kind string
+---@return string
+local function rich_metadata_payload_field(kind)
+  if kind == RICH_INDEXES_KIND then
+    return "indexes"
+  end
+  if kind == RICH_SEQUENCES_KIND then
+    return "sequences"
+  end
+  return "columns"
+end
+
+---@param kind string
+---@return table
+local function empty_rich_metadata_payload(kind)
+  local payload = {}
+  payload[rich_metadata_payload_field(kind)] = {}
+  return payload
+end
+
 ---@private
 ---@param waiter table
 ---@param payload table
@@ -880,6 +952,250 @@ function Handler:_supersede_schema_flights(conn_id, new_epoch, error_kind)
             error_kind = error_kind or "superseded",
             new_epoch = new_epoch,
           })
+        end
+      end
+    end
+    queue.queue = kept
+  end
+end
+
+---@private
+---@param support table?
+---@return { columns: boolean, indexes: boolean, sequences: boolean }
+function Handler:_normalize_rich_metadata_support(support)
+  return {
+    columns = type(support) == "table" and support.columns == true or false,
+    indexes = type(support) == "table" and support.indexes == true or false,
+    sequences = type(support) == "table" and support.sequences == true or false,
+  }
+end
+
+---@private
+---@param conn_ids connection_id[]
+function Handler:_invalidate_rich_metadata_support_cache_for_ids(conn_ids)
+  local seen = {}
+  for _, conn_id in ipairs(conn_ids or {}) do
+    if conn_id and conn_id ~= "" and not seen[conn_id] then
+      seen[conn_id] = true
+      self._rich_metadata_support_cache[conn_id] = nil
+      self._rich_metadata_support_generation = (self._rich_metadata_support_generation or 0) + 1
+    end
+  end
+end
+
+---@private
+---@param waiter table
+---@param payload table
+function Handler:_emit_rich_metadata_waiter(waiter, payload)
+  payload = copy_payload(payload) or {}
+  payload.conn_id = payload.conn_id or waiter.conn_id
+  payload.request_id = waiter.request_id
+  payload.branch_id = waiter.branch_id
+  payload.root_epoch = payload.root_epoch or waiter.root_epoch
+  payload.kind = payload.kind or waiter.kind
+  payload.schema = payload.schema or waiter.schema
+  payload.table = payload.table or waiter.table
+  event_bus.trigger("structure_children_loaded", payload)
+end
+
+---@private
+---@param waiter table
+---@param error string
+---@param error_kind string
+function Handler:_emit_rich_metadata_error(waiter, error, error_kind)
+  self:_emit_rich_metadata_waiter(waiter, {
+    conn_id = waiter.conn_id,
+    request_id = waiter.request_id,
+    branch_id = waiter.branch_id,
+    root_epoch = waiter.root_epoch,
+    kind = waiter.kind,
+    supported = true,
+    schema = waiter.schema,
+    table = waiter.table,
+    error = tostring(error or error_kind or "metadata_error"),
+    error_kind = error_kind,
+  })
+end
+
+---@private
+---@param waiter table
+function Handler:_emit_rich_metadata_unsupported(waiter)
+  local payload = empty_rich_metadata_payload(waiter.kind)
+  payload.conn_id = waiter.conn_id
+  payload.request_id = waiter.request_id
+  payload.branch_id = waiter.branch_id
+  payload.root_epoch = waiter.root_epoch
+  payload.kind = waiter.kind
+  payload.supported = false
+  payload.schema = waiter.schema
+  payload.table = waiter.table
+  self:_emit_rich_metadata_waiter(waiter, payload)
+end
+
+---@private
+---@param conn_id connection_id
+---@return table
+function Handler:_rich_metadata_queue(conn_id)
+  self._rich_metadata_queues[conn_id] = self._rich_metadata_queues[conn_id] or {
+    active = 0,
+    queue = {},
+    queued_keys = {},
+    max_active = RICH_METADATA_MAX_ACTIVE,
+    max_queue = RICH_METADATA_MAX_QUEUE,
+  }
+  return self._rich_metadata_queues[conn_id]
+end
+
+---@private
+---@param conn_id connection_id
+function Handler:_rich_metadata_active_decrement(conn_id)
+  local queue = self._rich_metadata_queues and self._rich_metadata_queues[conn_id]
+  if queue then
+    queue.active = math.max((queue.active or 0) - 1, 0)
+  end
+end
+
+---@private
+---@param entry table
+---@return boolean started
+---@return string? error_kind
+function Handler:_start_rich_metadata_entry(entry)
+  local queue = self:_rich_metadata_queue(entry.conn_id)
+  queue.active = (queue.active or 0) + 1
+  self._rich_metadata_flights[entry.key] = entry
+  self._rich_metadata_request_lookup[entry.request_id] = entry.key
+
+  local internal_branch_id = "__rich_metadata:" .. tostring(entry.key)
+  local ok, err
+  if entry.kind == RICH_COLUMNS_KIND then
+    ok, err = pcall(
+      vim.fn.DbeeConnectionGetColumnsRichAsync,
+      entry.conn_id,
+      entry.request_id,
+      internal_branch_id,
+      entry.epoch,
+      entry.opts
+    )
+  elseif entry.kind == RICH_INDEXES_KIND then
+    ok, err = pcall(
+      vim.fn.DbeeConnectionGetIndexesAsync,
+      entry.conn_id,
+      entry.request_id,
+      internal_branch_id,
+      entry.epoch,
+      entry.opts
+    )
+  elseif entry.kind == RICH_SEQUENCES_KIND then
+    ok, err = pcall(
+      vim.fn.DbeeConnectionGetSequencesAsync,
+      entry.conn_id,
+      entry.request_id,
+      internal_branch_id,
+      entry.epoch,
+      { schema = entry.schema }
+    )
+  else
+    ok, err = false, "unknown rich metadata kind: " .. tostring(entry.kind)
+  end
+
+  if not ok then
+    local error_kind = is_invalid_channel_error(err) and "invalid_channel" or "transport"
+    self._rich_metadata_request_lookup[entry.request_id] = nil
+    self._rich_metadata_flights[entry.key] = nil
+    self:_rich_metadata_active_decrement(entry.conn_id)
+    for _, waiter in ipairs(entry.waiters or {}) do
+      self:_emit_rich_metadata_error(waiter, tostring(err), error_kind)
+    end
+    return false, error_kind
+  end
+
+  return true, nil
+end
+
+function Handler:_drain_rich_metadata_queue(conn_id)
+  local queue = self:_rich_metadata_queue(conn_id)
+  while (queue.active or 0) < (queue.max_active or RICH_METADATA_MAX_ACTIVE) and #(queue.queue or {}) > 0 do
+    local next_index = 1
+    for index, candidate in ipairs(queue.queue) do
+      if candidate.priority == "drawer" then
+        next_index = index
+        break
+      end
+    end
+    local entry = table.remove(queue.queue, next_index)
+    queue.queued_keys[entry.key] = nil
+    self:_start_rich_metadata_entry(entry)
+  end
+end
+
+---@private
+---@param queue table
+---@param entry table
+local function rich_metadata_queue_insert(queue, entry)
+  if entry.priority == "drawer" then
+    for index, queued in ipairs(queue.queue or {}) do
+      if queued.priority ~= "drawer" then
+        table.insert(queue.queue, index, entry)
+        queue.queued_keys[entry.key] = entry
+        return
+      end
+    end
+  end
+  queue.queue[#queue.queue + 1] = entry
+  queue.queued_keys[entry.key] = entry
+end
+
+---@private
+---@param conn_id connection_id
+---@param entry table
+---@return boolean queued
+function Handler:_enqueue_rich_metadata_entry(conn_id, entry)
+  local queue = self:_rich_metadata_queue(conn_id)
+  if #(queue.queue or {}) < (queue.max_queue or RICH_METADATA_MAX_QUEUE) then
+    rich_metadata_queue_insert(queue, entry)
+    return true
+  end
+
+  for _, waiter in ipairs(entry.waiters or {}) do
+    self:_emit_rich_metadata_error(waiter, "queue_full", "queue_full")
+  end
+  return false
+end
+
+---@private
+---@param conn_id connection_id
+---@param new_epoch integer
+---@param error_kind string
+function Handler:_supersede_rich_metadata_flights(conn_id, new_epoch, error_kind)
+  local drop = {}
+  for key, flight in pairs(self._rich_metadata_flights or {}) do
+    if flight.conn_id == conn_id and flight.epoch < new_epoch then
+      for _, waiter in ipairs(flight.waiters or {}) do
+        self:_emit_rich_metadata_error(waiter, error_kind or "superseded", error_kind or "superseded")
+      end
+      drop[#drop + 1] = key
+    end
+  end
+  for _, key in ipairs(drop) do
+    local flight = self._rich_metadata_flights[key]
+    if flight then
+      self._rich_metadata_request_lookup[flight.request_id] = nil
+      self:_rich_metadata_active_decrement(flight.conn_id)
+    end
+    self._rich_metadata_flights[key] = nil
+  end
+
+  local queue = self._rich_metadata_queues and self._rich_metadata_queues[conn_id]
+  if queue then
+    local kept = {}
+    queue.queued_keys = {}
+    for _, entry in ipairs(queue.queue or {}) do
+      if entry.epoch >= new_epoch then
+        kept[#kept + 1] = entry
+        queue.queued_keys[entry.key] = entry
+      else
+        for _, waiter in ipairs(entry.waiters or {}) do
+          self:_emit_rich_metadata_error(waiter, error_kind or "superseded", error_kind or "superseded")
         end
       end
     end
@@ -1362,6 +1678,41 @@ function Handler:teardown_structure_consumer(consumer)
     end
     queue.queue = kept
   end
+
+  for key, flight in pairs(self._rich_metadata_flights or {}) do
+    local kept = {}
+    for _, waiter in ipairs(flight.waiters or {}) do
+      if waiter.consumer ~= consumer then
+        kept[#kept + 1] = waiter
+      end
+    end
+    flight.waiters = kept
+    if #kept == 0 then
+      self._rich_metadata_request_lookup[flight.request_id] = nil
+      self._rich_metadata_flights[key] = nil
+      self:_rich_metadata_active_decrement(flight.conn_id)
+      self:_drain_rich_metadata_queue(flight.conn_id)
+    end
+  end
+
+  for _, queue in pairs(self._rich_metadata_queues or {}) do
+    local kept = {}
+    queue.queued_keys = {}
+    for _, entry in ipairs(queue.queue or {}) do
+      local waiters = {}
+      for _, waiter in ipairs(entry.waiters or {}) do
+        if waiter.consumer ~= consumer then
+          waiters[#waiters + 1] = waiter
+        end
+      end
+      entry.waiters = waiters
+      if #waiters > 0 then
+        kept[#kept + 1] = entry
+        queue.queued_keys[entry.key] = entry
+      end
+    end
+    queue.queue = kept
+  end
 end
 
 ---@param old_conn_id connection_id
@@ -1374,8 +1725,11 @@ function Handler:migrate_structure_flights(old_conn_id, new_conn_id, rewrite)
   if rewrite and rewrite.schema_scope_matches == false then
     self:_supersede_structure_flights(old_conn_id, math.huge)
     self:_supersede_schema_flights(old_conn_id, math.huge, "reconnect_migration_dropped")
+    self:_supersede_rich_metadata_flights(old_conn_id, math.huge, "reconnect_migration_dropped")
     return
   end
+
+  self:_supersede_rich_metadata_flights(old_conn_id, math.huge, "reconnect_migration_dropped")
 
   local old_epoch = self.authoritative_root_epoch[old_conn_id]
   if old_epoch ~= nil then
@@ -1707,6 +2061,60 @@ function Handler:_on_schema_objects_loaded(data)
 end
 
 ---@private
+---@param data { conn_id?: connection_id, request_id?: integer, branch_id?: string, root_epoch?: integer, kind?: string, supported?: boolean, schema?: string, table?: string, columns?: table[], indexes?: table[], sequences?: table[], error?: any, error_kind?: string }
+function Handler:_on_rich_metadata_loaded(data)
+  if not data or not data.request_id or not RICH_METADATA_KINDS[data.kind] then
+    return
+  end
+
+  local key = self._rich_metadata_request_lookup[data.request_id]
+  if not key then
+    return
+  end
+
+  local flight = self._rich_metadata_flights[key]
+  self._rich_metadata_request_lookup[data.request_id] = nil
+  self._rich_metadata_flights[key] = nil
+  if not flight then
+    return
+  end
+  self:_rich_metadata_active_decrement(flight.conn_id)
+  self:_drain_rich_metadata_queue(flight.conn_id)
+
+  local payload_epoch = tonumber(data.root_epoch) or 0
+  if data.conn_id ~= flight.conn_id or payload_epoch ~= flight.epoch then
+    return
+  end
+
+  if not self:_flight_schema_scope_current(flight) then
+    for _, waiter in ipairs(flight.waiters or {}) do
+      self:_emit_rich_metadata_error(waiter, "filter_changed_during_reconnect", "filter_changed_during_reconnect")
+    end
+    return
+  end
+
+  local payload_field = rich_metadata_payload_field(flight.kind)
+  for _, waiter in ipairs(flight.waiters or {}) do
+    local payload = {
+      conn_id = flight.conn_id,
+      request_id = waiter.request_id,
+      branch_id = waiter.branch_id,
+      root_epoch = payload_epoch,
+      kind = flight.kind,
+      supported = data.supported ~= false,
+      schema = flight.schema,
+      table = flight.table,
+      error = data.error,
+      error_kind = data.error_kind,
+    }
+    if not data.error then
+      payload[payload_field] = copy_payload(data[payload_field] or {})
+    end
+    self:_emit_rich_metadata_waiter(waiter, payload)
+  end
+end
+
+---@private
 ---@param result table
 ---@return connection_id[]
 function Handler:_affected_reload_conn_ids(result)
@@ -1989,6 +2397,14 @@ function Handler:_source_reload_silent(source_id, opts)
 
   if opts.eventful then
     result.authoritative_root_epoch = self:_bump_authoritative_root_epoch(self:_affected_reload_conn_ids(result))
+  end
+
+  local affected_conn_ids = self:_affected_reload_conn_ids(result)
+  self:_invalidate_rich_metadata_support_cache_for_ids(affected_conn_ids)
+  if not opts.eventful then
+    for _, conn_id in ipairs(affected_conn_ids) do
+      self:_supersede_rich_metadata_flights(conn_id, math.huge, "reconnect_migration_dropped")
+    end
   end
 
   return result
@@ -2629,6 +3045,223 @@ function Handler:connection_get_columns_async(id, request_id, branch_id, root_ep
     materialization = opts.materialization,
     kind = opts.kind or "columns",
   })
+end
+
+---@param id connection_id
+---@return { columns: boolean, indexes: boolean, sequences: boolean }
+function Handler:connection_supports_rich_metadata(id)
+  local cached = self._rich_metadata_support_cache[id]
+  if cached and cached.capability_payload then
+    return vim.deepcopy(cached.capability_payload)
+  end
+
+  local ok, ret = pcall(vim.fn.DbeeConnectionGetRichMetadataSupport, id)
+  if not ok or not ret or ret == vim.NIL then
+    if not ok then
+      utils.log("warn", "connection_supports_rich_metadata failed: " .. tostring(ret), "core")
+    end
+    ret = {}
+  end
+
+  local support = self:_normalize_rich_metadata_support(ret)
+  self._rich_metadata_support_cache[id] = {
+    capability_payload = support,
+    generation = self._rich_metadata_support_generation or 0,
+  }
+  return vim.deepcopy(support)
+end
+
+---@private
+---@param id connection_id
+---@param request_id integer
+---@param branch_id string
+---@param root_epoch integer
+---@param kind string
+---@param opts table
+---@return table
+function Handler:_rich_metadata_waiter(id, request_id, branch_id, root_epoch, kind, opts)
+  opts = opts or {}
+  return {
+    conn_id = id,
+    request_id = request_id or 0,
+    branch_id = branch_id,
+    root_epoch = root_epoch or 0,
+    kind = kind,
+    schema = opts.schema,
+    table = opts.table,
+    materialization = opts.materialization,
+    consumer = opts.consumer or tostring(branch_id or ""),
+    priority = opts.priority or "drawer",
+  }
+end
+
+---@private
+---@param waiter table
+---@return boolean allowed
+function Handler:_rich_metadata_schema_allowed(waiter)
+  local authority = schema_filter_authority.read(self, waiter.conn_id)
+  if schema_filter_authority.is_fail_closed(authority) then
+    return false
+  end
+  if authority.status == "ok" and not schema_filter.matches(waiter.schema or "", authority.scope) then
+    self:_emit_rich_metadata_unsupported(waiter)
+    return false
+  end
+  return true
+end
+
+---@private
+---@param id connection_id
+---@param kind string
+---@return boolean
+function Handler:_rich_metadata_capability_allows(id, kind)
+  local support = self:connection_supports_rich_metadata(id)
+  if kind == RICH_COLUMNS_KIND then
+    return support.columns == true
+  end
+  if kind == RICH_INDEXES_KIND then
+    return support.indexes == true
+  end
+  if kind == RICH_SEQUENCES_KIND then
+    return support.sequences == true
+  end
+  return false
+end
+
+---@param opts { conn_id: connection_id, request_id: integer, branch_id: string, root_epoch: integer, kind: string, schema: string, table?: string, materialization?: string, consumer?: string, priority?: "drawer"|"background" }
+---@return { epoch: integer, request_id: integer, joined: boolean, queued?: boolean, started?: boolean, error_kind?: string }
+function Handler:connection_get_rich_metadata_singleflight(opts)
+  if not opts or not opts.conn_id or opts.conn_id == "" then
+    error("missing connection id for rich metadata load")
+  end
+  if not opts.kind or not RICH_METADATA_KINDS[opts.kind] then
+    error("missing rich metadata kind")
+  end
+  if not opts.schema or opts.schema == "" then
+    error("missing schema for rich metadata load")
+  end
+
+  local epoch = opts.root_epoch or self:get_authoritative_root_epoch(opts.conn_id)
+  local waiter = self:_rich_metadata_waiter(opts.conn_id, opts.request_id, opts.branch_id, epoch, opts.kind, opts)
+
+  if not self:_rich_metadata_schema_allowed(waiter) then
+    return { epoch = epoch, request_id = waiter.request_id, joined = false, queued = false, error_kind = "schema_filter_blocked" }
+  end
+
+  if not self:_rich_metadata_capability_allows(opts.conn_id, opts.kind) then
+    self:_emit_rich_metadata_unsupported(waiter)
+    return { epoch = epoch, request_id = waiter.request_id, joined = false, queued = false, error_kind = "unsupported" }
+  end
+
+  local signature = self:_current_schema_filter_signature(opts.conn_id)
+  local key = rich_metadata_key(
+    opts.kind,
+    opts.conn_id,
+    opts.schema,
+    opts.table,
+    opts.materialization,
+    epoch,
+    signature
+  )
+
+  local active = self._rich_metadata_flights[key]
+  if active then
+    active.waiters[#active.waiters + 1] = waiter
+    return { epoch = epoch, request_id = waiter.request_id, joined = true }
+  end
+
+  local queue = self:_rich_metadata_queue(opts.conn_id)
+  local queued = queue.queued_keys[key]
+  if queued then
+    queued.waiters[#queued.waiters + 1] = waiter
+    return { epoch = epoch, request_id = waiter.request_id, joined = true, queued = true }
+  end
+
+  self._next_singleflight_request_id = self._next_singleflight_request_id + 1
+  local internal_request_id = self._next_singleflight_request_id
+  local entry = {
+    key = key,
+    conn_id = opts.conn_id,
+    schema = opts.schema,
+    table = opts.table,
+    materialization = opts.materialization,
+    kind = opts.kind,
+    epoch = epoch,
+    request_id = internal_request_id,
+    priority = opts.priority or "drawer",
+    schema_filter_signature = signature,
+    opts = {
+      table = opts.table,
+      schema = opts.schema,
+      materialization = opts.materialization,
+    },
+    waiters = { waiter },
+  }
+
+  if (queue.active or 0) < (queue.max_active or RICH_METADATA_MAX_ACTIVE) then
+    local started, error_kind = self:_start_rich_metadata_entry(entry)
+    if not started then
+      return { epoch = epoch, request_id = waiter.request_id, joined = false, queued = false, error_kind = error_kind }
+    end
+    return { epoch = epoch, request_id = waiter.request_id, joined = false, queued = false, started = true }
+  end
+
+  local enqueued = self:_enqueue_rich_metadata_entry(opts.conn_id, entry)
+  local result = {
+    epoch = epoch,
+    request_id = waiter.request_id,
+    joined = false,
+    queued = enqueued,
+  }
+  if not enqueued then
+    result.error_kind = "queue_full"
+  end
+  return result
+end
+
+---@param id connection_id
+---@param request_id integer
+---@param branch_id string
+---@param root_epoch integer
+---@param opts { table: string, schema: string, materialization: string, consumer?: string, priority?: "drawer"|"background" }
+function Handler:connection_get_columns_rich_async(id, request_id, branch_id, root_epoch, opts)
+  opts = opts or {}
+  opts.conn_id = id
+  opts.request_id = request_id
+  opts.branch_id = branch_id
+  opts.root_epoch = root_epoch
+  opts.kind = RICH_COLUMNS_KIND
+  return self:connection_get_rich_metadata_singleflight(opts)
+end
+
+---@param id connection_id
+---@param request_id integer
+---@param branch_id string
+---@param root_epoch integer
+---@param opts { table: string, schema: string, materialization: string, consumer?: string, priority?: "drawer"|"background" }
+function Handler:connection_get_indexes_async(id, request_id, branch_id, root_epoch, opts)
+  opts = opts or {}
+  opts.conn_id = id
+  opts.request_id = request_id
+  opts.branch_id = branch_id
+  opts.root_epoch = root_epoch
+  opts.kind = RICH_INDEXES_KIND
+  return self:connection_get_rich_metadata_singleflight(opts)
+end
+
+---@param id connection_id
+---@param request_id integer
+---@param branch_id string
+---@param root_epoch integer
+---@param opts { schema: string, consumer?: string, priority?: "drawer"|"background" }
+function Handler:connection_get_sequences_async(id, request_id, branch_id, root_epoch, opts)
+  opts = opts or {}
+  opts.conn_id = id
+  opts.request_id = request_id
+  opts.branch_id = branch_id
+  opts.root_epoch = root_epoch
+  opts.kind = RICH_SEQUENCES_KIND
+  return self:connection_get_rich_metadata_singleflight(opts)
 end
 
 ---@param id connection_id

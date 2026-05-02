@@ -545,6 +545,212 @@ func (h *Handler) ConnectionGetColumnsAsync(
 	}()
 }
 
+func (h *Handler) ConnectionGetRichMetadataSupport(connID core.ConnectionID) (core.RichMetadataSupport, error) {
+	c, ok := h.lookupConnection[connID]
+	if !ok {
+		return core.RichMetadataSupport{}, fmt.Errorf("unknown connection with id: %q", connID)
+	}
+	return c.SupportsRichMetadata(), nil
+}
+
+func (h *Handler) ConnectionGetColumnsRichAsync(
+	connID core.ConnectionID,
+	requestID int,
+	branchID string,
+	rootEpoch int,
+	opts *core.TableOptions,
+) {
+	if requestID <= 0 {
+		requestID = int(h.nextStructureReqID.Add(1))
+	}
+
+	schema, table := "", ""
+	if opts != nil {
+		schema = opts.Schema
+		table = opts.Table
+	}
+
+	c, ok := h.lookupConnection[connID]
+	if !ok {
+		h.events.StructureChildrenLoadedPayload(&structureChildrenPayload{
+			ConnID:    connID,
+			RequestID: requestID,
+			BranchID:  branchID,
+			RootEpoch: rootEpoch,
+			Kind:      "columns_rich",
+			Supported: true,
+			Schema:    schema,
+			Table:     table,
+			Error:     fmt.Sprintf("unknown connection with id: %q", connID),
+		})
+		return
+	}
+
+	if !c.SupportsRichMetadata().Columns {
+		h.events.StructureChildrenLoadedPayload(&structureChildrenPayload{
+			ConnID:    connID,
+			RequestID: requestID,
+			BranchID:  branchID,
+			RootEpoch: rootEpoch,
+			Kind:      "columns_rich",
+			Supported: false,
+			Schema:    schema,
+			Table:     table,
+			Columns:   []*core.Column{},
+		})
+		return
+	}
+
+	go func() {
+		columns, err := c.GetColumnsRich(opts)
+		payload := &structureChildrenPayload{
+			ConnID:    connID,
+			RequestID: requestID,
+			BranchID:  branchID,
+			RootEpoch: rootEpoch,
+			Kind:      "columns_rich",
+			Supported: true,
+			Schema:    schema,
+			Table:     table,
+			Columns:   columns,
+		}
+		if err != nil {
+			payload.Columns = nil
+			payload.Error = fmt.Sprintf("c.GetColumnsRich: %s", err)
+		}
+		h.events.StructureChildrenLoadedPayload(payload)
+	}()
+}
+
+func (h *Handler) ConnectionGetIndexesAsync(
+	connID core.ConnectionID,
+	requestID int,
+	branchID string,
+	rootEpoch int,
+	opts *core.TableOptions,
+) {
+	if requestID <= 0 {
+		requestID = int(h.nextStructureReqID.Add(1))
+	}
+
+	schema, table := "", ""
+	if opts != nil {
+		schema = opts.Schema
+		table = opts.Table
+	}
+
+	c, ok := h.lookupConnection[connID]
+	if !ok {
+		h.events.StructureChildrenLoadedPayload(&structureChildrenPayload{
+			ConnID:    connID,
+			RequestID: requestID,
+			BranchID:  branchID,
+			RootEpoch: rootEpoch,
+			Kind:      "indexes",
+			Supported: true,
+			Schema:    schema,
+			Table:     table,
+			Error:     fmt.Sprintf("unknown connection with id: %q", connID),
+		})
+		return
+	}
+
+	if !c.SupportsRichMetadata().Indexes {
+		h.events.StructureChildrenLoadedPayload(&structureChildrenPayload{
+			ConnID:    connID,
+			RequestID: requestID,
+			BranchID:  branchID,
+			RootEpoch: rootEpoch,
+			Kind:      "indexes",
+			Supported: false,
+			Schema:    schema,
+			Table:     table,
+			Indexes:   []*core.Index{},
+		})
+		return
+	}
+
+	go func() {
+		indexes, err := c.GetIndexes(opts)
+		payload := &structureChildrenPayload{
+			ConnID:    connID,
+			RequestID: requestID,
+			BranchID:  branchID,
+			RootEpoch: rootEpoch,
+			Kind:      "indexes",
+			Supported: true,
+			Schema:    schema,
+			Table:     table,
+			Indexes:   indexes,
+		}
+		if err != nil {
+			payload.Indexes = nil
+			payload.Error = fmt.Sprintf("c.GetIndexes: %s", err)
+		}
+		h.events.StructureChildrenLoadedPayload(payload)
+	}()
+}
+
+func (h *Handler) ConnectionGetSequencesAsync(
+	connID core.ConnectionID,
+	requestID int,
+	branchID string,
+	rootEpoch int,
+	schema string,
+) {
+	if requestID <= 0 {
+		requestID = int(h.nextStructureReqID.Add(1))
+	}
+
+	c, ok := h.lookupConnection[connID]
+	if !ok {
+		h.events.StructureChildrenLoadedPayload(&structureChildrenPayload{
+			ConnID:    connID,
+			RequestID: requestID,
+			BranchID:  branchID,
+			RootEpoch: rootEpoch,
+			Kind:      "sequences",
+			Supported: true,
+			Schema:    schema,
+			Error:     fmt.Sprintf("unknown connection with id: %q", connID),
+		})
+		return
+	}
+
+	if !c.SupportsRichMetadata().Sequences {
+		h.events.StructureChildrenLoadedPayload(&structureChildrenPayload{
+			ConnID:    connID,
+			RequestID: requestID,
+			BranchID:  branchID,
+			RootEpoch: rootEpoch,
+			Kind:      "sequences",
+			Supported: false,
+			Schema:    schema,
+			Sequences: []*core.Sequence{},
+		})
+		return
+	}
+
+	go func() {
+		sequences, err := c.GetSequences(schema)
+		payload := &structureChildrenPayload{
+			ConnID:    connID,
+			RequestID: requestID,
+			BranchID:  branchID,
+			RootEpoch: rootEpoch,
+			Kind:      "sequences",
+			Supported: true,
+			Schema:    schema,
+			Sequences: sequences,
+		}
+		if err != nil {
+			payload.Sequences = nil
+			payload.Error = fmt.Sprintf("c.GetSequences: %s", err)
+		}
+		h.events.StructureChildrenLoadedPayload(payload)
+	}()
+}
+
 func (h *Handler) ConnectionListDatabases(connID core.ConnectionID) (current string, available []string, err error) {
 	c, ok := h.lookupConnection[connID]
 	if !ok {
