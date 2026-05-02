@@ -102,6 +102,7 @@ assert_contains("register manifest support", api_register, "DbeeConnectionGetRic
 local schema_filter = require("dbee.schema_filter")
 local event_bus = require("dbee.handler.__events")
 local Handler = require("dbee.handler")
+local DrawerUI = require("dbee.ui.drawer")
 
 local captured_events = {}
 event_bus.register("structure_children_loaded", function(data)
@@ -227,6 +228,7 @@ local function dispatch_one(kind)
     handler:_on_rich_metadata_loaded({
       conn_id = "conn",
       request_id = rich_calls.columns[1].request_id,
+      branch_id = rich_calls.columns[1].branch_id,
       root_epoch = 3,
       kind = "columns_rich",
       schema = "APP",
@@ -242,6 +244,7 @@ local function dispatch_one(kind)
     handler:_on_rich_metadata_loaded({
       conn_id = "conn",
       request_id = rich_calls.indexes[1].request_id,
+      branch_id = rich_calls.indexes[1].branch_id,
       root_epoch = 3,
       kind = "indexes",
       schema = "APP",
@@ -253,6 +256,7 @@ local function dispatch_one(kind)
     handler:_on_rich_metadata_loaded({
       conn_id = "conn",
       request_id = rich_calls.sequences[1].request_id,
+      branch_id = rich_calls.sequences[1].branch_id,
       root_epoch = 3,
       kind = "sequences",
       schema = "APP",
@@ -302,6 +306,77 @@ mark("RICH16_SINGLEFLIGHT_MATERIALIZATION_DISTINCT")
 captured_events = {}
 rich_calls.columns = {}
 h = new_handler()
+h:connection_get_columns_rich_async("conn", 25, "collision-waiter", 6, {
+  schema = "APP",
+  table = "COLLISION",
+  materialization = "table",
+})
+local collision_queue = h._rich_metadata_queues.conn
+local collision_call = rich_calls.columns[1]
+local collision_key = h._rich_metadata_request_lookup[collision_call.request_id]
+h:_on_rich_metadata_loaded({
+  conn_id = "conn",
+  request_id = collision_call.request_id,
+  branch_id = "collision-waiter",
+  root_epoch = 6,
+  kind = "columns_rich",
+  fanout_source = "rich_metadata_waiter",
+  error = "queue_full",
+  error_kind = "queue_full",
+})
+assert_eq("waiter fanout keeps active slot", collision_queue.active, 1)
+assert_eq("waiter fanout keeps lookup", h._rich_metadata_request_lookup[collision_call.request_id], collision_key)
+assert_true("waiter fanout keeps flight", h._rich_metadata_flights[collision_key] ~= nil)
+h:_on_rich_metadata_loaded({
+  conn_id = "conn",
+  request_id = collision_call.request_id,
+  branch_id = collision_call.branch_id,
+  root_epoch = 6,
+  kind = "columns_rich",
+  columns = {},
+})
+assert_eq("internal completion frees active slot", collision_queue.active, 0)
+mark("RICH16_WAITER_FANOUT_ISOLATED_FROM_INTERNAL_FLIGHTS")
+
+captured_events = {}
+rich_calls.columns = {}
+h = new_handler()
+local superseded_emits = {}
+local original_rich_error_emit = h._emit_rich_metadata_error
+function h:_emit_rich_metadata_error(waiter, error, error_kind)
+  superseded_emits[#superseded_emits + 1] = {
+    waiter = waiter,
+    error = error,
+    error_kind = error_kind,
+  }
+  return original_rich_error_emit(self, waiter, error, error_kind)
+end
+h:connection_get_columns_rich_async("conn", 26, "superseded-waiter", 6, {
+  schema = "APP",
+  table = "SUPERSEDED",
+  materialization = "table",
+})
+local superseded_queue = h._rich_metadata_queues.conn
+local superseded_call = rich_calls.columns[1]
+h:_supersede_rich_metadata_flights("conn", math.huge, "superseded")
+assert_eq("supersession keeps active slot", superseded_queue.active, 1)
+assert_true("supersession keeps request lookup", h._rich_metadata_request_lookup[superseded_call.request_id] ~= nil)
+assert_eq("supersession defers waiter event", #superseded_emits, 0)
+h:_on_rich_metadata_loaded({
+  conn_id = "conn",
+  request_id = superseded_call.request_id,
+  branch_id = superseded_call.branch_id,
+  root_epoch = 6,
+  kind = "columns_rich",
+  columns = { { name = "STALE", type = "NUMBER" } },
+})
+assert_eq("superseded completion frees active slot", superseded_queue.active, 0)
+assert_eq("superseded completion emits error", superseded_emits[1] and superseded_emits[1].error_kind, "superseded")
+mark("RICH16_SUPERSESSION_PRESERVES_ACTIVE_SLOT_UNTIL_COMPLETION")
+
+captured_events = {}
+rich_calls.columns = {}
+h = new_handler()
 local joined_count = 0
 for i = 1, 200 do
   local result = h:connection_get_columns_rich_async("conn", i, "overflow-" .. i, 7, {
@@ -330,6 +405,7 @@ mark("RICH16_BACKPRESSURE_HANDLER_OVERFLOW_REJECTS_OK")
 h:_on_rich_metadata_loaded({
   conn_id = "conn",
   request_id = rich_calls.columns[1].request_id,
+  branch_id = rich_calls.columns[1].branch_id,
   root_epoch = 7,
   kind = "columns_rich",
   columns = {},
@@ -358,6 +434,7 @@ while completed < 100 do
   h:_on_rich_metadata_loaded({
     conn_id = "conn",
     request_id = call.request_id,
+    branch_id = call.branch_id,
     root_epoch = 9,
     kind = "columns_rich",
     columns = {},
@@ -366,6 +443,59 @@ end
 assert_eq("fanout all complete active", queue.active, 0)
 assert_eq("fanout all complete queue", #queue.queue, 0)
 mark("RICH16_FANOUT_DISPATCH_COUNT_OK")
+
+local retry_ui = setmetatable({
+  _struct_cache = {
+    root = {},
+    root_gen = {},
+    root_applied = {},
+    root_epoch = { conn = 0 },
+    root_mode = {},
+    root_loaded_schemas = {},
+    root_filter_signature = {},
+    loaded_lazy_ids = {},
+    branches = {},
+  },
+  filter_input = true,
+  cached_render_snapshot = {},
+}, { __index = DrawerUI })
+local retry_dispatches = {}
+local retry_state = retry_ui:_ensure_rich_metadata_branch("conn", "retry-branch", "indexes", {
+  schema = "APP",
+  table = "T",
+}, function(request_id)
+  retry_dispatches[#retry_dispatches + 1] = request_id
+end)
+assert_eq("queue_full first dispatch", #retry_dispatches, 1)
+retry_ui:on_structure_children_loaded({
+  conn_id = "conn",
+  request_id = retry_dispatches[1],
+  branch_id = "retry-branch",
+  root_epoch = 0,
+  kind = "indexes",
+  error = "queue_full",
+  error_kind = "queue_full",
+})
+assert_eq("queue_full stored as typed error", retry_state.error_kind, "queue_full")
+retry_ui:_ensure_rich_metadata_branch("conn", "retry-branch", "indexes", {
+  schema = "APP",
+  table = "T",
+}, function(request_id)
+  retry_dispatches[#retry_dispatches + 1] = request_id
+end)
+assert_eq("queue_full re-expand dispatches again", #retry_dispatches, 2)
+assert_eq("queue_full retry clears error", retry_state.error, nil)
+retry_ui:on_structure_children_loaded({
+  conn_id = "conn",
+  request_id = retry_dispatches[2],
+  branch_id = "retry-branch",
+  root_epoch = 0,
+  kind = "indexes",
+  indexes = { { name = "IDX_T", columns = { "ID" } } },
+})
+assert_eq("queue_full success clears typed error", retry_state.error_kind, nil)
+assert_eq("queue_full success stores payload", #retry_state.raw, 1)
+mark("RICH16_QUEUE_FULL_RETRYABLE_ON_REEXPAND_OK")
 
 assert_contains("columns rich prefetch", drawer, "_ensure_columns_rich_prefetch")
 assert_contains("columns folder node", drawer, "metadata_folder_node(table_node_id, \"columns\"")
@@ -481,6 +611,8 @@ local strict_markers = {
   "RICH16_STALE_ROOT_EPOCH_REJECTED_OK",
   "RICH16_SINGLEFLIGHT_DEDUPES_CONCURRENT_OK",
   "RICH16_SINGLEFLIGHT_MATERIALIZATION_DISTINCT",
+  "RICH16_WAITER_FANOUT_ISOLATED_FROM_INTERNAL_FLIGHTS",
+  "RICH16_SUPERSESSION_PRESERVES_ACTIVE_SLOT_UNTIL_COMPLETION",
   "RICH16_BACKPRESSURE_MAX_ACTIVE_BOUNDED",
   "RICH16_BACKPRESSURE_QUEUE_DRAIN_OK",
   "RICH16_BACKPRESSURE_HANDLER_OVERFLOW_REJECTS_OK",
@@ -490,6 +622,7 @@ local strict_markers = {
   "RICH16_INDEXES_FETCH_DEFERRED_UNTIL_FOLDER_EXPAND",
   "RICH16_SEQUENCES_FETCH_DEFERRED_UNTIL_FOLDER_EXPAND",
   "RICH16_DUPLICATE_COLUMNS_FETCH_DEDUPED",
+  "RICH16_QUEUE_FULL_RETRYABLE_ON_REEXPAND_OK",
   "RICH16_ERROR_FIELD_STRING_COMPAT_OK",
   "RICH16_DRAWER_COLUMNS_FOLDER_RENDERED",
   "RICH16_COLUMNS_PREFETCH_TO_COLUMNS_FOLDER_OK",
@@ -517,6 +650,6 @@ for _, marker in ipairs(strict_markers) do
 end
 
 print("RICH16_STRICT_MARKER_COUNT=" .. tostring(#strict_markers))
-assert_eq("strict marker count", #strict_markers, 51)
+assert_eq("strict marker count", #strict_markers, 54)
 print("RICH16_ALL_PASS=true")
 vim.cmd("qa!")

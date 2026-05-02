@@ -13,6 +13,8 @@ local RICH_METADATA_MAX_QUEUE = 128
 local RICH_COLUMNS_KIND = "columns_rich"
 local RICH_INDEXES_KIND = "indexes"
 local RICH_SEQUENCES_KIND = "sequences"
+local RICH_METADATA_INTERNAL_BRANCH_PREFIX = "__rich_metadata:"
+local RICH_METADATA_WAITER_FANOUT_SOURCE = "rich_metadata_waiter"
 local RICH_METADATA_KINDS = {
   [RICH_COLUMNS_KIND] = true,
   [RICH_INDEXES_KIND] = true,
@@ -995,6 +997,7 @@ function Handler:_emit_rich_metadata_waiter(waiter, payload)
   payload.kind = payload.kind or waiter.kind
   payload.schema = payload.schema or waiter.schema
   payload.table = payload.table or waiter.table
+  payload.fanout_source = payload.fanout_source or RICH_METADATA_WAITER_FANOUT_SOURCE
   event_bus.trigger("structure_children_loaded", payload)
 end
 
@@ -1065,7 +1068,7 @@ function Handler:_start_rich_metadata_entry(entry)
   self._rich_metadata_flights[entry.key] = entry
   self._rich_metadata_request_lookup[entry.request_id] = entry.key
 
-  local internal_branch_id = "__rich_metadata:" .. tostring(entry.key)
+  local internal_branch_id = RICH_METADATA_INTERNAL_BRANCH_PREFIX .. tostring(entry.key)
   local ok, err
   if entry.kind == RICH_COLUMNS_KIND then
     ok, err = pcall(
@@ -1167,22 +1170,13 @@ end
 ---@param new_epoch integer
 ---@param error_kind string
 function Handler:_supersede_rich_metadata_flights(conn_id, new_epoch, error_kind)
-  local drop = {}
-  for key, flight in pairs(self._rich_metadata_flights or {}) do
+  for _, flight in pairs(self._rich_metadata_flights or {}) do
     if flight.conn_id == conn_id and flight.epoch < new_epoch then
-      for _, waiter in ipairs(flight.waiters or {}) do
-        self:_emit_rich_metadata_error(waiter, error_kind or "superseded", error_kind or "superseded")
-      end
-      drop[#drop + 1] = key
+      -- The Go RPC is already running and cannot be canceled from Lua, so keep
+      -- its active slot occupied until completion returns.
+      flight.superseded = true
+      flight.superseded_error_kind = flight.superseded_error_kind or error_kind or "superseded"
     end
-  end
-  for _, key in ipairs(drop) do
-    local flight = self._rich_metadata_flights[key]
-    if flight then
-      self._rich_metadata_request_lookup[flight.request_id] = nil
-      self:_rich_metadata_active_decrement(flight.conn_id)
-    end
-    self._rich_metadata_flights[key] = nil
   end
 
   local queue = self._rich_metadata_queues and self._rich_metadata_queues[conn_id]
@@ -2066,6 +2060,12 @@ function Handler:_on_rich_metadata_loaded(data)
   if not data or not data.request_id or not RICH_METADATA_KINDS[data.kind] then
     return
   end
+  if data.fanout_source ~= nil then
+    return
+  end
+  if tostring(data.branch_id or ""):sub(1, #RICH_METADATA_INTERNAL_BRANCH_PREFIX) ~= RICH_METADATA_INTERNAL_BRANCH_PREFIX then
+    return
+  end
 
   local key = self._rich_metadata_request_lookup[data.request_id]
   if not key then
@@ -2080,6 +2080,14 @@ function Handler:_on_rich_metadata_loaded(data)
   end
   self:_rich_metadata_active_decrement(flight.conn_id)
   self:_drain_rich_metadata_queue(flight.conn_id)
+
+  if flight.superseded then
+    local error_kind = flight.superseded_error_kind or "superseded"
+    for _, waiter in ipairs(flight.waiters or {}) do
+      self:_emit_rich_metadata_error(waiter, error_kind, error_kind)
+    end
+    return
+  end
 
   local payload_epoch = tonumber(data.root_epoch) or 0
   if data.conn_id ~= flight.conn_id or payload_epoch ~= flight.epoch then

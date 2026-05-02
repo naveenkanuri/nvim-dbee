@@ -368,7 +368,7 @@ end
 ---@param branch_id string
 ---@param kind? string
 ---@param create? boolean
----@return { raw?: any[], error?: any, built_count: integer, render_limit: integer, request_gen: integer, applied_gen: integer, loading: boolean }?
+---@return { raw?: any[], error?: any, error_kind?: string, built_count: integer, render_limit: integer, request_gen: integer, applied_gen: integer, loading: boolean }?
 local function branch_state(ui, conn_id, branch_id, kind, create)
   local conn_branches = ui._struct_cache.branches[conn_id]
   if not conn_branches and create then
@@ -384,6 +384,7 @@ local function branch_state(ui, conn_id, branch_id, kind, create)
     conn_branches[key] = {
       raw = nil,
       error = nil,
+      error_kind = nil,
       built_count = 0,
       render_limit = CHILD_CHUNK_SIZE,
       request_gen = 0,
@@ -1220,7 +1221,8 @@ function DrawerUI:_ensure_rich_metadata_branch(conn_id, branch_id, kind, opts, s
   local cached = branch_state(self, conn_id, branch_id, kind, true)
   cached.schema = opts and opts.schema or cached.schema
   cached.table = opts and opts.table or cached.table
-  if cached.loading or cached.error ~= nil or cached.raw ~= nil then
+  local retry_queue_full = cached.error_kind == "queue_full"
+  if cached.loading or cached.raw ~= nil or (cached.error ~= nil and not retry_queue_full) then
     return cached
   end
 
@@ -1228,6 +1230,7 @@ function DrawerUI:_ensure_rich_metadata_branch(conn_id, branch_id, kind, opts, s
   cached.request_gen = request_id
   cached.loading = true
   cached.error = nil
+  cached.error_kind = nil
   cached.raw = nil
   cached.built_count = 0
   cached.render_limit = math.max(cached.render_limit or CHILD_CHUNK_SIZE, CHILD_CHUNK_SIZE)
@@ -2520,6 +2523,7 @@ function DrawerUI:on_structure_children_loaded(data)
   state.applied_gen = request_id
   state.loading = false
   state.error = data.error or data.error_kind
+  state.error_kind = data.error_kind
   if data.error or data.error_kind then
     state.raw = nil
   else
