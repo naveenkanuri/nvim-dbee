@@ -30,9 +30,15 @@ end
 ---@field schema? string
 ---@field raw_name? string
 ---@field folder_id? string
+---@field metadata_kind? string
 ---@field conn_id? string
 ---@field source_meta? table
 ---@field search_text? string
+---@field table? string
+---@field pk? boolean
+---@field primary_key_ordinal? integer
+---@field nullable? boolean
+---@field fk_refs? table[]
 ---@field action_1? drawer_node_action
 ---@field action_2? drawer_node_action
 ---@field action_3? drawer_node_action
@@ -44,13 +50,19 @@ end
 ---@class DrawerUINode: NuiTree.Node
 ---@field id string unique identifier
 ---@field name string display name
----@field type ""|"table"|"view"|"procedure"|"function"|"column"|"history"|"note"|"connection"|"folder"|"database_switch"|"add"|"edit"|"remove"|"help"|"source"|"separator"|"load_more" type of node
+---@field type ""|"table"|"view"|"procedure"|"function"|"column"|"index"|"sequence"|"history"|"note"|"connection"|"folder"|"database_switch"|"add"|"edit"|"remove"|"help"|"source"|"separator"|"load_more" type of node
 ---@field schema? string
 ---@field raw_name? string
 ---@field folder_id? string
+---@field metadata_kind? string
 ---@field conn_id? string
 ---@field source_meta? table
 ---@field search_text? string
+---@field table? string
+---@field pk? boolean
+---@field primary_key_ordinal? integer
+---@field nullable? boolean
+---@field fk_refs? table[]
 ---@field action_1? drawer_node_action primary action if function takes a second selection parameter, pick_items get picked before the call
 ---@field action_2? drawer_node_action secondary action if function takes a second selection parameter, pick_items get picked before the call
 ---@field action_3? drawer_node_action tertiary action if function takes a second selection parameter, pick_items get picked before the call
@@ -125,6 +137,9 @@ local ID_SEP = convert.ID_SEP or "\x1f"
 local LOAD_MORE_SUFFIX = convert.LOAD_MORE_SUFFIX or (ID_SEP .. "__load_more__")
 local DATABASE_SWITCH_SUFFIX = "_database_switch__"
 local COLUMNS_KIND = "columns"
+local COLUMNS_RICH_KIND = "columns_rich"
+local INDEXES_KIND = "indexes"
+local SEQUENCES_KIND = "sequences"
 local STRUCTURES_KIND = "structures"
 local CHILD_CHUNK_SIZE = 1000
 local TABLE_LIKE_TYPES = {
@@ -380,6 +395,38 @@ local function branch_state(ui, conn_id, branch_id, kind, create)
   return conn_branches[key]
 end
 
+---@param ui DrawerUI
+---@param conn_id string
+---@return { columns: boolean, indexes: boolean, sequences: boolean }
+local function rich_metadata_support(ui, conn_id)
+  if type(ui.handler.connection_supports_rich_metadata) ~= "function" then
+    return { columns = false, indexes = false, sequences = false }
+  end
+
+  local ok, support = pcall(ui.handler.connection_supports_rich_metadata, ui.handler, conn_id)
+  if not ok or type(support) ~= "table" then
+    return { columns = false, indexes = false, sequences = false }
+  end
+
+  return {
+    columns = support.columns == true,
+    indexes = support.indexes == true,
+    sequences = support.sequences == true,
+  }
+end
+
+---@param kind string
+---@return string
+local function structure_children_payload_field(kind)
+  if kind == INDEXES_KIND then
+    return "indexes"
+  end
+  if kind == SEQUENCES_KIND then
+    return "sequences"
+  end
+  return "columns"
+end
+
 ---@param children any[]?
 ---@return any[]
 local function normalize_children(children)
@@ -463,9 +510,15 @@ local function clone_rendered_snapshot(snapshot_nodes)
       schema = snap.schema,
       raw_name = snap.raw_name,
       folder_id = snap.folder_id,
+      metadata_kind = snap.metadata_kind,
       conn_id = snap.conn_id,
       source_meta = snap.source_meta,
       search_text = snap.search_text,
+      table = snap.table,
+      pk = snap.pk,
+      primary_key_ordinal = snap.primary_key_ordinal,
+      nullable = snap.nullable,
+      fk_refs = vim.deepcopy(snap.fk_refs or {}),
       action_1 = snap.action_1,
       action_2 = snap.action_2,
       action_3 = snap.action_3,
@@ -508,9 +561,15 @@ local function snapshot_to_tree_nodes(snapshot_nodes)
       schema = snap.schema,
       raw_name = snap.raw_name,
       folder_id = snap.folder_id,
+      metadata_kind = snap.metadata_kind,
       conn_id = snap.conn_id,
       source_meta = snap.source_meta,
       search_text = snap.search_text,
+      table = snap.table,
+      pk = snap.pk,
+      primary_key_ordinal = snap.primary_key_ordinal,
+      nullable = snap.nullable,
+      fk_refs = vim.deepcopy(snap.fk_refs or {}),
       action_1 = snap.action_1,
       action_2 = snap.action_2,
       action_3 = snap.action_3,
@@ -547,9 +606,15 @@ local function snapshot_rendered_tree(ui, tree, parent_id)
       schema = node.schema,
       raw_name = node.raw_name,
       folder_id = node.folder_id,
+      metadata_kind = node.metadata_kind,
       conn_id = node.conn_id,
       source_meta = node.source_meta,
       search_text = node.search_text,
+      table = node.table,
+      pk = node.pk,
+      primary_key_ordinal = node.primary_key_ordinal,
+      nullable = node.nullable,
+      fk_refs = vim.deepcopy(node.fk_refs or {}),
       action_1 = node.action_1,
       action_2 = node.action_2,
       action_3 = node.action_3,
@@ -601,9 +666,15 @@ local function searchable_node_to_tree_node(ui, node, inherited_conn_id, childre
     schema = node.schema,
     raw_name = node.raw_name,
     folder_id = node.folder_id,
+    metadata_kind = node.metadata_kind,
     conn_id = node.conn_id,
     source_meta = node.source_meta,
     search_text = node.search_text,
+    table = node.table,
+    pk = node.pk,
+    primary_key_ordinal = node.primary_key_ordinal,
+    nullable = node.nullable,
+    fk_refs = vim.deepcopy(node.fk_refs or {}),
     action_1 = node.action_1,
     action_2 = node.action_2,
     action_3 = node.action_3,
@@ -1003,8 +1074,22 @@ local function build_branch_nodes(ui, conn_id, branch_id, kind)
     for _, struct in ipairs(chunk) do
       nodes[#nodes + 1] = ui:_build_structure_node(conn_id, branch_id, struct)
     end
+  elseif kind == INDEXES_KIND then
+    local visible = {}
+    for _, index in ipairs(chunk) do
+      if index.pk_backed ~= true then
+        visible[#visible + 1] = index
+      end
+    end
+    nodes = convert.index_nodes(branch_id, visible)
+  elseif kind == SEQUENCES_KIND then
+    nodes = convert.sequence_nodes(branch_id, chunk)
   else
-    nodes = convert.column_nodes(branch_id, chunk)
+    nodes = convert.column_nodes(branch_id, chunk, {
+      conn_id = conn_id,
+      schema = state.schema,
+      table = state.table,
+    })
   end
 
   if built_count < #raw then
@@ -1124,11 +1209,149 @@ function DrawerUI:_materialize_cached_structure_branch(conn_id, branch_id, struc
   return build_branch_nodes(self, conn_id, branch_id, STRUCTURES_KIND)
 end
 
+---@private
+---@param conn_id string
+---@param branch_id string
+---@param kind string
+---@param opts table
+---@param start fun(request_id: integer)
+---@return table
+function DrawerUI:_ensure_rich_metadata_branch(conn_id, branch_id, kind, opts, start)
+  local cached = branch_state(self, conn_id, branch_id, kind, true)
+  cached.schema = opts and opts.schema or cached.schema
+  cached.table = opts and opts.table or cached.table
+  if cached.loading or cached.error ~= nil or cached.raw ~= nil then
+    return cached
+  end
+
+  local request_id = math.max(cached.request_gen or 0, cached.applied_gen or 0) + 1
+  cached.request_gen = request_id
+  cached.loading = true
+  cached.error = nil
+  cached.raw = nil
+  cached.built_count = 0
+  cached.render_limit = math.max(cached.render_limit or CHILD_CHUNK_SIZE, CHILD_CHUNK_SIZE)
+  start(request_id)
+  return cached
+end
+
+---@private
+---@param conn_id string
+---@param table_node_id string
+---@param struct table
+---@return string
+function DrawerUI:_ensure_columns_rich_prefetch(conn_id, table_node_id, struct)
+  local branch_id = convert.metadata_folder_node_id(table_node_id, "columns")
+  self:_ensure_rich_metadata_branch(conn_id, branch_id, COLUMNS_RICH_KIND, {
+    schema = struct.schema,
+    table = struct.name,
+  }, function(request_id)
+    self.handler:connection_get_columns_rich_async(conn_id, request_id, branch_id, current_root_epoch(self, conn_id), {
+      table = struct.name,
+      schema = struct.schema,
+      materialization = struct.type,
+      consumer = self._connection_invalidated_consumer_id .. ":" .. branch_id,
+      priority = "drawer",
+    })
+  end)
+  return branch_id
+end
+
+---@private
+---@param conn_id string
+---@param table_node_id string
+---@param struct table
+---@return DrawerUINode[]
+function DrawerUI:_build_rich_table_children(conn_id, table_node_id, struct)
+  local support = rich_metadata_support(self, conn_id)
+  if support.columns ~= true then
+    return self:_materialize_legacy_table_like_branch(conn_id, table_node_id, struct)
+  end
+
+  local nodes = {}
+  local columns_branch_id = self:_ensure_columns_rich_prefetch(conn_id, table_node_id, struct)
+  nodes[#nodes + 1] = convert.metadata_folder_node(table_node_id, "columns", "Columns", function()
+    return build_branch_nodes(self, conn_id, columns_branch_id, COLUMNS_RICH_KIND)
+  end)
+
+  if support.indexes == true then
+    local indexes_branch_id = convert.metadata_folder_node_id(table_node_id, "indexes")
+    nodes[#nodes + 1] = convert.metadata_folder_node(table_node_id, "indexes", "Indexes", function()
+      self:_ensure_rich_metadata_branch(conn_id, indexes_branch_id, INDEXES_KIND, {
+        schema = struct.schema,
+        table = struct.name,
+      }, function(request_id)
+        self.handler:connection_get_indexes_async(conn_id, request_id, indexes_branch_id, current_root_epoch(self, conn_id), {
+          table = struct.name,
+          schema = struct.schema,
+          materialization = struct.type,
+          consumer = self._connection_invalidated_consumer_id .. ":" .. indexes_branch_id,
+          priority = "drawer",
+        })
+      end)
+      return build_branch_nodes(self, conn_id, indexes_branch_id, INDEXES_KIND)
+    end)
+  end
+
+  return nodes
+end
+
+---@private
+---@param conn_id string
+---@param schema_node_id string
+---@param struct table
+---@return DrawerUINode|nil
+function DrawerUI:_build_sequences_folder(conn_id, schema_node_id, struct)
+  local support = rich_metadata_support(self, conn_id)
+  if support.sequences ~= true then
+    return nil
+  end
+
+  local schema_name = struct.schema or struct.name
+  local branch_id = convert.metadata_folder_node_id(schema_node_id, "sequences")
+  return convert.metadata_folder_node(schema_node_id, "sequences", "Sequences", function()
+    self:_ensure_rich_metadata_branch(conn_id, branch_id, SEQUENCES_KIND, {
+      schema = schema_name,
+    }, function(request_id)
+      self.handler:connection_get_sequences_async(conn_id, request_id, branch_id, current_root_epoch(self, conn_id), {
+        schema = schema_name,
+        consumer = self._connection_invalidated_consumer_id .. ":" .. branch_id,
+        priority = "drawer",
+      })
+    end)
+    return build_branch_nodes(self, conn_id, branch_id, SEQUENCES_KIND)
+  end)
+end
+
+---@private
+---@param conn_id string
+---@param schema_node_id string
+---@param struct table
+---@param structure_children DrawerUINode[]
+---@return DrawerUINode[]
+function DrawerUI:_with_schema_metadata_children(conn_id, schema_node_id, struct, structure_children)
+  local nodes = {}
+  local sequences = self:_build_sequences_folder(conn_id, schema_node_id, struct)
+  if sequences then
+    nodes[#nodes + 1] = sequences
+  end
+  for _, child in ipairs(structure_children or {}) do
+    nodes[#nodes + 1] = child
+  end
+  return nodes
+end
+
 function DrawerUI:_materialize_table_like_branch(conn_id, node_id, struct)
+  return self:_build_rich_table_children(conn_id, node_id, struct)
+end
+
+function DrawerUI:_materialize_legacy_table_like_branch(conn_id, node_id, struct)
   local cached = branch_state(self, conn_id, node_id, COLUMNS_KIND, true)
   if cached.loading or cached.error ~= nil or cached.raw ~= nil then
     return build_branch_nodes(self, conn_id, node_id, COLUMNS_KIND)
   end
+  cached.schema = struct.schema
+  cached.table = struct.name
 
   local request_id = math.max(cached.request_gen or 0, cached.applied_gen or 0) + 1
   cached.request_gen = request_id
@@ -1151,7 +1374,7 @@ end
 function DrawerUI:_materialize_schema_branch(conn_id, node_id, struct)
   local cached = branch_state(self, conn_id, node_id, STRUCTURES_KIND, true)
   if cached.loading or cached.error ~= nil or cached.raw ~= nil then
-    return build_branch_nodes(self, conn_id, node_id, STRUCTURES_KIND)
+    return self:_with_schema_metadata_children(conn_id, node_id, struct, build_branch_nodes(self, conn_id, node_id, STRUCTURES_KIND))
   end
 
   local request_id = math.max(cached.request_gen or 0, cached.applied_gen or 0) + 1
@@ -1174,7 +1397,7 @@ function DrawerUI:_materialize_schema_branch(conn_id, node_id, struct)
     end,
   })
 
-  return { convert.loading_node(node_id) }
+  return self:_with_schema_metadata_children(conn_id, node_id, struct, { convert.loading_node(node_id) })
 end
 
 function DrawerUI:_build_structure_node(conn_id, parent_id, struct)
@@ -1185,15 +1408,15 @@ function DrawerUI:_build_structure_node(conn_id, parent_id, struct)
   if struct.type == "schema" and self._struct_cache.root_mode[conn_id] == "schemas_only" then
     local cached_branch = branch_state(self, conn_id, node_id, STRUCTURES_KIND, false)
     if cached_branch and (cached_branch.loading or cached_branch.error ~= nil or cached_branch.raw ~= nil) then
-      built_children = build_branch_nodes(self, conn_id, node_id, STRUCTURES_KIND)
+      built_children =
+        self:_with_schema_metadata_children(conn_id, node_id, struct, build_branch_nodes(self, conn_id, node_id, STRUCTURES_KIND))
     end
     lazy_children_factory = function()
       return self:_materialize_schema_branch(conn_id, node_id, struct)
     end
   elseif TABLE_LIKE_TYPES[struct.type] then
-    local cached_branch = branch_state(self, conn_id, node_id, COLUMNS_KIND, false)
-    if cached_branch and (cached_branch.loading or cached_branch.error ~= nil or cached_branch.raw ~= nil) then
-      built_children = build_branch_nodes(self, conn_id, node_id, COLUMNS_KIND)
+    if self._struct_cache.loaded_lazy_ids[node_id] == true then
+      built_children = self:_materialize_table_like_branch(conn_id, node_id, struct)
     end
 
     lazy_children_factory = function()
@@ -1209,9 +1432,16 @@ function DrawerUI:_build_structure_node(conn_id, parent_id, struct)
         else
           built_children = self:_materialize_cached_structure_branch(conn_id, node_id, children)
         end
+        if struct.type == "schema" then
+          built_children = self:_with_schema_metadata_children(conn_id, node_id, struct, built_children)
+        end
       end
       lazy_children_factory = function()
-        return self:_materialize_cached_structure_branch(conn_id, node_id, children)
+        local branch_children = self:_materialize_cached_structure_branch(conn_id, node_id, children)
+        if struct.type == "schema" then
+          return self:_with_schema_metadata_children(conn_id, node_id, struct, branch_children)
+        end
+        return branch_children
       end
     end
   end
@@ -1483,9 +1713,20 @@ function DrawerUI:structure_load_more(branch_id, kind)
 
   self.tree:remove_node(sentinel_id)
   for index = state.built_count + 1, next_built do
-    local nodes = kind == STRUCTURES_KIND
-        and { self:_build_structure_node(conn_id, branch_id, raw[index]) }
-      or convert.column_nodes(branch_id, { raw[index] })
+    local nodes
+    if kind == STRUCTURES_KIND then
+      nodes = { self:_build_structure_node(conn_id, branch_id, raw[index]) }
+    elseif kind == INDEXES_KIND then
+      nodes = raw[index] and raw[index].pk_backed ~= true and convert.index_nodes(branch_id, { raw[index] }) or {}
+    elseif kind == SEQUENCES_KIND then
+      nodes = convert.sequence_nodes(branch_id, { raw[index] })
+    else
+      nodes = convert.column_nodes(branch_id, { raw[index] }, {
+        conn_id = conn_id,
+        schema = state.schema,
+        table = state.table,
+      })
+    end
     for _, child in ipairs(nodes) do
       self.tree:add_node(child, branch_id)
     end
@@ -2252,7 +2493,7 @@ function DrawerUI:on_connection_databases_loaded(data)
 end
 
 ---@private
----@param data { conn_id: string, request_id?: integer, branch_id?: string, root_epoch?: integer, kind?: string, columns?: Column[], error?: any }
+---@param data { conn_id: string, request_id?: integer, branch_id?: string, root_epoch?: integer, kind?: string, supported?: boolean, columns?: Column[], indexes?: table[], sequences?: table[], error?: any, error_kind?: string }
 function DrawerUI:on_structure_children_loaded(data)
   if not data or not data.conn_id or not data.branch_id then
     return
@@ -2278,11 +2519,11 @@ function DrawerUI:on_structure_children_loaded(data)
 
   state.applied_gen = request_id
   state.loading = false
-  state.error = data.error
-  if data.error then
+  state.error = data.error or data.error_kind
+  if data.error or data.error_kind then
     state.raw = nil
   else
-    state.raw = data.columns or {}
+    state.raw = data[structure_children_payload_field(kind)] or {}
   end
   state.render_limit = math.max(state.render_limit or CHILD_CHUNK_SIZE, CHILD_CHUNK_SIZE)
   state.built_count = math.min(#normalize_children(state.raw), state.render_limit)
@@ -3880,9 +4121,15 @@ function DrawerUI:refresh()
         schema = model_node.schema,
         raw_name = model_node.raw_name,
         folder_id = model_node.folder_id,
+        metadata_kind = model_node.metadata_kind,
         conn_id = model_node.conn_id,
         source_meta = model_node.source_meta,
         search_text = model_node.search_text,
+        table = model_node.table,
+        pk = model_node.pk,
+        primary_key_ordinal = model_node.primary_key_ordinal,
+        nullable = model_node.nullable,
+        fk_refs = vim.deepcopy(model_node.fk_refs or {}),
         action_1 = model_node.action_1,
         action_2 = model_node.action_2,
         action_3 = model_node.action_3,

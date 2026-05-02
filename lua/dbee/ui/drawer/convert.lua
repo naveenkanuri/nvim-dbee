@@ -45,6 +45,13 @@ function M.folder_node_id(parent_id, source_id, folder_id)
 end
 
 ---@param parent_id string
+---@param kind string
+---@return string
+function M.metadata_folder_node_id(parent_id, kind)
+  return parent_id .. ID_SEP .. encode_node_segment({ "metadata", kind })
+end
+
+---@param parent_id string
 ---@param column Column
 ---@return string
 function M.column_node_id(parent_id, column)
@@ -57,8 +64,10 @@ end
 
 ---@param parent_id string
 ---@param columns Column[]
+---@param opts? { conn_id?: string, schema?: string, table?: string }
 ---@return DrawerUINode[]
-local function column_nodes(parent_id, columns)
+local function column_nodes(parent_id, columns, opts)
+  opts = opts or {}
   ---@type DrawerUINode[]
   local nodes = {}
 
@@ -70,6 +79,13 @@ local function column_nodes(parent_id, columns)
         name = column.name .. "   [" .. column.type .. "]",
         type = "column",
         raw_name = column.name,
+        conn_id = opts.conn_id,
+        schema = opts.schema,
+        table = opts.table,
+        pk = column.primary_key == true,
+        primary_key_ordinal = column.primary_key_ordinal,
+        nullable = column.nullable,
+        fk_refs = vim.deepcopy(column.foreign_keys or {}),
       }
     )
   end
@@ -80,6 +96,84 @@ end
 M.column_nodes = column_nodes
 M.ID_SEP = ID_SEP
 M.LOAD_MORE_SUFFIX = LOAD_MORE_SUFFIX
+
+---@param parent_id string
+---@param kind string
+---@param label string
+---@param lazy_children fun(): DrawerUINode[]
+---@return DrawerUINode
+function M.metadata_folder_node(parent_id, kind, label, lazy_children)
+  return NuiTree.Node({
+    id = M.metadata_folder_node_id(parent_id, kind),
+    name = label,
+    type = "folder",
+    raw_name = label,
+    metadata_kind = kind,
+    search_text = label,
+    lazy_children = lazy_children,
+    action_1 = function(cb)
+      cb()
+    end,
+  }) --[[@as DrawerUINode]]
+end
+
+---@param parent_id string
+---@param indexes table[]
+---@return DrawerUINode[]
+function M.index_nodes(parent_id, indexes)
+  local nodes = {}
+  for _, index in ipairs(indexes or {}) do
+    local columns = {}
+    for i, column in ipairs(index.columns or {}) do
+      local order = index.orders and index.orders[i] or nil
+      columns[#columns + 1] = order and (column .. " " .. order) or column
+    end
+    local tags = {}
+    if index.unique == true then
+      tags[#tags + 1] = "UNIQUE"
+    end
+    if #columns > 0 then
+      tags[#tags + 1] = table.concat(columns, ", ")
+    end
+    local suffix = #tags > 0 and ("   [" .. table.concat(tags, "] [") .. "]") or ""
+    nodes[#nodes + 1] = NuiTree.Node({
+      id = parent_id .. ID_SEP .. encode_node_segment({ "index", index.name }),
+      name = tostring(index.name or "") .. suffix,
+      type = "index",
+      raw_name = index.name,
+      schema = index.schema,
+      table = index.table,
+      index_meta = vim.deepcopy(index),
+    }) --[[@as DrawerUINode]]
+  end
+  return nodes
+end
+
+---@param parent_id string
+---@param sequences table[]
+---@return DrawerUINode[]
+function M.sequence_nodes(parent_id, sequences)
+  local nodes = {}
+  for _, sequence in ipairs(sequences or {}) do
+    local tags = {}
+    if sequence.increment ~= nil then
+      tags[#tags + 1] = "inc " .. tostring(sequence.increment)
+    end
+    if sequence.cache_size ~= nil then
+      tags[#tags + 1] = "cache " .. tostring(sequence.cache_size)
+    end
+    local suffix = #tags > 0 and ("   [" .. table.concat(tags, "] [") .. "]") or ""
+    nodes[#nodes + 1] = NuiTree.Node({
+      id = parent_id .. ID_SEP .. encode_node_segment({ "sequence", sequence.name }),
+      name = tostring(sequence.name or "") .. suffix,
+      type = "sequence",
+      raw_name = sequence.name,
+      schema = sequence.schema,
+      sequence_meta = vim.deepcopy(sequence),
+    }) --[[@as DrawerUINode]]
+  end
+  return nodes
+end
 
 ---@param parent_id string
 ---@return string

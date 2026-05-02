@@ -24,9 +24,15 @@ local SEARCHABLE_TYPES = {
 ---@field schema string?
 ---@field raw_name string?
 ---@field folder_id string?
+---@field metadata_kind string?
 ---@field conn_id string?
 ---@field source_meta table?
 ---@field search_text string?
+---@field table string?
+---@field pk boolean?
+---@field primary_key_ordinal integer?
+---@field nullable boolean?
+---@field fk_refs table[]?
 ---@field structure_ready boolean?
 ---@field action_1 function?
 ---@field action_2 function?
@@ -107,9 +113,15 @@ local function to_render_node(node)
     schema = node.schema,
     raw_name = node.raw_name,
     folder_id = node.folder_id,
+    metadata_kind = node.metadata_kind,
     conn_id = node.conn_id,
     source_meta = node.source_meta,
     search_text = node.search_text,
+    table = node.table,
+    pk = node.pk,
+    primary_key_ordinal = node.primary_key_ordinal,
+    nullable = node.nullable,
+    fk_refs = vim.deepcopy(node.fk_refs or {}),
     action_1 = node.action_1,
     action_2 = node.action_2,
     action_3 = node.action_3,
