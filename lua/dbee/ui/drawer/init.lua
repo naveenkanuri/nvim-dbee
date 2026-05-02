@@ -3228,6 +3228,127 @@ function DrawerUI:get_actions()
     pcall(vim.api.nvim_win_set_cursor, self.winid, { target, col })
   end
 
+  local function node_fk_refs(node)
+    if not node or node.type ~= "column" or type(node.fk_refs) ~= "table" then
+      return {}
+    end
+    return node.fk_refs
+  end
+
+  local function find_descendant(parent_id, predicate)
+    for _, child in ipairs(self.tree:get_nodes(parent_id)) do
+      if predicate(child) then
+        return child
+      end
+      local found = find_descendant(child:get_id(), predicate)
+      if found then
+        return found
+      end
+    end
+    return nil
+  end
+
+  local function find_fk_target_node(conn_id, ref)
+    local target_schema = tostring(ref.target_schema or "")
+    local target_table = tostring(ref.target_table or "")
+    local target_column = tostring(ref.target_column or "")
+    if conn_id == "" or target_table == "" then
+      return nil, "FK target is incomplete"
+    end
+
+    local table_node = find_descendant(conn_id, function(node)
+      return TABLE_LIKE_TYPES[node.type] == true
+        and tostring(node.schema or "") == target_schema
+        and tostring(node.raw_name or node.name or "") == target_table
+    end)
+    if not table_node then
+      return nil, "FK target table is not visible"
+    end
+    if target_column == "" then
+      return table_node, nil
+    end
+
+    local column_node = find_descendant(table_node:get_id(), function(node)
+      return node.type == "column" and tostring(node.raw_name or "") == target_column
+    end)
+    if not column_node then
+      return nil, "FK target column is not visible"
+    end
+    return column_node, nil
+  end
+
+  local function set_cursor_to_node(node)
+    if not node then
+      error("missing target node")
+    end
+    local _, start_linenr = self.tree:get_node(node:get_id())
+    if not start_linenr then
+      error("FK target is not visible")
+    end
+    if not self.winid or not vim.api.nvim_win_is_valid(self.winid) then
+      error("drawer window is not visible")
+    end
+    vim.api.nvim_win_set_cursor(self.winid, { start_linenr, 0 })
+  end
+
+  local function navigate_fk_ref(source_node, ref)
+    local conn_id = source_node.conn_id or resolve_connection_ancestor(self.tree, source_node) or ""
+    local target_node, err = find_fk_target_node(conn_id, ref)
+    if not target_node then
+      utils.log("warn", err or "FK target is not visible")
+      return
+    end
+
+    local ok, nav_err = pcall(set_cursor_to_node, target_node)
+    if not ok then
+      utils.log("warn", tostring(nav_err))
+    end
+  end
+
+  local function navigate_current_fk()
+    local node = self.tree:get_node() --[[@as DrawerUINode]]
+    local refs = node_fk_refs(node)
+    if #refs == 0 then
+      utils.log("warn", "No foreign key target for selected column")
+      return false
+    end
+
+    if #refs == 1 then
+      navigate_fk_ref(node, refs[1])
+      return true
+    end
+
+    local labels = {}
+    local by_label = {}
+    local used = {}
+    for index, ref in ipairs(refs) do
+      local base = convert.fk_ref_label(ref)
+      local label = base
+      local counter = 2
+      while used[label] do
+        label = base .. " #" .. tostring(counter)
+        counter = counter + 1
+      end
+      used[label] = true
+      labels[#labels + 1] = label
+      by_label[label] = ref
+    end
+
+    menu.select {
+      relative_winid = self.winid,
+      title = "Go to foreign key",
+      mappings = self.mappings,
+      items = labels,
+      on_confirm = function(selection)
+        local ref = by_label[selection]
+        if ref then
+          navigate_fk_ref(node, ref)
+        end
+      end,
+    }
+    return true
+  end
+
   local function forwardable_mapping_key_for(action_name)
     for _, mapping in ipairs(self.mappings or {}) do
       if mapping.action == action_name and mapping.mode == "n" then
@@ -3702,6 +3823,10 @@ function DrawerUI:get_actions()
       if not node then
         return
       end
+      if #node_fk_refs(node) > 0 then
+        navigate_current_fk()
+        return
+      end
       self.cached_render_snapshot = nil
       if node:is_expanded() then
         collapse_node(node)
@@ -3712,6 +3837,9 @@ function DrawerUI:get_actions()
         end
         expand_node(node)
       end
+    end,
+    fk_navigate = function()
+      navigate_current_fk()
     end,
     generate_call = function()
       local node = self.tree:get_node()

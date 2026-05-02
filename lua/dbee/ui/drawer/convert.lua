@@ -62,6 +62,53 @@ function M.column_node_id(parent_id, column)
   })
 end
 
+---@param ref table
+---@return string
+function M.fk_ref_label(ref)
+  local target_table = tostring(ref.target_table or "")
+  local target_columns = ref.target_columns
+  if type(target_columns) ~= "table" or #target_columns == 0 then
+    target_columns = { ref.target_column }
+  end
+  local columns = {}
+  for _, column in ipairs(target_columns or {}) do
+    if column and column ~= "" then
+      columns[#columns + 1] = tostring(column)
+    end
+  end
+  local column_text = #columns > 0 and table.concat(columns, "+") or tostring(ref.target_column or "")
+  if target_table == "" then
+    return column_text
+  end
+  return target_table .. "." .. column_text
+end
+
+---@param column Column|table
+---@return string
+local function column_label(column)
+  local tags = {}
+  if column.primary_key == true then
+    tags[#tags + 1] = "PK"
+  end
+  if column.nullable == false then
+    tags[#tags + 1] = "NOT NULL"
+  end
+
+  local fk_labels = {}
+  for _, ref in ipairs(column.foreign_keys or {}) do
+    fk_labels[#fk_labels + 1] = M.fk_ref_label(ref)
+  end
+  if #fk_labels > 0 then
+    tags[#tags + 1] = "FK→" .. table.concat(fk_labels, ", ")
+  end
+
+  local label = tostring(column.name or "") .. "   [" .. tostring(column.type or "") .. "]"
+  if #tags > 0 then
+    label = label .. " [" .. table.concat(tags, "] [") .. "]"
+  end
+  return label
+end
+
 ---@param parent_id string
 ---@param columns Column[]
 ---@param opts? { conn_id?: string, schema?: string, table?: string }
@@ -76,7 +123,7 @@ local function column_nodes(parent_id, columns, opts)
       nodes,
       NuiTree.Node {
         id = M.column_node_id(parent_id, column),
-        name = column.name .. "   [" .. column.type .. "]",
+        name = column_label(column),
         type = "column",
         raw_name = column.name,
         conn_id = opts.conn_id,

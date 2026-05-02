@@ -92,6 +92,7 @@ config.default = {
       { key = "A", mode = "n", action = "activate_connection" },
       { key = "R", mode = "n", action = "refresh" },
       { key = "<CR>", mode = "n", action = "toggle" },
+      { key = "gd", mode = "n", action = "fk_navigate" },
       -- generate call template for procedure/function
       { key = "gC", mode = "n", action = "generate_call" },
       -- yank qualified name to clipboard
