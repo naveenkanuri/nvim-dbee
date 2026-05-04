@@ -416,6 +416,7 @@ local function new_env(opts)
 
   local drawer = DrawerUI:new(handler, editor, result, {
     mappings = vim.deepcopy(DEFAULT_MAPPINGS),
+    dynamic_width = false,
   })
   local real_refresh = drawer.refresh
   drawer.refresh_count = 0
@@ -643,6 +644,9 @@ local function run_drawer_contracts()
   Harness.drain()
   assert_eq("source_edit_calls", #env.runtime.editor_calls, 1)
   assert_match("source_edit_path", env.runtime.editor_calls[1].path, "source1.json")
+  Harness.set_current_node(env.winid, env.drawer.tree, help_id)
+  env.drawer:get_actions().expand()
+  Harness.drain()
   assert_match("source_edit_help_text", node_names(env.drawer.tree), "source file = e on a connection row")
   print("DCFG01_SOURCE_EDIT_REACHABLE_OK=true")
 

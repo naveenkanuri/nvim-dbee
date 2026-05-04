@@ -444,6 +444,9 @@ function config.validate(cfg)
 
     drawer_disable_candies = { cfg.drawer.disable_candies, "boolean" },
     drawer_disable_help = { cfg.drawer.disable_help, "boolean" },
+    drawer_dynamic_width = { cfg.drawer.dynamic_width, "boolean" },
+    drawer_dynamic_width_min = { cfg.drawer.dynamic_width_min, "number" },
+    drawer_dynamic_width_max = { cfg.drawer.dynamic_width_max, { "number", "nil" } },
     drawer_candies = { cfg.drawer.candies, "table" },
     drawer_mappings = { cfg.drawer.mappings, "table" },
     result_page_size = { cfg.result.page_size, "number" },
@@ -491,6 +494,14 @@ function config.validate(cfg)
 
   if cfg.lsp.code_action_max_expand_columns < 0 then
     error("lsp.code_action_max_expand_columns must be non-negative", 2)
+  end
+
+  if cfg.drawer.dynamic_width_min < 1 then
+    error("drawer.dynamic_width_min must be at least 1", 2)
+  end
+
+  if cfg.drawer.dynamic_width_max ~= nil and cfg.drawer.dynamic_width_max < cfg.drawer.dynamic_width_min then
+    error("drawer.dynamic_width_max must be greater than or equal to drawer.dynamic_width_min", 2)
   end
 end
 

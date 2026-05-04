@@ -747,6 +747,7 @@ local function new_env(opts)
 
   local drawer = DrawerUI:new(handler, editor, result, {
     mappings = vim.deepcopy(DEFAULT_MAPPINGS),
+    dynamic_width = false,
   })
 
   handler:register_event_listener("connection_invalidated", function(data)

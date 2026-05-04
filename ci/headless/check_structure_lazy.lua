@@ -737,6 +737,7 @@ local function new_fixture(opts)
 
   local drawer = DrawerUI:new(handler, editor, result, {
     mappings = mappings,
+    dynamic_width = false,
   })
 
   drawer._struct_cache.root = vim.deepcopy(opts.seed_root or {})

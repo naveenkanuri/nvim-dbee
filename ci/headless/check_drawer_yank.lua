@@ -365,7 +365,12 @@ assert_true("a10_structure_escape_collision_resolved", s3 ~= s4)
 
 local source_nodes = convert.handler_nodes(collision_handler, {}, collision_cache)
 local source_node = source_nodes[1]
-local connection_collision = source_node and source_node.__children and source_node.__children[1]
+local connection_collision = nil
+if source_node and source_node.type == "connection" then
+  connection_collision = source_node
+elseif source_node and source_node.__children then
+  connection_collision = source_node.__children[1]
+end
 assert_true("a10_connection_node_present", connection_collision ~= nil)
 
 local structure_nodes = connection_collision.lazy_children()

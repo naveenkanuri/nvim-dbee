@@ -373,7 +373,9 @@ local drawer_mock_editor = {
   end,
 }
 
-local drawer = DrawerUI:new(drawer_mock_handler, drawer_mock_editor, result)
+local drawer = DrawerUI:new(drawer_mock_handler, drawer_mock_editor, result, {
+  dynamic_width = false,
+})
 drawer._patch_connection_subtree = function()
   return true
 end

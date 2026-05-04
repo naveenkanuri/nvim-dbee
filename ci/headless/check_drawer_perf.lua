@@ -524,6 +524,7 @@ local function new_drawer_fixture(opts)
   local drawer = DrawerUI:new(handler, editor, result, {
     mappings = deepcopy(opts.mappings or DEFAULT_MAPPINGS),
     disable_help = opts.disable_help ~= false,
+    dynamic_width = false,
   })
 
   drawer._struct_cache.root = deepcopy(opts.root_cache or LOCKED_CORPUS.root_cache)

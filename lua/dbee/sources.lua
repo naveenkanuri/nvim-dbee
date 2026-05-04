@@ -33,6 +33,7 @@ local uv = vim.loop
 ---@field rename_folder? fun(self: Source, folder_id: string, new_name: string) rename folder (optional)
 ---@field remove_folder? fun(self: Source, folder_id: string) remove folder (optional)
 ---@field move_connection? fun(self: Source, conn_id: connection_id, target_folder_id?: string) move connection into folder or ungroup (optional)
+---@field move_connections_bulk? fun(self: Source, conn_ids: connection_id[], target_folder_id?: string) move connections into folder or ungroup (optional)
 ---@field reload_folders? fun(self: Source) invalidate folder cache (optional)
 
 ---@class Folder
@@ -583,6 +584,93 @@ function sources.FileSource:move_connection(conn_id, target_folder_id)
 
   if next_target_folder then
     next_target_folder.connection_ids[#next_target_folder.connection_ids + 1] = conn_id
+  end
+
+  write_records_atomically(self:folders_path(), next_cache)
+  self._folders_cache = next_cache
+end
+
+---@package
+---@param conn_ids connection_id[]
+---@param target_folder_id? string
+function sources.FileSource:move_connections_bulk(conn_ids, target_folder_id)
+  self:_require_folders_writeable()
+
+  if type(conn_ids) ~= "table" or #conn_ids == 0 then
+    error("connection ids are required")
+  end
+
+  local target_folder = nil
+  if target_folder_id ~= nil then
+    for _, folder in ipairs(self._folders_cache or {}) do
+      if folder.id == target_folder_id then
+        target_folder = folder
+        break
+      end
+    end
+    if not target_folder then
+      error("folder id not found: " .. tostring(target_folder_id))
+    end
+  end
+
+  local known_conn_ids = {}
+  for _, conn in ipairs(self:load()) do
+    if conn and conn.id then
+      known_conn_ids[conn.id] = true
+    end
+  end
+
+  local move_set = {}
+  for _, conn_id in ipairs(conn_ids) do
+    if type(conn_id) ~= "string" or conn_id == "" then
+      error("connection id is required")
+    end
+    if move_set[conn_id] then
+      error("duplicate connection id: " .. tostring(conn_id))
+    end
+    if not known_conn_ids[conn_id] then
+      error("connection id not found: " .. tostring(conn_id))
+    end
+    move_set[conn_id] = true
+  end
+
+  local current_folder_ids = {}
+  for _, folder in ipairs(self._folders_cache or {}) do
+    for _, current_conn_id in ipairs(folder.connection_ids or {}) do
+      if move_set[current_conn_id] then
+        current_folder_ids[current_conn_id] = folder.id
+      end
+    end
+  end
+
+  local changed = false
+  for _, conn_id in ipairs(conn_ids) do
+    if current_folder_ids[conn_id] ~= target_folder_id then
+      changed = true
+      break
+    end
+  end
+  if not changed then
+    return
+  end
+
+  local next_cache = vim.deepcopy(self._folders_cache)
+  local next_target_folder = nil
+  for _, folder in ipairs(next_cache or {}) do
+    for index = #(folder.connection_ids or {}), 1, -1 do
+      if move_set[folder.connection_ids[index]] then
+        table.remove(folder.connection_ids, index)
+      end
+    end
+    if target_folder_id ~= nil and folder.id == target_folder_id then
+      next_target_folder = folder
+    end
+  end
+
+  if next_target_folder then
+    for _, conn_id in ipairs(conn_ids) do
+      next_target_folder.connection_ids[#next_target_folder.connection_ids + 1] = conn_id
+    end
   end
 
   write_records_atomically(self:folders_path(), next_cache)

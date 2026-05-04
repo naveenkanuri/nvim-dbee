@@ -22,8 +22,8 @@ func newOracleRichMetadataMock(t *testing.T) (*oracleDriver, sqlmock.Sqlmock) {
 
 func oracleRichTableArgs() []driver.Value {
 	return []driver.Value{
-		sql.Named("schema", "APP"),
-		sql.Named("table", "ACCOUNT"),
+		sql.Named("p_schema", "APP"),
+		sql.Named("p_table", "ACCOUNT"),
 	}
 }
 
@@ -103,8 +103,8 @@ func TestOracleColumnsRichCompositeMetadata(t *testing.T) {
 func TestOracleIndexesRichMetadata(t *testing.T) {
 	driver, mock := newOracleRichMetadataMock(t)
 
-	require.Contains(t, oracleIndexesSQL, "i.table_owner = :schema")
-	require.NotContains(t, oracleIndexesSQL, "i.owner = :schema")
+	require.Contains(t, oracleIndexesSQL, "i.table_owner = :p_schema")
+	require.NotContains(t, oracleIndexesSQL, "i.owner = :p_schema")
 
 	args := oracleRichTableArgs()
 	mock.ExpectQuery(oracleIndexesSQL).
@@ -151,7 +151,7 @@ func TestOracleSequencesRichMetadata(t *testing.T) {
 	driver, mock := newOracleRichMetadataMock(t)
 
 	mock.ExpectQuery(oracleSequencesSQL).
-		WithArgs(sql.Named("schema", "APP")).
+		WithArgs(sql.Named("p_schema", "APP")).
 		WillReturnRows(sqlmock.NewRows([]string{"sequence_name", "increment_by", "cache_size"}).
 			AddRow("ACCOUNT_SEQ", int64(1), int64(20)).
 			AddRow("AUDIT_SEQ", int64(10), int64(100)))
@@ -178,8 +178,8 @@ func TestOracleRichMetadataSupport(t *testing.T) {
 }
 
 func TestOracleIndexSQLScopesByTableOwner(t *testing.T) {
-	require.Contains(t, oracleIndexesSQL, "i.table_owner = :schema")
-	require.Contains(t, oracleIndexesSQL, "i.table_name = :table")
+	require.Contains(t, oracleIndexesSQL, "i.table_owner = :p_schema")
+	require.Contains(t, oracleIndexesSQL, "i.table_name = :p_table")
 	require.Contains(t, oracleIndexesSQL, "ac.owner = i.table_owner")
-	require.False(t, strings.Contains(oracleIndexesSQL, "WHERE i.owner = :schema"))
+	require.False(t, strings.Contains(oracleIndexesSQL, "WHERE i.owner = :p_schema"))
 }

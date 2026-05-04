@@ -2217,8 +2217,10 @@ function Handler:_emit_connection_invalidated(reason, result, opts)
     source_id = result.source_id,
     folder_id = result.folder_id,
     conn_id = result.conn_id,
+    conn_ids = vim.deepcopy(result.conn_ids or {}),
     target_folder_id = result.target_folder_id,
     op = result.op,
+    count = result.count,
     retired_conn_ids = vim.deepcopy(result.retired_conn_ids or {}),
     new_conn_ids = vim.deepcopy(result.new_conn_ids or {}),
     current_conn_id_before = result.current_conn_id_before,
@@ -2687,6 +2689,21 @@ function Handler:source_move_connection(source_id, conn_id, target_folder_id)
     conn_id = conn_id,
     target_folder_id = target_folder_id,
     op = "move",
+  })
+end
+
+---@param source_id source_id
+---@param conn_ids connection_id[]
+---@param target_folder_id? string
+function Handler:source_move_connections(source_id, conn_ids, target_folder_id)
+  local source = self:_require_folder_capable_source(source_id)
+  source:move_connections_bulk(conn_ids, target_folder_id)
+  self:_emit_connection_invalidated("folder_mutation", {
+    source_id = source_id,
+    conn_ids = vim.deepcopy(conn_ids or {}),
+    target_folder_id = target_folder_id,
+    op = "move_bulk",
+    count = #(conn_ids or {}),
   })
 end
 

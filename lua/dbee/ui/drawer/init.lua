@@ -122,6 +122,7 @@ end
 ---@field private filter_visible_uncached_connections integer visible connection rows merged into fallback search
 ---@field private window_options table<string, any> a table of window options
 ---@field private buffer_options table<string, any> a table of buffer options
+---@field private _resize_scheduled boolean
 local DrawerUI = {}
 
 local SEARCHABLE_TYPES = drawer_model.SEARCHABLE_TYPES or {
@@ -1837,6 +1838,7 @@ function DrawerUI:new(handler, editor, result, opts)
       swapfile = false,
       filetype = "dbee",
     }, opts.buffer_options or {}),
+    _resize_scheduled = false,
   }
   setmetatable(o, self)
   self.__index = self
@@ -3699,14 +3701,15 @@ function DrawerUI:get_actions()
 
       local conn_ids = {}
       local seen = {}
+      local skipped = 0
       for line = vstart, vend do
         local node = self.tree:get_node(line)
-        if node then
-          local cid = resolve_connection_ancestor(self.tree, node)
-          if cid and not seen[cid] then
-            seen[cid] = true
-            conn_ids[#conn_ids + 1] = cid
-          end
+        local cid = node and resolve_connection_ancestor(self.tree, node)
+        if cid and not seen[cid] then
+          seen[cid] = true
+          conn_ids[#conn_ids + 1] = cid
+        elseif not cid then
+          skipped = skipped + 1
         end
       end
 
@@ -3783,8 +3786,9 @@ function DrawerUI:get_actions()
 
           local move_all = function(target)
             _guarded_folder_mutation("move " .. #conn_ids .. " connection(s)", function()
-              for _, cid in ipairs(conn_ids) do
-                handler:source_move_connection(source_id, cid, target)
+              handler:source_move_connections(source_id, conn_ids, target)
+              if skipped > 0 then
+                utils.log("info", string.format("Moved %d connection(s); skipped %d non-connection row(s)", #conn_ids, skipped))
               end
             end, on_done)
           end
@@ -3807,8 +3811,9 @@ function DrawerUI:get_actions()
                     if new_name and new_name ~= "" then
                       _guarded_folder_mutation("create+move " .. #conn_ids, function()
                         local id = handler:source_add_folder(source_id, new_name)
-                        for _, cid in ipairs(conn_ids) do
-                          handler:source_move_connection(source_id, cid, id)
+                        handler:source_move_connections(source_id, conn_ids, id)
+                        if skipped > 0 then
+                          utils.log("info", string.format("Moved %d connection(s); skipped %d non-connection row(s)", #conn_ids, skipped))
                         end
                       end, on_done)
                     else
@@ -4465,22 +4470,24 @@ function DrawerUI:_resize_to_fit()
     return
   end
 
-  local lines = vim.api.nvim_buf_get_lines(self.bufnr, 0, -1, false)
-  local max_w = 0
-  for _, line in ipairs(lines) do
-    local w = vim.fn.strdisplaywidth(line)
-    if w > max_w then
-      max_w = w
+  pcall(function()
+    local lines = vim.api.nvim_buf_get_lines(self.bufnr, 0, -1, false)
+    local max_w = 0
+    for _, line in ipairs(lines) do
+      local w = vim.fn.strdisplaywidth(line)
+      if w > max_w then
+        max_w = w
+      end
     end
-  end
 
-  local cap = self.dynamic_width_max or math.max(40, vim.o.columns - 20)
-  local floor_w = self.dynamic_width_min or 30
-  local info = vim.fn.getwininfo(self.winid)[1]
-  local overhead = (info and info.textoff) or 0
-  local target = math.max(floor_w, math.min(cap, max_w + overhead + 2))
+    local cap = self.dynamic_width_max or math.max(40, vim.o.columns - 20)
+    local floor_w = self.dynamic_width_min or 30
+    local info = vim.fn.getwininfo(self.winid)[1]
+    local overhead = (info and info.textoff) or 0
+    local target = math.max(floor_w, math.min(cap, max_w + overhead + 2))
 
-  pcall(vim.api.nvim_win_set_width, self.winid, target)
+    pcall(vim.api.nvim_win_set_width, self.winid, target)
+  end)
 end
 
 function DrawerUI:_wrap_tree_render()
@@ -4491,7 +4498,12 @@ function DrawerUI:_wrap_tree_render()
   local self_ref = self
   self.tree.render = function(t, ...)
     local result = original(t, ...)
+    if not self_ref.dynamic_width or self_ref._resize_scheduled then
+      return result
+    end
+    self_ref._resize_scheduled = true
     vim.schedule(function()
+      self_ref._resize_scheduled = false
       self_ref:_resize_to_fit()
     end)
     return result
@@ -4512,9 +4524,6 @@ function DrawerUI:show(winid)
     return
   end
   self:refresh()
-  vim.schedule(function()
-    self:_resize_to_fit()
-  end)
 end
 
 return DrawerUI

@@ -24,6 +24,51 @@ local function assert_eq(label, actual, expected)
   end
 end
 
+local function write_file(path, content)
+  local file = assert(io.open(path, "w"))
+  file:write(content)
+  file:close()
+end
+
+local function read_file(path)
+  local file = assert(io.open(path, "r"))
+  local content = file:read("*a")
+  file:close()
+  return content
+end
+
+local function write_json(path, records)
+  local ok, encoded = pcall(vim.fn.json_encode, records)
+  if not ok then
+    fail("json encode failed for " .. tostring(path))
+  end
+  write_file(path, encoded)
+end
+
+local function read_json(path)
+  local content = read_file(path)
+  if content == "" then
+    return {}
+  end
+  local ok, decoded = pcall(vim.json.decode, content)
+  if not ok then
+    fail("json decode failed for " .. tostring(path) .. ": " .. tostring(decoded))
+  end
+  return decoded or {}
+end
+
+local function make_temp_dir()
+  local dir = vim.fn.tempname()
+  vim.fn.mkdir(dir, "p")
+  return dir
+end
+
+local function cleanup_path(path)
+  if path and path ~= "" then
+    pcall(vim.fn.delete, path, "rf")
+  end
+end
+
 local notifications = {}
 local saved_notify = vim.notify
 vim.notify = function(msg, level, opts)
@@ -217,6 +262,38 @@ local function make_handler(source, opts)
     emit("folder_mutation", { source_id = source_id, conn_id = conn_id, target_folder_id = target_folder_id, op = "move" })
   end
 
+  function handler:source_move_connections(source_id, conn_ids, target_folder_id)
+    if source.fail_folder_mutation then
+      error("folder mutation failed")
+    end
+    for _, conn_id in ipairs(conn_ids or {}) do
+      remove_from_all_folders(source, conn_id)
+    end
+    if target_folder_id then
+      for _, folder in ipairs(source._folders) do
+        if folder.id == target_folder_id then
+          for _, conn_id in ipairs(conn_ids or {}) do
+            folder.connection_ids[#folder.connection_ids + 1] = conn_id
+          end
+        end
+      end
+    end
+    self.mutations[#self.mutations + 1] = {
+      op = "move_bulk",
+      source_id = source_id,
+      conn_ids = vim.deepcopy(conn_ids or {}),
+      target_folder_id = target_folder_id,
+      count = #(conn_ids or {}),
+    }
+    emit("folder_mutation", {
+      source_id = source_id,
+      conn_ids = vim.deepcopy(conn_ids or {}),
+      target_folder_id = target_folder_id,
+      op = "move_bulk",
+      count = #(conn_ids or {}),
+    })
+  end
+
   function handler:set_current_connection(conn_id)
     self.current_conn_id = conn_id
   end
@@ -295,6 +372,7 @@ local function new_fixture(opts)
   local DrawerUI = require("dbee.ui.drawer")
   local drawer = DrawerUI:new(handler, make_editor(), make_result(), {
     disable_help = true,
+    dynamic_width = false,
     mappings = {
       { key = "<CR>", mode = "n", action = "action_1" },
       { key = "a", mode = "n", action = "add_connection" },
@@ -352,8 +430,81 @@ local function find_snapshot_node(nodes, predicate)
   end
 end
 
+local function find_folder_by_id(folders, id)
+  for _, folder in ipairs(folders or {}) do
+    if folder.id == id then
+      return folder
+    end
+  end
+end
+
 local function assert_has_action(actions, id)
   assert_true("action_present_" .. id, type(actions[id]) == "function")
+end
+
+local function bulk_connection_records()
+  return {
+    { id = "conn-a", name = "A", type = "postgres", url = "postgres://a" },
+    { id = "conn-b", name = "B", type = "postgres", url = "postgres://b" },
+    { id = "conn-c", name = "C", type = "postgres", url = "postgres://c" },
+  }
+end
+
+local function with_real_file_source(folders, fn)
+  local dir = make_temp_dir()
+  local path = vim.fs.joinpath(dir, "connections.json")
+  write_json(path, bulk_connection_records())
+
+  local source = require("dbee.sources").FileSource:new(path)
+  write_json(source:folders_path(), folders)
+
+  local ok, err = pcall(fn, source, path, dir)
+  cleanup_path(dir)
+  if not ok then
+    fail(err)
+  end
+end
+
+local function with_filesource_writer(replacement_factory, fn)
+  local method = require("dbee.sources").FileSource.add_folder
+  local index = nil
+  local original = nil
+  for i = 1, 50 do
+    local name, value = debug.getupvalue(method, i)
+    if not name then
+      break
+    end
+    if name == "write_records_atomically" then
+      index = i
+      original = value
+      break
+    end
+  end
+  assert_true("write_records_atomically upvalue found", index ~= nil and type(original) == "function")
+
+  debug.setupvalue(method, index, replacement_factory(original))
+  local ok, err = pcall(fn)
+  debug.setupvalue(method, index, original)
+  if not ok then
+    error(err)
+  end
+end
+
+local function make_bulk_handler(source)
+  local Handler = require("dbee.handler")
+  local handler = setmetatable({
+    sources = { [source:name()] = source },
+    invalidations = {},
+  }, { __index = Handler })
+
+  function handler:_emit_connection_invalidated(reason, result)
+    self.invalidations[#self.invalidations + 1] = {
+      reason = reason,
+      result = vim.deepcopy(result or {}),
+    }
+  end
+
+  return handler
 end
 
 local function run_convert_contracts()
@@ -546,6 +697,77 @@ local function run_drawer_action_contracts()
   fixture.source.fail_folder_mutation = false
 
   fixture:cleanup()
+end
+
+local function run_bulk_move_contracts()
+  with_real_file_source({
+    { id = "folder-source", name = "Source", connection_ids = { "conn-a", "conn-b" } },
+    { id = "folder-target", name = "Target", connection_ids = {} },
+  }, function(source)
+    source:load_folders()
+    local handler = make_bulk_handler(source)
+    local write_count = 0
+
+    with_filesource_writer(function(original)
+      return function(path, records)
+        write_count = write_count + 1
+        return original(path, records)
+      end
+    end, function()
+      handler:source_move_connections(source:name(), { "conn-a", "conn-b", "conn-c" }, "folder-target")
+    end)
+
+    assert_eq("bulk write count", write_count, 1)
+    assert_eq("bulk invalidation count", #handler.invalidations, 1)
+    assert_eq("bulk invalidation reason", handler.invalidations[1].reason, "folder_mutation")
+    assert_eq("bulk invalidation op", handler.invalidations[1].result.op, "move_bulk")
+    assert_eq("bulk invalidation count field", handler.invalidations[1].result.count, 3)
+    assert_eq("bulk invalidation ids", vim.inspect(handler.invalidations[1].result.conn_ids), vim.inspect({ "conn-a", "conn-b", "conn-c" }))
+
+    local folders = read_json(source:folders_path())
+    assert_eq("bulk source folder empty", #find_folder_by_id(folders, "folder-source").connection_ids, 0)
+    assert_eq(
+      "bulk target membership",
+      vim.inspect(find_folder_by_id(folders, "folder-target").connection_ids),
+      vim.inspect({ "conn-a", "conn-b", "conn-c" })
+    )
+    print("FOLDER15_BULK_ATOMIC_PASS=true")
+  end)
+
+  with_real_file_source({
+    { id = "folder-source", name = "Source", connection_ids = { "conn-a", "conn-b" } },
+    { id = "folder-target", name = "Target", connection_ids = {} },
+  }, function(source)
+    source:load_folders()
+    local original_disk = read_file(source:folders_path())
+    local original_cache = vim.inspect(source._folders_cache)
+    local handler = make_bulk_handler(source)
+    local write_count = 0
+
+    with_filesource_writer(function()
+      return function()
+        write_count = write_count + 1
+        error("bulk write failed")
+      end
+    end, function()
+      local ok, err = pcall(handler.source_move_connections, handler, source:name(), { "conn-a", "conn-b", "conn-c" }, "folder-target")
+      assert_true("bulk failure raised", not ok)
+      assert_true("bulk failure message", tostring(err):find("bulk write failed", 1, true) ~= nil)
+    end)
+
+    assert_eq("bulk failure write count", write_count, 1)
+    assert_eq("bulk failure invalidations", #handler.invalidations, 0)
+    assert_eq("bulk failure cache unchanged", vim.inspect(source._folders_cache), original_cache)
+    assert_eq("bulk failure disk unchanged", read_file(source:folders_path()), original_disk)
+    local folders = source:load_folders()
+    assert_eq(
+      "bulk failure source membership preserved",
+      vim.inspect(find_folder_by_id(folders, "folder-source").connection_ids),
+      vim.inspect({ "conn-a", "conn-b" })
+    )
+    assert_eq("bulk failure target empty", #find_folder_by_id(folders, "folder-target").connection_ids, 0)
+    print("FOLDER15_BULK_ROLLBACK_PASS=true")
+  end)
 end
 
 local function run_move_picker_duplicate_contract()
@@ -753,6 +975,7 @@ end
 run_persistence_contracts_for_all_pass()
 run_convert_contracts()
 run_drawer_action_contracts()
+run_bulk_move_contracts()
 run_move_picker_duplicate_contract()
 run_model_contracts()
 run_bootstrap_contract()
