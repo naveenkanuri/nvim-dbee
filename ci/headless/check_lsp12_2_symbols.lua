@@ -415,6 +415,37 @@ assert_eq("cte real ref 1", cte_real_names[1], "DUAL")
 assert_eq("cte real ref 2", cte_real_names[2], "real_table")
 emit("LSP12_2_DIAGNOSTICS_CTE_ALIAS_NOT_TABLE_REF", "true")
 
+local function assert_table_refs(label, sql, expected)
+  local refs = context.statement_table_refs({
+    text = sql,
+    start = { line = 0, character = 0 },
+  })
+  local actual = {}
+  for _, ref in ipairs(refs) do
+    actual[#actual + 1] = ref.ref
+  end
+  table.sort(actual)
+  table.sort(expected)
+  assert_eq(label .. " count", #actual, #expected)
+  for i, ref in ipairs(expected) do
+    assert_eq(label .. " ref " .. tostring(i), actual[i], ref)
+  end
+end
+
+assert_table_refs("plsql bind select into", "BEGIN SELECT col INTO :var FROM tbl; END;", { "tbl" })
+assert_table_refs("plsql declare local select into", "DECLARE v NUMBER; BEGIN SELECT col INTO v FROM tbl; END;", { "tbl" })
+assert_table_refs("plsql underscore local select into", "BEGIN SELECT col INTO v_name FROM tbl; END;", { "tbl" })
+assert_table_refs("plsql camel local select into", "BEGIN SELECT col INTO vName FROM tbl; END;", { "tbl" })
+assert_table_refs("plsql multi bind select into", "BEGIN SELECT a, b INTO :v1, :v2 FROM t; END;", { "t" })
+assert_table_refs("plsql record select into", "BEGIN SELECT row_value INTO record_var FROM t; END;", { "t" })
+assert_table_refs(
+  "plsql nested select into",
+  "BEGIN SELECT (SELECT max(x) FROM inner_t) INTO v FROM outer_t; END;",
+  { "inner_t", "outer_t" }
+)
+assert_table_refs("plsql insert into remains table", "BEGIN INSERT INTO t SELECT a FROM t2; END;", { "t", "t2" })
+emit("LSP12_2_PLSQL_SELECT_INTO_VAR_NOT_TABLE_REF", "true")
+
 local dedupe_buf, dedupe_uri = make_buffer({ "select * from public.users; select * from PUBLIC.USERS" })
 local dedupe = request(client, "textDocument/documentSymbol", {
   textDocument = { uri = dedupe_uri },

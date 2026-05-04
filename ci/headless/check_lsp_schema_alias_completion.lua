@@ -3,6 +3,10 @@
 vim.env.XDG_STATE_HOME = vim.fn.tempname()
 vim.fn.mkdir(vim.env.XDG_STATE_HOME, "p")
 
+package.preload["nio"] = package.preload["nio"] or function()
+  return {}
+end
+
 local server = require("dbee.lsp.server")
 local SchemaCache = require("dbee.lsp.schema_cache")
 local schema_filter = require("dbee.schema_filter")

@@ -7,6 +7,15 @@ package.preload["nio"] = package.preload["nio"] or function()
   return {}
 end
 
+package.loaded["dbee.api.state"] = package.loaded["dbee.api.state"] or {
+  is_core_loaded = function()
+    return false
+  end,
+  config = function()
+    return {}
+  end,
+}
+
 local server = require("dbee.lsp.server")
 local lsp_init = require("dbee.lsp")
 local SchemaCache = require("dbee.lsp.schema_cache")
@@ -36,6 +45,16 @@ local function has_label(items, label)
     end
   end
   return false
+end
+
+local function label_count(items, label)
+  local count = 0
+  for _, item in ipairs(items or {}) do
+    if item.label == label then
+      count = count + 1
+    end
+  end
+  return count
 end
 
 local schema_object_calls = {}
@@ -165,6 +184,11 @@ assert_eq("schema object priority", schema_object_calls[1].priority, "lsp")
 assert_eq("schema object schema", schema_object_calls[1].schema, "app")
 assert_true("no sync fetch on cold schema-dot", not sync_fetch_called)
 
+local duplicate_miss = request_completion("select * from app.")
+assert_eq("schema-dot duplicate miss incomplete", duplicate_miss.isIncomplete, true)
+assert_eq("schema-dot duplicate miss empty", #duplicate_miss.items, 0)
+assert_eq("schema-dot duplicate miss deduped", #schema_object_calls, 1)
+
 local queue_full_cache = SchemaCache:new(queue_full_handler, "lazy-lsp-queue-full")
 queue_full_cache:build_from_schemas({ { name = "app" } })
 local queue_full_client = server.create(queue_full_cache)({}, {})
@@ -247,7 +271,14 @@ local warm = request_completion("select * from app.")
 assert_eq("schema-dot warm complete", warm.isIncomplete, false)
 assert_true("schema-dot warm table", has_label(warm.items, "accounts"))
 assert_true("schema-dot warm view", has_label(warm.items, "account_view"))
+assert_eq("schema-dot warm table dedupe", label_count(warm.items, "accounts"), 1)
+assert_eq("schema-dot warm view dedupe", label_count(warm.items, "account_view"), 1)
 assert_eq("no duplicate schema request after warm", #schema_object_calls, 1)
+
+local warm_repeat = request_completion("select * from app.")
+assert_eq("schema-dot warm repeat complete", warm_repeat.isIncomplete, false)
+assert_eq("schema-dot warm repeat request count", #schema_object_calls, 1)
+assert_eq("schema-dot warm repeat table dedupe", label_count(warm_repeat.items, "accounts"), 1)
 
 cache:build_from_schemas({ { name = "app" } })
 local preserved = request_completion("select * from app.")
@@ -353,6 +384,7 @@ print("ARCH14_LUA_DEFENSE_FILTER_OK=true")
 print("ARCH14_LSP_SCHEMA_DOT_INCOMPLETE_OK=true")
 print("ARCH14_LSP_SCHEMA_DOT_WARM_OK=true")
 print("ARCH14_LSP_SCHEMA_DOT_NO_SYNC_FETCH=true")
+print("LSP_COMPLETION_SCHEMA_DOT_DEDUP_PASS=true")
 print("ARCH14_QUEUE_FULL_TRUTHFUL_LSP=true")
 print("ARCH14_LSP_TRANSPORT_FAIL_TRUTHFUL=true")
 print("ARCH14_OUT_OF_SCOPE_HINT_OK=true")

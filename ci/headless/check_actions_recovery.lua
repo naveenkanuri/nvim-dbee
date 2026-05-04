@@ -8,6 +8,7 @@
 
 package.loaded["dbee"] = nil
 package.loaded["dbee.api"] = nil
+package.loaded["dbee.api.state"] = nil
 package.loaded["dbee.config"] = nil
 package.loaded["dbee.install"] = nil
 
@@ -93,6 +94,60 @@ local function find_source_conn(id)
   return nil
 end
 
+local function conn_ids(conns, previous_conns)
+  local ids = {}
+  for _, conn in ipairs(conns or {}) do
+    local include = true
+    for _, previous in ipairs(previous_conns or {}) do
+      if conn.id == previous.id and (conn.type ~= previous.type or conn.url ~= previous.url) then
+        include = false
+        break
+      end
+    end
+    if include and conn and conn.id then
+      ids[#ids + 1] = conn.id
+    end
+  end
+  return ids
+end
+
+local function build_rewrites(previous_conns, next_conns)
+  local rewrites = {}
+  for _, previous in ipairs(previous_conns or {}) do
+    local mapped = nil
+    local matches = {}
+    for _, candidate in ipairs(next_conns or {}) do
+      if candidate.id == previous.id
+        and candidate.type == previous.type
+        and candidate.url == previous.url
+      then
+        mapped = candidate
+        break
+      end
+      if candidate.id ~= previous.id
+        and candidate.type == previous.type
+        and candidate.url == previous.url
+      then
+        matches[#matches + 1] = candidate
+      end
+    end
+    if not mapped then
+      if #matches == 1 then
+        mapped = matches[1]
+      elseif #previous_conns == 1 and #next_conns == 1 then
+        mapped = next_conns[1]
+      end
+    end
+    if mapped and mapped.id ~= previous.id then
+      rewrites[#rewrites + 1] = {
+        old_conn_id = previous.id,
+        new_conn_id = mapped.id,
+      }
+    end
+  end
+  return rewrites
+end
+
 package.loaded["dbee.api"] = {
   core = {
     is_loaded = function()
@@ -112,6 +167,13 @@ package.loaded["dbee.api"] = {
         return {}
       end
       return source_conns
+    end,
+    connection_get_params = function(id)
+      local conn = find_source_conn(id)
+      if not conn then
+        error("unknown_conn:" .. tostring(id))
+      end
+      return conn
     end,
     source_reload = function(id)
       if id ~= "source_test" then
@@ -183,6 +245,33 @@ package.loaded["dbee.api"] = {
         toggle_drawer = function() end,
       },
     }
+  end,
+}
+
+local handler = {
+  source_reload_reconnect = function(_, source_id)
+    local previous_conns = vim.deepcopy(source_conns)
+    local current_before = current_conn and current_conn.id or nil
+    package.loaded["dbee.api"].core.source_reload(source_id)
+    return {
+      source_id = source_id,
+      retired_conn_ids = conn_ids(previous_conns),
+      new_conn_ids = conn_ids(source_conns, previous_conns),
+      current_conn_id_before = current_before,
+      current_conn_id_after = current_conn and current_conn.id or nil,
+      rewrites = build_rewrites(previous_conns, source_conns),
+    }
+  end,
+  migrate_structure_flights = function() end,
+  emit_connection_invalidated_silent = function() end,
+  connection_clear_current = function()
+    current_conn = nil
+  end,
+}
+
+package.loaded["dbee.api.state"] = {
+  handler = function()
+    return handler
   end,
 }
 
@@ -281,7 +370,7 @@ reload_mode = "ambiguous_url"
 current_conn = make_conn("conn_old_amb", { type = "oracle", url = "oracle://ambiguous" })
 source_conns = { current_conn }
 local _, ambiguous_err = dbee.reconnect_current_connection({ notify = false })
-if not ambiguous_err or not tostring(ambiguous_err):find("URL mapping is ambiguous", 1, true) then
+if not ambiguous_err or not tostring(ambiguous_err):find("unable to map reloaded connection", 1, true) then
   fail("ambiguous_url_error:" .. tostring(ambiguous_err))
   return
 end
@@ -363,4 +452,5 @@ print("ACTIONS_RECOVERY_AMBIGUOUS_URL_OK=true")
 print("ACTIONS_RECOVERY_ABSENT_OK=true")
 print("ACTIONS_RECOVERY_SOURCE_LOOKUP_OK=true")
 print("ACTIONS_RECOVERY_CORE_GUARD_OK=true")
+print("ACTIONS_RECOVERY_ALL_PASS=true")
 vim.cmd("qa!")

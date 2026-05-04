@@ -133,6 +133,53 @@ local function load_runtime(opts)
     return nil
   end
 
+  local function conn_ids(conns)
+    local ids = {}
+    for _, conn in ipairs(conns or {}) do
+      if conn and conn.id then
+        ids[#ids + 1] = conn.id
+      end
+    end
+    return ids
+  end
+
+  local function build_rewrites(previous_conns, next_conns)
+    local rewrites = {}
+    for _, previous in ipairs(previous_conns or {}) do
+      local mapped = nil
+      local matches = {}
+      for _, candidate in ipairs(next_conns or {}) do
+        if candidate.id == previous.id
+          and candidate.type == previous.type
+          and candidate.url == previous.url
+        then
+          mapped = candidate
+          break
+        end
+        if candidate.id ~= previous.id
+          and candidate.type == previous.type
+          and candidate.url == previous.url
+        then
+          matches[#matches + 1] = candidate
+        end
+      end
+      if not mapped then
+        if #matches == 1 then
+          mapped = matches[1]
+        elseif #previous_conns == 1 and #next_conns == 1 then
+          mapped = next_conns[1]
+        end
+      end
+      if mapped and mapped.id ~= previous.id then
+        rewrites[#rewrites + 1] = {
+          old_conn_id = previous.id,
+          new_conn_id = mapped.id,
+        }
+      end
+    end
+    return rewrites
+  end
+
   local function make_call(conn_id, query, exec_opts)
     local call_id = "call_exec_" .. tostring(#env.executed + 1)
     local call = {
@@ -323,6 +370,41 @@ local function load_runtime(opts)
           toggle_drawer = function() end,
         },
       }
+    end,
+  }
+
+  local handler = {
+    source_reload_reconnect = function(_, source_id)
+      if source_id ~= "source_test" then
+        error("unexpected_source:" .. tostring(source_id))
+      end
+      local previous_conns = vim.deepcopy(env.source_conns)
+      local current_before = env.current_conn and env.current_conn.id or nil
+      reload_source()
+      return {
+        source_id = source_id,
+        retired_conn_ids = conn_ids(previous_conns),
+        new_conn_ids = conn_ids(env.source_conns),
+        current_conn_id_before = current_before,
+        current_conn_id_after = env.current_conn and env.current_conn.id or nil,
+        rewrites = build_rewrites(previous_conns, env.source_conns),
+      }
+    end,
+    migrate_structure_flights = function() end,
+    emit_connection_invalidated_silent = function(_, reason, result)
+      env.last_invalidated = { reason = reason, result = result }
+    end,
+    connection_clear_current = function()
+      env.current_conn = nil
+    end,
+  }
+
+  package.loaded["dbee.api.state"] = {
+    handler = function()
+      return handler
+    end,
+    is_ui_loaded = function()
+      return env.ui_loaded
     end,
   }
 

@@ -144,7 +144,7 @@ assert_match("notif02_msg", notifications[1].msg, "No SQL found at cursor")
 assert_eq("notif02_level", notifications[1].level, vim.log.levels.WARN)
 
 -- ---------------------------------------------------------------------------
--- NOTIF-04: Drawer operation failure (exercise real convert.lua closures)
+-- NOTIF-04: Drawer operation failure (exercise current convert.lua closures)
 -- ---------------------------------------------------------------------------
 
 clear_notifications()
@@ -190,12 +190,28 @@ end
 
 local convert = require("dbee.ui.drawer.convert")
 
--- Mock handler whose source_add_connection throws
+local function find_node_by_id(nodes, id)
+  for _, node in ipairs(nodes or {}) do
+    if node.id == id then
+      return node
+    end
+    if node._children then
+      local child = find_node_by_id(node._children, id)
+      if child then
+        return child
+      end
+    end
+  end
+  return nil
+end
+
+-- Mock handler with a creatable source. Add-connection is now owned by DrawerUI
+-- actions/wizard, so convert.handler_nodes() should not emit the legacy add child.
 local mock_source = {
   name = function()
     return "test-source"
   end,
-  create = function() end, -- presence enables the "add" node
+  create = function() end, -- presence marks the source as creatable
 }
 
 local mock_handler = {
@@ -213,7 +229,6 @@ local mock_result = {}
 
 local nodes = convert.handler_nodes(mock_handler, mock_result, {})
 
--- Find the "add" node (it's a child of the source node)
 local add_node = nil
 for _, node in ipairs(nodes) do
   if node._children then
@@ -229,31 +244,13 @@ for _, node in ipairs(nodes) do
   end
 end
 
-if not add_node then
-  fail("notif04_add_node_not_found")
+if add_node then
+  fail("notif04_legacy_add_node_present")
   return
 end
 
--- Invoke the action closure: triggers float_prompt stub -> callback -> pcall -> error -> utils.log
-add_node.action_1(function() end)
-
--- Assert notification was emitted for the failed add
-local found_add_error = false
-for _, n in ipairs(notifications) do
-  if n.msg:find("Failed to add connection", 1, true) and n.level == vim.log.levels.ERROR then
-    if n.opts and n.opts.title == "nvim-dbee" then
-      found_add_error = true
-      break
-    end
-  end
-end
-
-if not found_add_error then
-  fail("notif04_add_error_not_surfaced: notifications=" .. vim.inspect(notifications))
-  return
-end
-
--- NOTIF-04b: source_update_connection failure
+-- NOTIF-04b: edit action without DrawerUI wizard bridge warns instead of calling
+-- the legacy source_update_connection closure directly.
 clear_notifications()
 
 local mock_handler_update = {
@@ -275,39 +272,28 @@ local mock_handler_update = {
 mock_source.update = function() end
 
 local nodes_upd = convert.handler_nodes(mock_handler_update, mock_result, {})
-local edit_node = nil
-for _, node in ipairs(nodes_upd) do
-  if node._children then
-    for _, child in ipairs(node._children) do
-      if child.id == "conn1" then
-        edit_node = child
-        break
-      end
-    end
-  end
-  if edit_node then break end
-end
+local edit_node = find_node_by_id(nodes_upd, "conn1")
 
 if not edit_node or not edit_node.action_2 then
   fail("notif04_edit_node_not_found")
   return
 end
 
--- action_2 is edit; triggers float_prompt stub -> callback -> pcall -> error -> utils.log
+-- action_2 is edit; without the DrawerUI wizard bridge it surfaces a warning.
 edit_node.action_2(function() end)
 
-local found_update_error = false
+local found_update_warning = false
 for _, n in ipairs(notifications) do
-  if n.msg:find("Failed to update connection", 1, true) and n.level == vim.log.levels.ERROR then
+  if n.msg:find("Wizard-backed connection editing is unavailable", 1, true) and n.level == vim.log.levels.WARN then
     if n.opts and n.opts.title == "nvim-dbee" then
-      found_update_error = true
+      found_update_warning = true
       break
     end
   end
 end
 
-if not found_update_error then
-  fail("notif04_update_error_not_surfaced: notifications=" .. vim.inspect(notifications))
+if not found_update_warning then
+  fail("notif04_edit_unavailable_not_surfaced: notifications=" .. vim.inspect(notifications))
   return
 end
 
@@ -343,18 +329,7 @@ package.loaded["dbee.ui.drawer.convert"] = nil
 convert = require("dbee.ui.drawer.convert")
 
 local nodes_del = convert.handler_nodes(mock_handler_delete, mock_result, {})
-local del_node = nil
-for _, node in ipairs(nodes_del) do
-  if node._children then
-    for _, child in ipairs(node._children) do
-      if child.id == "conn2" then
-        del_node = child
-        break
-      end
-    end
-  end
-  if del_node then break end
-end
+local del_node = find_node_by_id(nodes_del, "conn2")
 
 if not del_node or not del_node.action_3 then
   fail("notif04_delete_node_not_found")

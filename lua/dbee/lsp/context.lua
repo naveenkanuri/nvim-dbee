@@ -60,7 +60,7 @@ local sql_keywords_set = {
   alter = true, drop = true, null = true, is = true, like = true,
   between = true, exists = true, case = true, when = true, ["then"] = true,
   ["else"] = true, ["end"] = true, values = true, asc = true, desc = true,
-  recursive = true,
+  recursive = true, begin = true, declare = true,
 }
 
 ---@param raw string?
@@ -1340,6 +1340,58 @@ local function parse_statement_table_refs(statement, opts)
     end
   end
 
+  local plsql_block_context = false
+  do
+    local has_begin = false
+    local has_end = false
+    local has_declare = false
+    for _, token in ipairs(tokens) do
+      if token.depth == 0 then
+        local lower = token_lower(token)
+        if lower == "begin" then
+          has_begin = true
+        elseif lower == "end" then
+          has_end = true
+        elseif lower == "declare" then
+          has_declare = true
+        end
+      end
+    end
+    plsql_block_context = has_declare or (has_begin and has_end)
+  end
+
+  local function is_plsql_select_into(index)
+    if not plsql_block_context then
+      return false
+    end
+
+    local token = tokens[index]
+    if not token then
+      return false
+    end
+
+    local depth = token.depth
+    for cursor = index - 1, 1, -1 do
+      local candidate = tokens[cursor]
+      if candidate.depth < depth then
+        return false
+      end
+      if candidate.depth == depth then
+        local lower = token_lower(candidate)
+        if lower == "select" then
+          return true
+        end
+        if lower == "from" or lower == "join" or lower == "insert" or lower == "update"
+          or lower == "delete" or lower == "merge" or lower == "values" or lower == "set"
+          or lower == "begin" or lower == "declare" or lower == "end" then
+          return false
+        end
+      end
+    end
+
+    return false
+  end
+
   -- Collect CTE alias names defined via WITH name AS (...). These are NOT real tables;
   -- they're statement-local aliases. Excluding them prevents spurious "Unknown table"
   -- diagnostics on every CTE reference.
@@ -1393,7 +1445,8 @@ local function parse_statement_table_refs(statement, opts)
     local lower = token_lower(tokens[index])
     if lower == "from" and source_keyword_allowed(index) then
       parse_from_list(index + 1, tokens[index].depth)
-    elseif (lower == "join" or lower == "update" or lower == "into") and source_keyword_allowed(index) then
+    elseif (lower == "join" or lower == "update"
+      or (lower == "into" and not is_plsql_select_into(index))) and source_keyword_allowed(index) then
       parse_single_after(lower, index + 1, 1, tokens[index].depth)
     end
     index = index + 1

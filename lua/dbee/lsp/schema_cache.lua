@@ -203,6 +203,7 @@ function SchemaCache:new(handler, conn_id)
     async_inflight = {},
     async_chains = {},
     async_failed = {},
+    schema_table_completion_inflight = {},
     completion_refresh_eligible = {},
     completion_refresh_pending = {},
     completion_refresh_notifier = nil,
@@ -372,6 +373,37 @@ function SchemaCache:_queue_completion_refresh_notification(probe, request_id, r
   end)
 end
 
+---@private
+---@param schema string
+---@param root_epoch integer
+---@return string
+function SchemaCache:_schema_table_completion_key(schema, root_epoch)
+  return table.concat({
+    tostring(self.conn_id or ""),
+    schema_name_canonical.singleflight_key(schema, self.fold_id),
+    tostring(root_epoch or 0),
+    tostring(self.schema_filter_signature or ""),
+  }, "\31")
+end
+
+---@private
+---@param schema string?
+---@param root_epoch integer?
+function SchemaCache:_clear_schema_table_completion_inflight(schema, root_epoch)
+  self.schema_table_completion_inflight = self.schema_table_completion_inflight or {}
+  if not schema then
+    self.schema_table_completion_inflight = {}
+    return
+  end
+
+  local schema_key = schema_name_canonical.singleflight_key(schema, self.fold_id)
+  for key, entry in pairs(self.schema_table_completion_inflight) do
+    if entry.schema_key == schema_key and (root_epoch == nil or entry.root_epoch == root_epoch) then
+      self.schema_table_completion_inflight[key] = nil
+    end
+  end
+end
+
 --- Build the cache from metadata query result rows.
 --- Each row is a map with schema_name, table_name, obj_type keys (case-insensitive).
 ---@param rows table[] array of {schema_name: string, table_name: string, obj_type: string}
@@ -386,6 +418,7 @@ function SchemaCache:build_from_metadata_rows(rows, opts)
   self.schemas = {}
   self.tables = {}
   self.columns = {}
+  self:_clear_schema_table_completion_inflight()
   self:_reset_indexes()
 
   if not rows or #rows == 0 then
@@ -438,6 +471,7 @@ function SchemaCache:build_from_structure(structs, opts)
   self.schemas = {}
   self.tables = {}
   self.columns = {}
+  self:_clear_schema_table_completion_inflight()
   self:_reset_indexes()
 
   if not structs or structs == vim.NIL then
@@ -502,6 +536,7 @@ function SchemaCache:build_from_schemas(schemas, opts)
   self.column_lru = {}
   self.loaded_schemas = {}
   self.root_mode = "schemas_only"
+  self:_clear_schema_table_completion_inflight()
   self:_reset_indexes()
 
   for _, schema in ipairs(schemas or {}) do
@@ -2602,7 +2637,22 @@ function SchemaCache:get_schema_table_completion_async(schema, opts)
   end
 
   local root_epoch = self:_root_epoch({})
+  local inflight_key = self:_schema_table_completion_key(actual_schema, root_epoch)
+  if self.schema_table_completion_inflight[inflight_key] then
+    return {
+      items = {},
+      is_incomplete = true,
+      root_epoch = root_epoch,
+      reason = "in_flight",
+    }
+  end
+
   local request_id = self:_next_request_id()
+  self.schema_table_completion_inflight[inflight_key] = {
+    schema_key = schema_name_canonical.singleflight_key(actual_schema, self.fold_id),
+    root_epoch = root_epoch,
+    request_id = request_id,
+  }
   local request = self.handler:connection_get_schema_objects_singleflight({
     conn_id = self.conn_id,
     schema = actual_schema,
@@ -2615,6 +2665,7 @@ function SchemaCache:get_schema_table_completion_async(schema, opts)
     end,
   })
   if request and request.error_kind then
+    self.schema_table_completion_inflight[inflight_key] = nil
     return {
       items = {},
       is_incomplete = false,
@@ -3119,6 +3170,11 @@ function SchemaCache:on_schema_objects_loaded(data)
   if not data or data.conn_id ~= self.conn_id then
     return false
   end
+  local payload_epoch = data.root_epoch ~= nil and (tonumber(data.root_epoch) or 0) or nil
+  if data.schema and data.schema ~= "" then
+    local clear_schema = self:find_schema(data.schema, { quoted = true }) or data.schema
+    self:_clear_schema_table_completion_inflight(clear_schema, payload_epoch)
+  end
   if data.error or data.error_kind then
     return false
   end
@@ -3129,7 +3185,7 @@ function SchemaCache:on_schema_objects_loaded(data)
   if not schema_filter.matches(schema, self.schema_scope) then
     return false
   end
-  local payload_epoch = tonumber(data.root_epoch) or 0
+  payload_epoch = payload_epoch or 0
   if not epoch_authority.admit_write(self, payload_epoch, epoch_authority.cache_epoch(self)) then
     return false
   end
@@ -3172,6 +3228,7 @@ function SchemaCache:cancel_async(_reason, _opts)
   self.async_inflight = {}
   self.async_chains = {}
   self.async_failed = {}
+  self.schema_table_completion_inflight = {}
   self.completion_refresh_eligible = {}
   self.completion_refresh_pending = {}
   self:_bump_disk_work_generation()
