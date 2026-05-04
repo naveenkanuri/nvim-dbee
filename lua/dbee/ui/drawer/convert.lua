@@ -747,10 +747,6 @@ function M.help_node(mappings)
     type = "help",
   }, children) --[[@as DrawerUINode]]
 
-  if utils.once("help_expand_once_id") then
-    node:expand()
-  end
-
   return node
 end
 

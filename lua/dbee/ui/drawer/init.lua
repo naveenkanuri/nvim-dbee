@@ -3684,6 +3684,141 @@ function DrawerUI:get_actions()
         end,
       })
     end,
+    move_connections_to_folder = function()
+      local vstart = vim.fn.line("v")
+      local vend = vim.fn.line(".")
+      if vstart > vend then
+        vstart, vend = vend, vstart
+      end
+      vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "x", false)
+
+      local conn_ids = {}
+      local seen = {}
+      for line = vstart, vend do
+        local node = self.tree:get_node(line)
+        if node then
+          local cid = resolve_connection_ancestor(self.tree, node)
+          if cid and not seen[cid] then
+            seen[cid] = true
+            conn_ids[#conn_ids + 1] = cid
+          end
+        end
+      end
+
+      if #conn_ids == 0 then
+        utils.log("warn", "No connections in visual selection")
+        return
+      end
+
+      local first_source_id, source_meta
+      for _, cid in ipairs(conn_ids) do
+        local sm = resolve_connection_source_meta(handler, cid)
+        if not sm then
+          utils.log("warn", "Connection source not found for " .. tostring(cid))
+          return
+        end
+        if not first_source_id then
+          first_source_id = sm.id
+          source_meta = sm
+        elseif sm.id ~= first_source_id then
+          utils.log("warn", "All selected connections must belong to the same source")
+          return
+        end
+      end
+
+      local source_id = first_source_id
+      local source = handler.sources[source_id]
+      if not source or type(source.supports_folders) ~= "function" or not source:supports_folders() then
+        utils.log("warn", "Source does not support folders")
+        return
+      end
+
+      perform_action({
+        mode = "refresh_after_action",
+        action = function(on_done, select, input)
+          local folders = handler:source_get_folders(source_id)
+          local UNGROUPED_LABEL = "(ungrouped)"
+          local NEW_FOLDER_LABEL = "+ New folder…"
+          local items = { UNGROUPED_LABEL }
+          local label_to_target = { [UNGROUPED_LABEL] = nil }
+          local used = { [UNGROUPED_LABEL] = true }
+
+          local function unique_label(used_set, base, folder_id)
+            if not used_set[base] then
+              return base
+            end
+            folder_id = tostring(folder_id or "")
+            local tail_len = 6
+            while true do
+              local candidate = base .. " [" .. folder_id:sub(-tail_len) .. "]"
+              if not used_set[candidate] then
+                return candidate
+              end
+              if tail_len >= #folder_id then
+                local counter = 1
+                while used_set[candidate .. "#" .. tostring(counter)] do
+                  counter = counter + 1
+                end
+                return candidate .. "#" .. tostring(counter)
+              end
+              tail_len = tail_len + 4
+            end
+          end
+
+          for _, folder in ipairs(folders) do
+            local base = "📁 " .. tostring(folder.name)
+            local label = unique_label(used, base, folder.id)
+            used[label] = true
+            items[#items + 1] = label
+            label_to_target[label] = folder.id
+          end
+          items[#items + 1] = NEW_FOLDER_LABEL
+          used[NEW_FOLDER_LABEL] = true
+          label_to_target[NEW_FOLDER_LABEL] = "__new__"
+
+          local move_all = function(target)
+            _guarded_folder_mutation("move " .. #conn_ids .. " connection(s)", function()
+              for _, cid in ipairs(conn_ids) do
+                handler:source_move_connection(source_id, cid, target)
+              end
+            end, on_done)
+          end
+
+          select {
+            title = "Move " .. #conn_ids .. " connection(s) to folder",
+            items = items,
+            on_confirm = function(selection)
+              if selection ~= UNGROUPED_LABEL and label_to_target[selection] == nil then
+                on_done()
+                return
+              end
+
+              local target = label_to_target[selection]
+              if target == "__new__" then
+                input {
+                  title = "New folder name",
+                  default = "",
+                  on_confirm = function(new_name)
+                    if new_name and new_name ~= "" then
+                      _guarded_folder_mutation("create+move " .. #conn_ids, function()
+                        local id = handler:source_add_folder(source_id, new_name)
+                        for _, cid in ipairs(conn_ids) do
+                          handler:source_move_connection(source_id, cid, id)
+                        end
+                      end, on_done)
+                    else
+                      on_done()
+                    end
+                  end,
+                }
+              else
+                move_all(target)
+              end
+            end,
+          }
+        end,
+      })
+    end,
     edit_connection = function()
       local node = current_connection_node("edit")
       if not node then

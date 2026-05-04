@@ -91,6 +91,12 @@ config.default = {
       { key = "t", mode = "n", action = "test_connection" },
       { key = "A", mode = "n", action = "activate_connection" },
       { key = "R", mode = "n", action = "refresh" },
+      -- folder management (Phase 15)
+      { key = "F", mode = "n", action = "add_folder" },
+      { key = "rf", mode = "n", action = "rename_folder" },
+      { key = "df", mode = "n", action = "delete_folder" },
+      { key = "mf", mode = "n", action = "move_connection_to_folder" },
+      { key = "mf", mode = "v", action = "move_connections_to_folder" },
       { key = "<CR>", mode = "n", action = "toggle" },
       { key = "gd", mode = "n", action = "fk_navigate" },
       -- generate call template for procedure/function
