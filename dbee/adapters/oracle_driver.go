@@ -396,8 +396,8 @@ const oracleColumnsRichSQL = `
 	       col.data_type,
 	       col.nullable
 	FROM all_tab_columns col
-	WHERE col.owner = :schema
-	  AND col.table_name = :table
+	WHERE col.owner = :p_schema
+	  AND col.table_name = :p_table
 	ORDER BY col.column_id`
 
 const oraclePrimaryKeysSQL = `
@@ -408,8 +408,8 @@ const oraclePrimaryKeysSQL = `
 	  ON ac.owner = acc.owner
 	 AND ac.constraint_name = acc.constraint_name
 	WHERE ac.constraint_type = 'P'
-	  AND ac.owner = :schema
-	  AND ac.table_name = :table
+	  AND ac.owner = :p_schema
+	  AND ac.table_name = :p_table
 	ORDER BY acc.position`
 
 const oracleForeignKeysSQL = `
@@ -431,8 +431,8 @@ const oracleForeignKeysSQL = `
 	 AND rac.constraint_name = racc.constraint_name
 	 AND racc.position = acc.position
 	WHERE ac.constraint_type = 'R'
-	  AND ac.owner = :schema
-	  AND ac.table_name = :table
+	  AND ac.owner = :p_schema
+	  AND ac.table_name = :p_table
 	ORDER BY ac.constraint_name, acc.position`
 
 const oracleIndexesSQL = `
@@ -455,14 +455,14 @@ const oracleIndexesSQL = `
 	 AND ac.index_owner = i.owner
 	 AND ac.index_name = i.index_name
 	 AND ac.constraint_type = 'P'
-	WHERE i.table_owner = :schema
-	  AND i.table_name = :table
+	WHERE i.table_owner = :p_schema
+	  AND i.table_name = :p_table
 	ORDER BY i.index_name, ic.column_position`
 
 const oracleSequencesSQL = `
 	SELECT sequence_name, increment_by, cache_size
 	FROM all_sequences
-	WHERE sequence_owner = :schema
+	WHERE sequence_owner = :p_schema
 	ORDER BY sequence_name`
 
 func (d *oracleDriver) SupportsRichMetadata() core.RichMetadataSupport {
@@ -481,7 +481,7 @@ func (d *oracleDriver) ColumnsRich(opts *core.TableOptions) ([]*core.Column, err
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	rows, err := d.c.QueryWithArgs(ctx, oracleColumnsRichSQL, sql.Named("schema", opts.Schema), sql.Named("table", opts.Table))
+	rows, err := d.c.QueryWithArgs(ctx, oracleColumnsRichSQL, sql.Named("p_schema", opts.Schema), sql.Named("p_table", opts.Table))
 	if err != nil {
 		return nil, err
 	}
@@ -530,7 +530,7 @@ func (d *oracleDriver) ColumnsRich(opts *core.TableOptions) ([]*core.Column, err
 }
 
 func (d *oracleDriver) applyOraclePrimaryKeys(ctx context.Context, opts *core.TableOptions, byName map[string]*core.Column) error {
-	rows, err := d.c.QueryWithArgs(ctx, oraclePrimaryKeysSQL, sql.Named("schema", opts.Schema), sql.Named("table", opts.Table))
+	rows, err := d.c.QueryWithArgs(ctx, oraclePrimaryKeysSQL, sql.Named("p_schema", opts.Schema), sql.Named("p_table", opts.Table))
 	if err != nil {
 		return err
 	}
@@ -570,7 +570,7 @@ type oracleFKRow struct {
 }
 
 func (d *oracleDriver) applyOracleForeignKeys(ctx context.Context, opts *core.TableOptions, byName map[string]*core.Column) error {
-	rows, err := d.c.QueryWithArgs(ctx, oracleForeignKeysSQL, sql.Named("schema", opts.Schema), sql.Named("table", opts.Table))
+	rows, err := d.c.QueryWithArgs(ctx, oracleForeignKeysSQL, sql.Named("p_schema", opts.Schema), sql.Named("p_table", opts.Table))
 	if err != nil {
 		return err
 	}
@@ -661,7 +661,7 @@ func (d *oracleDriver) Indexes(opts *core.TableOptions) ([]*core.Index, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	rows, err := d.c.QueryWithArgs(ctx, oracleIndexesSQL, sql.Named("schema", opts.Schema), sql.Named("table", opts.Table))
+	rows, err := d.c.QueryWithArgs(ctx, oracleIndexesSQL, sql.Named("p_schema", opts.Schema), sql.Named("p_table", opts.Table))
 	if err != nil {
 		return nil, err
 	}
@@ -762,7 +762,7 @@ func (d *oracleDriver) Sequences(schema string) ([]*core.Sequence, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	rows, err := d.c.QueryWithArgs(ctx, oracleSequencesSQL, sql.Named("schema", schema))
+	rows, err := d.c.QueryWithArgs(ctx, oracleSequencesSQL, sql.Named("p_schema", schema))
 	if err != nil {
 		return nil, err
 	}
