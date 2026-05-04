@@ -1778,6 +1778,9 @@ function DrawerUI:new(handler, editor, result, opts)
     mappings = opts.mappings or {},
     candies = candies,
     disable_help = opts.disable_help or false,
+    dynamic_width = opts.dynamic_width ~= false,
+    dynamic_width_min = opts.dynamic_width_min or 30,
+    dynamic_width_max = opts.dynamic_width_max,
     wizard_defaults = (opts.wizard and opts.wizard.defaults) or {},
     current_conn_id = current_conn.id,
     current_note_id = current_note.id,
@@ -1879,6 +1882,7 @@ function DrawerUI:new(handler, editor, result, opts)
   end)
 
   o:_ensure_connection_invalidated_consumer()
+  o:_wrap_tree_render()
 
   return o
 end
@@ -1906,6 +1910,7 @@ function DrawerUI:rebuild_buffer()
   self.bufnr = self:_create_drawer_buffer()
   self.tree = self:create_tree(self.bufnr)
   common.configure_buffer_mappings(self.bufnr, self:get_actions(), self.mappings)
+  self:_wrap_tree_render()
 
   if reopen_winid and vim.api.nvim_win_is_valid(reopen_winid) then
     self.winid = reopen_winid
@@ -4449,6 +4454,51 @@ function DrawerUI:refresh()
   end
 end
 
+function DrawerUI:_resize_to_fit()
+  if not self.dynamic_width then
+    return
+  end
+  if not self.winid or not vim.api.nvim_win_is_valid(self.winid) then
+    return
+  end
+  if not self.bufnr or not vim.api.nvim_buf_is_valid(self.bufnr) then
+    return
+  end
+
+  local lines = vim.api.nvim_buf_get_lines(self.bufnr, 0, -1, false)
+  local max_w = 0
+  for _, line in ipairs(lines) do
+    local w = vim.fn.strdisplaywidth(line)
+    if w > max_w then
+      max_w = w
+    end
+  end
+
+  local cap = self.dynamic_width_max or math.max(40, vim.o.columns - 20)
+  local floor_w = self.dynamic_width_min or 30
+  local info = vim.fn.getwininfo(self.winid)[1]
+  local overhead = (info and info.textoff) or 0
+  local target = math.max(floor_w, math.min(cap, max_w + overhead + 2))
+
+  pcall(vim.api.nvim_win_set_width, self.winid, target)
+end
+
+function DrawerUI:_wrap_tree_render()
+  if not self.tree or self.tree._dbee_render_wrapped then
+    return
+  end
+  local original = self.tree.render
+  local self_ref = self
+  self.tree.render = function(t, ...)
+    local result = original(t, ...)
+    vim.schedule(function()
+      self_ref:_resize_to_fit()
+    end)
+    return result
+  end
+  self.tree._dbee_render_wrapped = true
+end
+
 ---@param winid integer
 function DrawerUI:show(winid)
   if not self.bufnr or not vim.api.nvim_buf_is_valid(self.bufnr) then
@@ -4462,6 +4512,9 @@ function DrawerUI:show(winid)
     return
   end
   self:refresh()
+  vim.schedule(function()
+    self:_resize_to_fit()
+  end)
 end
 
 return DrawerUI

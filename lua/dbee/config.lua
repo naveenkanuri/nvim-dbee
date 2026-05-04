@@ -83,6 +83,12 @@ config.default = {
 
     -- show help or not
     disable_help = false,
+    -- auto-resize drawer width to fit longest visible line (Phase 16+ ER)
+    -- set to false to keep fixed width
+    dynamic_width = true,
+    dynamic_width_min = 30,
+    -- nil → cap at floor(vim.o.columns / 2)
+    dynamic_width_max = nil,
     -- mappings for the buffer
     mappings = {
       { key = "a", mode = "n", action = "add_connection" },
