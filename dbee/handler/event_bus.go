@@ -370,13 +370,17 @@ func columnsToLua(columns []*core.Column) string {
 			continue
 		}
 		b.WriteString(fmt.Sprintf(
-			`{name=%q,type=%q,nullable=%s,primary_key=%t,primary_key_ordinal=%d,foreign_keys=%s}`,
+			`{name=%q,type=%q,nullable=%s,primary_key=%t,primary_key_ordinal=%d,foreign_keys=%s,generated=%s,identity=%s,default=%s,serial_sequence=%s}`,
 			c.Name,
 			c.Type,
 			nullableBoolToLua(c.Nullable),
 			c.PrimaryKey,
 			c.PrimaryKeyOrdinal,
 			fkRefsToLua(c.ForeignKeys),
+			luaOptionalString(c.Generated),
+			luaOptionalString(c.Identity),
+			luaOptionalString(c.Default),
+			luaOptionalString(c.SerialSequence),
 		))
 	}
 	b.WriteString("}")
@@ -424,7 +428,7 @@ func indexesToLua(indexes []*core.Index) string {
 			continue
 		}
 		b.WriteString(fmt.Sprintf(
-			`{name=%q,schema=%q,table=%q,columns=%s,orders=%s,unique=%t,pk_backed=%t}`,
+			`{name=%q,schema=%q,table=%q,columns=%s,orders=%s,unique=%t,pk_backed=%t,include_columns=%s}`,
 			index.Name,
 			index.Schema,
 			index.Table,
@@ -432,6 +436,7 @@ func indexesToLua(indexes []*core.Index) string {
 			stringsToLua(index.Orders),
 			index.Unique,
 			index.PKBacked,
+			stringsToLua(index.IncludeColumns),
 		))
 	}
 	b.WriteString("}")

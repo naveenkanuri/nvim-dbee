@@ -263,6 +263,10 @@ func (cw *columnWrap) MarshalMsgPack(enc *msgpack.Encoder) error {
 		PrimaryKey        bool         `msgpack:"primary_key,omitempty"`
 		PrimaryKeyOrdinal int          `msgpack:"primary_key_ordinal,omitempty"`
 		ForeignKeys       []*fkRefWrap `msgpack:"foreign_keys,omitempty"`
+		Generated         string       `msgpack:"generated,omitempty"`
+		Identity          string       `msgpack:"identity,omitempty"`
+		Default           string       `msgpack:"default,omitempty"`
+		SerialSequence    string       `msgpack:"serial_sequence,omitempty"`
 	}{
 		Name:              cw.column.Name,
 		Type:              cw.column.Type,
@@ -270,6 +274,10 @@ func (cw *columnWrap) MarshalMsgPack(enc *msgpack.Encoder) error {
 		PrimaryKey:        cw.column.PrimaryKey,
 		PrimaryKeyOrdinal: cw.column.PrimaryKeyOrdinal,
 		ForeignKeys:       wrapFKRefs(cw.column.ForeignKeys),
+		Generated:         cw.column.Generated,
+		Identity:          cw.column.Identity,
+		Default:           cw.column.Default,
+		SerialSequence:    cw.column.SerialSequence,
 	})
 }
 
@@ -307,21 +315,23 @@ func (iw *indexWrap) MarshalMsgPack(enc *msgpack.Encoder) error {
 		return enc.Encode(nil)
 	}
 	return enc.Encode(&struct {
-		Name     string   `msgpack:"name"`
-		Schema   string   `msgpack:"schema,omitempty"`
-		Table    string   `msgpack:"table,omitempty"`
-		Columns  []string `msgpack:"columns"`
-		Orders   []string `msgpack:"orders,omitempty"`
-		Unique   bool     `msgpack:"unique,omitempty"`
-		PKBacked bool     `msgpack:"pk_backed,omitempty"`
+		Name           string   `msgpack:"name"`
+		Schema         string   `msgpack:"schema,omitempty"`
+		Table          string   `msgpack:"table,omitempty"`
+		Columns        []string `msgpack:"columns"`
+		Orders         []string `msgpack:"orders,omitempty"`
+		Unique         bool     `msgpack:"unique,omitempty"`
+		PKBacked       bool     `msgpack:"pk_backed,omitempty"`
+		IncludeColumns []string `msgpack:"include_columns,omitempty"`
 	}{
-		Name:     iw.index.Name,
-		Schema:   iw.index.Schema,
-		Table:    iw.index.Table,
-		Columns:  iw.index.Columns,
-		Orders:   iw.index.Orders,
-		Unique:   iw.index.Unique,
-		PKBacked: iw.index.PKBacked,
+		Name:           iw.index.Name,
+		Schema:         iw.index.Schema,
+		Table:          iw.index.Table,
+		Columns:        iw.index.Columns,
+		Orders:         iw.index.Orders,
+		Unique:         iw.index.Unique,
+		PKBacked:       iw.index.PKBacked,
+		IncludeColumns: iw.index.IncludeColumns,
 	})
 }
 
