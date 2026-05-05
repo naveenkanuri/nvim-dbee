@@ -287,8 +287,10 @@ local local_note = {
 do
   set_notes()
   dbee.pick_notes()
-  assert_eq("empty_state_picker_calls", #runtime.picker_calls, 0)
-  assert_match("empty_state_info_log", last_notification().msg, "No notes found")
+  assert_eq("empty_state_picker_calls", #runtime.picker_calls, 1)
+  local items = picker_items()
+  assert_true("empty_state_has_hint_row", #items >= 1 and items[1].kind == "hint")
+  assert_match("empty_state_hint_advertises_create", items[1].text, "<C-g>")
 end
 
 do
@@ -299,11 +301,11 @@ do
   assert_eq("global_only_section_calls", runtime.picker_section_calls, 1)
   assert_eq("global_only_flat_helper_unused", runtime.all_notes_calls, 0)
   local items = picker_items()
-  assert_eq("global_only_item_count", #items, 2)
-  assert_eq("global_only_header_kind", items[1].kind, "header")
-  assert_eq("global_only_header_text", items[1].text, "Global notes")
-  assert_eq("global_only_note_kind", items[2].kind, "note")
-  assert_match("global_only_tag_text", render_text(items[2]), "[global]")
+  assert_eq("global_only_item_count", #items, 3)
+  assert_eq("global_only_hint_kind", items[1].kind, "hint")
+  assert_eq("global_only_header_kind", items[2].kind, "header")
+  assert_eq("global_only_header_text", items[2].text, "Global notes")
+  assert_eq("global_only_note_kind", items[3].kind, "note")
   print("NOTES01_GLOBAL_ONLY_OK=true")
 end
 
@@ -336,9 +338,11 @@ do
   dbee.pick_notes()
   assert_eq("section_order_section_calls", runtime.picker_section_calls, 1)
   assert_eq("section_order_flat_helper_unused", runtime.all_notes_calls, 0)
+  local names = picker_item_names()
+  assert_eq("section_order_first_is_hint", picker_items()[1].kind, "hint")
   assert_eq(
     "section_order_names",
-    vim.inspect(picker_item_names()),
+    vim.inspect({ names[2], names[3], names[4], names[5] }),
     vim.inspect({
       "Global notes",
       "global-note.sql",
@@ -346,11 +350,7 @@ do
       "local-note.sql",
     })
   )
-  local items = picker_items()
-  assert_match("tag_global_render", render_text(items[2]), "[global]")
-  assert_match("tag_local_render", render_text(items[4]), "[local: Ready Connection]")
   print("NOTES01_SECTION_ORDER_OK=true")
-  print("NOTES01_TAGS_OK=true")
 end
 
 do
@@ -363,17 +363,18 @@ do
     local_notes = {},
   })
   dbee.pick_notes()
+  local names = picker_item_names()
+  assert_eq("local_empty_first_is_hint", picker_items()[1].kind, "hint")
   assert_eq(
     "local_empty_items",
-    vim.inspect(picker_item_names()),
+    vim.inspect({ names[2], names[3], names[4] }),
     vim.inspect({
       "Global notes",
       "global-note.sql",
       "Local notes (Ready Connection)",
-      "No local notes for Ready Connection",
     })
   )
-  local hint_item = picker_items()[4]
+  local hint_item = picker_items()[5]
   assert_eq("local_empty_hint_kind", hint_item.kind, "hint")
   assert_match("local_empty_hint_render", render_text(hint_item), "No local notes for Ready Connection")
   print("NOTES01_EMPTY_STATE_OK=true")
@@ -390,7 +391,8 @@ do
   })
   dbee.pick_notes()
   local items = picker_items()
-  assert_true("header_row_disabled", items[1].disabled == true)
+  assert_true("hint_row_disabled_top", items[1].disabled == true)
+  assert_true("header_row_disabled", items[2].disabled == true)
   assert_true("current_item_skips_header", picker_current_item().kind == "note")
   current_picker().list:move(-1, false)
   assert_true("move_up_skips_header", picker_current_item().kind == "note")
@@ -421,7 +423,7 @@ do
     local_notes = {},
   })
   dbee.pick_notes()
-  assert_true("hint_row_disabled", picker_items()[4].disabled == true)
+  assert_true("hint_row_disabled", picker_items()[5].disabled == true)
   assert_true("hint_row_skipped_by_navigation", picker_current_item().kind == "note")
 
   clear_notifications()
@@ -476,7 +478,7 @@ do
     local_notes = { local_note },
   })
   dbee.pick_notes()
-  local note_picker = confirm_with(picker_items()[2])
+  local note_picker = confirm_with(picker_items()[3])
   assert_eq("note_confirm_close_calls", note_picker.close_calls, 1)
   assert_eq("note_confirm_set_note_calls", #runtime.set_current_note_calls, 1)
   assert_eq("note_confirm_note_id", runtime.set_current_note_calls[1], global_note.id)
@@ -495,10 +497,12 @@ do
   })
   dbee.pick_notes()
   local items = picker_items()
-  assert_eq("local_only_item_count", #items, 2)
-  assert_eq("local_only_first_header", items[1].text, "Local notes (Ready Connection)")
-  assert_true("local_only_no_global_header", items[1].text ~= "Global notes")
-  assert_match("local_only_tag", render_text(items[2]), "[local: Ready Connection]")
+  assert_eq("local_only_item_count", #items, 5)
+  assert_eq("local_only_first_hint", items[1].kind, "hint")
+  assert_eq("local_only_global_header", items[2].text, "Global notes")
+  assert_eq("local_only_global_empty_hint_kind", items[3].kind, "hint")
+  assert_eq("local_only_local_header", items[4].text, "Local notes (Ready Connection)")
+  assert_eq("local_only_local_note", items[5].kind, "note")
   print("NOTES01_LOCAL_ONLY_OK=true")
 end
 
@@ -513,7 +517,7 @@ do
   })
   dbee.pick_notes()
   assert_eq("snapshot_single_open", runtime.picker_section_calls, 1)
-  local item = picker_items()[2]
+  local item = picker_items()[3]
   local fake_picker = confirm_with(item)
   assert_eq("snapshot_confirm_closes_note", fake_picker.close_calls, 1)
   assert_eq("snapshot_no_refetch_on_confirm", runtime.picker_section_calls, 1)
