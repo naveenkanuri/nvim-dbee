@@ -35,9 +35,11 @@ func newRedshiftListDatabasesMock(t *testing.T) (*redshiftDriver, sqlmock.Sqlmoc
 func TestPostgresListDatabasesNoAlternatives(t *testing.T) {
 	driver, mock := newPostgresListDatabasesMock(t)
 	mock.ExpectQuery(postgresCurrentDatabaseSQL).
-		WillReturnRows(sqlmock.NewRows([]string{"current_database"}).AddRow("dbee_test"))
+		WillReturnRows(sqlmock.NewRows([]string{"current_database"}).AddRow("dbee_test")).
+		RowsWillBeClosed()
 	mock.ExpectQuery(postgresAvailableDatabasesSQL).
-		WillReturnRows(sqlmock.NewRows([]string{"datname"}))
+		WillReturnRows(sqlmock.NewRows([]string{"datname"})).
+		RowsWillBeClosed()
 
 	current, available, err := driver.ListDatabases()
 	require.NoError(t, err)
@@ -49,11 +51,13 @@ func TestPostgresListDatabasesNoAlternatives(t *testing.T) {
 func TestPostgresListDatabasesWithAlternatives(t *testing.T) {
 	driver, mock := newPostgresListDatabasesMock(t)
 	mock.ExpectQuery(postgresCurrentDatabaseSQL).
-		WillReturnRows(sqlmock.NewRows([]string{"current_database"}).AddRow("dbee_test"))
+		WillReturnRows(sqlmock.NewRows([]string{"current_database"}).AddRow("dbee_test")).
+		RowsWillBeClosed()
 	mock.ExpectQuery(postgresAvailableDatabasesSQL).
 		WillReturnRows(sqlmock.NewRows([]string{"datname"}).
 			AddRow("analytics").
-			AddRow("archive"))
+			AddRow("archive")).
+		RowsWillBeClosed()
 
 	current, available, err := driver.ListDatabases()
 	require.NoError(t, err)
@@ -65,9 +69,11 @@ func TestPostgresListDatabasesWithAlternatives(t *testing.T) {
 func TestSQLServerListDatabasesNoAlternatives(t *testing.T) {
 	driver, mock := newSQLServerListDatabasesMock(t)
 	mock.ExpectQuery(sqlServerCurrentDatabaseSQL).
-		WillReturnRows(sqlmock.NewRows([]string{"DB_NAME"}).AddRow("master"))
+		WillReturnRows(sqlmock.NewRows([]string{"DB_NAME"}).AddRow("master")).
+		RowsWillBeClosed()
 	mock.ExpectQuery(sqlServerAvailableDatabasesSQL).
-		WillReturnRows(sqlmock.NewRows([]string{"name"}))
+		WillReturnRows(sqlmock.NewRows([]string{"name"})).
+		RowsWillBeClosed()
 
 	current, available, err := driver.ListDatabases()
 	require.NoError(t, err)
@@ -79,11 +85,13 @@ func TestSQLServerListDatabasesNoAlternatives(t *testing.T) {
 func TestSQLServerListDatabasesWithAlternatives(t *testing.T) {
 	driver, mock := newSQLServerListDatabasesMock(t)
 	mock.ExpectQuery(sqlServerCurrentDatabaseSQL).
-		WillReturnRows(sqlmock.NewRows([]string{"DB_NAME"}).AddRow("master"))
+		WillReturnRows(sqlmock.NewRows([]string{"DB_NAME"}).AddRow("master")).
+		RowsWillBeClosed()
 	mock.ExpectQuery(sqlServerAvailableDatabasesSQL).
 		WillReturnRows(sqlmock.NewRows([]string{"name"}).
 			AddRow("analytics").
-			AddRow("archive"))
+			AddRow("archive")).
+		RowsWillBeClosed()
 
 	current, available, err := driver.ListDatabases()
 	require.NoError(t, err)
@@ -95,9 +103,11 @@ func TestSQLServerListDatabasesWithAlternatives(t *testing.T) {
 func TestRedshiftListDatabasesNoAlternatives(t *testing.T) {
 	driver, mock := newRedshiftListDatabasesMock(t)
 	mock.ExpectQuery(redshiftCurrentDatabaseSQL).
-		WillReturnRows(sqlmock.NewRows([]string{"current_database"}).AddRow("analytics"))
+		WillReturnRows(sqlmock.NewRows([]string{"current_database"}).AddRow("analytics")).
+		RowsWillBeClosed()
 	mock.ExpectQuery(redshiftAvailableDatabasesSQL).
-		WillReturnRows(sqlmock.NewRows([]string{"datname"}))
+		WillReturnRows(sqlmock.NewRows([]string{"datname"})).
+		RowsWillBeClosed()
 
 	current, available, err := driver.ListDatabases()
 	require.NoError(t, err)
@@ -109,11 +119,13 @@ func TestRedshiftListDatabasesNoAlternatives(t *testing.T) {
 func TestRedshiftListDatabasesWithAlternatives(t *testing.T) {
 	driver, mock := newRedshiftListDatabasesMock(t)
 	mock.ExpectQuery(redshiftCurrentDatabaseSQL).
-		WillReturnRows(sqlmock.NewRows([]string{"current_database"}).AddRow("analytics"))
+		WillReturnRows(sqlmock.NewRows([]string{"current_database"}).AddRow("analytics")).
+		RowsWillBeClosed()
 	mock.ExpectQuery(redshiftAvailableDatabasesSQL).
 		WillReturnRows(sqlmock.NewRows([]string{"datname"}).
 			AddRow("dev").
-			AddRow("prod"))
+			AddRow("prod")).
+		RowsWillBeClosed()
 
 	current, available, err := driver.ListDatabases()
 	require.NoError(t, err)

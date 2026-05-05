@@ -119,12 +119,15 @@ func (c *sqlServerDriver) ListDatabases() (current string, available []string, e
 	if err != nil {
 		return "", nil, err
 	}
+	defer currentRows.Close()
 	for currentRows.HasNext() {
 		row, err := currentRows.Next()
 		if err != nil {
 			return "", nil, err
 		}
-		current = row[0].(string)
+		if v, ok := row[0].(string); ok {
+			current = v
+		}
 		break
 	}
 
@@ -132,6 +135,7 @@ func (c *sqlServerDriver) ListDatabases() (current string, available []string, e
 	if err != nil {
 		return "", nil, err
 	}
+	defer rows.Close()
 
 	for rows.HasNext() {
 		row, err := rows.Next()

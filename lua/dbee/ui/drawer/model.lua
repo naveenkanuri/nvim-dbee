@@ -333,8 +333,9 @@ local function collect_visible_connection_rows(nodes, out)
   for _, node in ipairs(nodes or {}) do
     if node.type == "connection" then
       out[#out + 1] = node
+    else
+      collect_visible_connection_rows(node.children, out)
     end
-    collect_visible_connection_rows(node.children, out)
   end
   return out
 end

@@ -298,21 +298,21 @@ local function new_fixture(opts)
   local available_db = vim.deepcopy(opts.available_db or { [conn.id] = { "analytics", "archive" } })
   local root_epoch = vim.deepcopy(opts.root_epoch or {})
   local schema_filter_calls = {}
-  local fail_on_rpc = opts.fail_on_rpc == true
+  local handler = { fail_on_rpc = opts.fail_on_rpc == true }
 
   local function bump(name)
     counters[name] = (counters[name] or 0) + 1
   end
 
   local function fail_if_sentinel(name)
-    if fail_on_rpc then
-      fail("unexpected RPC during sentinel fixture: " .. name)
+    if handler.fail_on_rpc then
+      local fail_handler = handler.fail_on_rpc_error or fail
+      fail_handler("unexpected RPC during sentinel fixture: " .. name)
     end
     bump(name)
   end
 
   local source = make_source(conns)
-  local handler = {}
 
   function handler:register_event_listener(event, cb)
     listeners[event] = cb
@@ -744,6 +744,24 @@ local function run_selftests()
     assert_true(not ok_rpc and sentinel.count == 1, "RPC sentinel selftest should fail for " .. rpc)
   end
 
+  local fixture = render_connection({
+    adapter = "postgres",
+    conn_id = "conn-rpc-sentinel-dynamic",
+  })
+  fixture.handler.fail_on_rpc = true
+  fixture.handler.fail_on_rpc_error = function(message)
+    error(message)
+  end
+  local ok_dynamic, dynamic_err = pcall(function()
+    fixture.handler:connection_list_databases_async(fixture.conn.id, 1, 0)
+  end)
+  fixture:cleanup()
+  assert_true(
+    not ok_dynamic
+      and tostring(dynamic_err):find("unexpected RPC during sentinel fixture: connection_list_databases_async", 1, true) ~= nil,
+    "runtime RPC sentinel should read handler.fail_on_rpc"
+  )
+
   local behavior_owned = {
     "DB18_NO_CORE_STRUCTURE_DATABASE_OK",
     "DB18_LOCKED_HELPERS_UNTOUCHED_OK",
@@ -855,6 +873,20 @@ local function run_single_db_and_stable_id_fixtures()
   assert_true(not second:get_id():find("dbee_test", 1, true), "database id should omit old DB name")
   assert_true(not second:get_id():find("other_db", 1, true), "database id should omit current DB name")
   fixture:cleanup()
+
+  local placeholder = render_connection({
+    adapter = "databricks",
+    conn_id = "conn-empty-current-catalog",
+    current_db = "",
+    available_db = {},
+  })
+  local placeholder_db = find_child(placeholder.drawer, placeholder.conn.id, function(node)
+    return node.type == "database"
+  end)
+  assert_true(placeholder_db ~= nil, "empty current nested adapter should render placeholder database node")
+  assert_eq(placeholder_db.name, "database", "empty current placeholder label")
+  placeholder:cleanup()
+
   mark("DB18_DATABASE_NODE_ID_STABLE_OK")
 end
 

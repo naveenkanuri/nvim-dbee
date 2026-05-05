@@ -135,6 +135,7 @@ func (c *postgresDriver) ListDatabases() (current string, available []string, er
 	if err != nil {
 		return "", nil, err
 	}
+	defer currentRows.Close()
 	for currentRows.HasNext() {
 		row, err := currentRows.Next()
 		if err != nil {
@@ -148,6 +149,7 @@ func (c *postgresDriver) ListDatabases() (current string, available []string, er
 	if err != nil {
 		return "", nil, err
 	}
+	defer rows.Close()
 
 	for rows.HasNext() {
 		row, err := rows.Next()

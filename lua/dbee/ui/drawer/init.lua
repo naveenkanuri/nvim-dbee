@@ -139,6 +139,7 @@ local SNAPSHOT_ID_SEP = "\x1f"
 local ID_SEP = convert.ID_SEP or "\x1f"
 local LOAD_MORE_SUFFIX = convert.LOAD_MORE_SUFFIX or (ID_SEP .. "__load_more__")
 local DATABASE_SWITCH_SUFFIX = "_database_switch__"
+local DATABASE_SUFFIX = ID_SEP .. convert.encode_node_segment({ "__database__" })
 local COLUMNS_KIND = "columns"
 local COLUMNS_RICH_KIND = "columns_rich"
 local INDEXES_KIND = "indexes"
@@ -514,7 +515,7 @@ local function database_node_id(conn_id)
   if type(convert.database_node_id) == "function" then
     return convert.database_node_id(conn_id)
   end
-  return conn_id .. ID_SEP .. convert.encode_node_segment({ "__database__" })
+  return conn_id .. DATABASE_SUFFIX
 end
 
 ---@param conn_id string
@@ -566,10 +567,30 @@ end
 
 ---@param ui DrawerUI
 ---@param conn_id string
+---@param topology_cache? table<string, boolean>
+---@return boolean
+local function cached_connection_uses_database_container(ui, conn_id, topology_cache)
+  if topology_cache then
+    local cached = topology_cache[conn_id]
+    if cached ~= nil then
+      return cached
+    end
+  end
+
+  local uses_database_container = connection_uses_database_container(ui, conn_id) and true or false
+  if topology_cache then
+    topology_cache[conn_id] = uses_database_container
+  end
+  return uses_database_container
+end
+
+---@param ui DrawerUI
+---@param conn_id string
 ---@param node_id string
+---@param topology_cache? table<string, boolean>
 ---@return string
-local function rewrite_database_scoped_node_id(ui, conn_id, node_id)
-  if type(node_id) ~= "string" or not connection_uses_database_container(ui, conn_id) then
+local function rewrite_database_scoped_node_id(ui, conn_id, node_id, topology_cache)
+  if type(node_id) ~= "string" or not cached_connection_uses_database_container(ui, conn_id, topology_cache) then
     return node_id
   end
 
@@ -686,9 +707,10 @@ end
 ---@param ui DrawerUI
 ---@param conn_id string
 ---@param children DrawerRenderSnapshotNode[]
+---@param topology_cache? table<string, boolean>
 ---@return DrawerRenderSnapshotNode[]
-local function wrap_database_snapshot_children(ui, conn_id, children)
-  if not connection_uses_database_container(ui, conn_id) then
+local function wrap_database_snapshot_children(ui, conn_id, children, topology_cache)
+  if not cached_connection_uses_database_container(ui, conn_id, topology_cache) then
     return children or {}
   end
 
@@ -733,8 +755,10 @@ end
 ---@param snapshot_nodes DrawerRenderSnapshotNode[]?
 ---@param inherited_conn_id? string
 ---@param wrap_root_children? boolean
+---@param topology_cache? table<string, boolean>
 ---@return DrawerRenderSnapshotNode[]
-local function rewrite_database_snapshot_nodes(ui, snapshot_nodes, inherited_conn_id, wrap_root_children)
+local function rewrite_database_snapshot_nodes(ui, snapshot_nodes, inherited_conn_id, wrap_root_children, topology_cache)
+  topology_cache = topology_cache or {}
   local rewritten = {}
   for _, snap in ipairs(snapshot_nodes or {}) do
     local conn_id = snap.type == "connection" and (snap.conn_id or snap.id) or inherited_conn_id
@@ -746,19 +770,19 @@ local function rewrite_database_snapshot_nodes(ui, snapshot_nodes, inherited_con
     end
 
     if conn_id and snap.type ~= "connection" then
-      copy.id = rewrite_database_scoped_node_id(ui, conn_id, copy.id)
+      copy.id = rewrite_database_scoped_node_id(ui, conn_id, copy.id, topology_cache)
     end
 
-    copy.children = rewrite_database_snapshot_nodes(ui, snap.children, conn_id)
+    copy.children = rewrite_database_snapshot_nodes(ui, snap.children, conn_id, nil, topology_cache)
 
-    if snap.type == "connection" and conn_id and connection_uses_database_container(ui, conn_id) then
-      copy.children = wrap_database_snapshot_children(ui, conn_id, copy.children)
+    if snap.type == "connection" and conn_id and cached_connection_uses_database_container(ui, conn_id, topology_cache) then
+      copy.children = wrap_database_snapshot_children(ui, conn_id, copy.children, topology_cache)
     end
 
     rewritten[#rewritten + 1] = copy
   end
   if wrap_root_children and inherited_conn_id then
-    rewritten = wrap_database_snapshot_children(ui, inherited_conn_id, rewritten)
+    rewritten = wrap_database_snapshot_children(ui, inherited_conn_id, rewritten, topology_cache)
   end
   return rewritten
 end
@@ -2031,7 +2055,7 @@ end
 ---@param children DrawerUINode[]
 ---@return DrawerUINode|nil
 function DrawerUI:_build_database_node(conn_id, children)
-  local fields = self:_database_node_fields(conn_id, { start_load = true })
+  local fields = self:_database_node_fields(conn_id, { start_load = true, allow_placeholder = true })
   if not fields then
     return nil
   end

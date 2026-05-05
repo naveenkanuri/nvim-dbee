@@ -6,6 +6,7 @@ local M = {}
 local ID_SEP = "\x1f"
 local SEGMENT_SEP = ":"
 local LOAD_MORE_SUFFIX = ID_SEP .. "__load_more__"
+local DATABASE_SUFFIX
 local DEFAULT_LABEL_LIMIT = 80
 local DEFAULT_LABEL_PREFIX = 77
 local INCLUDE_LABEL_LIMIT = 5
@@ -28,6 +29,8 @@ local function encode_node_segment(parts)
   end
   return table.concat(encoded, SEGMENT_SEP)
 end
+
+DATABASE_SUFFIX = ID_SEP .. encode_node_segment({ "__database__" })
 
 ---@param parent_id string
 ---@param struct { name: string, schema?: string, type: string }
@@ -226,7 +229,7 @@ M.encode_node_segment = encode_node_segment
 ---@param conn_id string
 ---@return string
 function M.database_node_id(conn_id)
-  return conn_id .. ID_SEP .. encode_node_segment({ "__database__" })
+  return conn_id .. DATABASE_SUFFIX
 end
 
 ---@param parent_id string
