@@ -61,6 +61,17 @@ local sql_keywords_set = {
   between = true, exists = true, case = true, when = true, ["then"] = true,
   ["else"] = true, ["end"] = true, values = true, asc = true, desc = true,
   recursive = true, begin = true, declare = true,
+  -- FETCH FIRST {n} ROWS ONLY (SQL standard, Oracle 12c+, SQL Server 2012+, PG 8.4+)
+  fetch = true, first = true, next = true, only = true,
+  rows = true, row = true,
+  -- SELECT TOP {n} (SQL Server, MS Access)
+  top = true,
+  -- FOR UPDATE / FOR SHARE locking clauses
+  ["for"] = true, share = true, ["of"] = true, nowait = true, skip = true, locked = true,
+  -- USING clause + NATURAL joins
+  using = true, natural = true,
+  -- TABLESAMPLE clause
+  tablesample = true,
 }
 
 ---@param raw string?
@@ -1008,6 +1019,12 @@ local function parse_statement_table_refs(statement, opts)
     union = true,
     set = true,
     values = true,
+    -- FETCH FIRST/NEXT N ROWS ONLY ends the FROM clause; tokens after FETCH are not table refs.
+    fetch = true,
+    -- FOR UPDATE / FOR SHARE locking clauses end the FROM clause.
+    ["for"] = true,
+    -- TABLESAMPLE clause is not a table ref itself; appears after a table.
+    tablesample = true,
   }
 
   local function token_lower(token)
