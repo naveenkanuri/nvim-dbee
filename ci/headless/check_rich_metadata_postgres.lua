@@ -88,6 +88,12 @@ assert_contains(
   convert_src,
   'struct.type == "table" or struct.type == "view" or struct.type == "materialized_view"'
 )
+assert_contains("column generated label source", convert_src, "GEN")
+assert_contains("column identity label source", convert_src, "IDENTITY")
+assert_contains("column default label source", convert_src, "DEFAULT=")
+assert_contains("column default utf8 truncation", convert_src, "vim.fn.strcharpart(expr, 0, DEFAULT_LABEL_PREFIX)")
+assert_contains("index include source", convert_src, "include_columns")
+assert_contains("index include label source", convert_src, "INCLUDE ")
 
 assert_contains("schema cache materializations", schema_cache_src, 'MATERIALIZATIONS = { "table", "view", "materialized_view" }')
 assert_contains(
@@ -120,6 +126,11 @@ assert_true("postgres metadata no information_schema", not postgres_query:find("
 assert_true("postgres metadata no base-table collapse", not postgres_query:find("BASE TABLE", 1, true))
 
 assert_contains("hover materialized view label", object_docs_src, "Materialized View")
+assert_contains(
+  "drawer view index folder materialization gate",
+  drawer_src,
+  'support.indexes == true and (struct.type == "table" or struct.type == "materialized_view")'
+)
 
 local fake_expansions = {}
 package.loaded["dbee.ui.drawer.expansion"] = {
@@ -135,6 +146,107 @@ local SchemaCache = require("dbee.lsp.schema_cache")
 local object_docs = require("dbee.lsp.object_docs")
 
 assert_true("model SEARCHABLE_TYPES admits mv", drawer_model.SEARCHABLE_TYPES.materialized_view == true)
+
+local label_nodes = convert.column_nodes("columns-parent", {
+  {
+    name = "stored_total",
+    type = "numeric",
+    generated = "s",
+    default = "  ignored_default()  ",
+  },
+  {
+    name = "created_at",
+    type = "timestamp",
+    default = "  now(\n  )  ",
+  },
+  {
+    name = "account_id",
+    type = "bigint",
+    identity = "a",
+  },
+})
+assert_contains("generated column label", label_nodes[1].name, "[GEN]")
+assert_true("generated column suppresses default label", not label_nodes[1].name:find("[DEFAULT=", 1, true))
+mark("RICH_PG_GENERATED_LABEL_OK")
+
+assert_contains("default column label", label_nodes[2].name, "[DEFAULT=now( )]")
+mark("RICH_PG_DEFAULT_LABEL_OK")
+
+assert_contains("identity column label", label_nodes[3].name, "[IDENTITY]")
+mark("RICH_PG_IDENTITY_LABEL_OK")
+
+local long_utf8_default = "'" .. string.rep("界", 60) .. "'"
+local utf8_default_node = convert.column_nodes("columns-parent", {
+  {
+    name = "utf8_default",
+    type = "text",
+    default = long_utf8_default,
+  },
+})[1]
+local default_expr = utf8_default_node.name:match("%[DEFAULT=([^%]]+)%]")
+assert_true("utf8 default tag exists", default_expr ~= nil)
+assert_true("utf8 default tag truncated", default_expr:sub(-3) == "...")
+assert_true("utf8 default valid", pcall(vim.fn.strchars, default_expr))
+assert_true("utf8 default display cap", vim.fn.strdisplaywidth(default_expr) <= 80)
+mark("RICH_PG_DEFAULT_UTF8_TRUNCATION_OK")
+
+local include_node = convert.index_nodes("indexes-parent", {
+  {
+    name = "idx_lookup",
+    columns = { "tenant_id" },
+    orders = { "ASC" },
+    include_columns = { "payload" },
+  },
+})[1]
+assert_contains("include label separate", include_node.name, "[tenant_id ASC] [INCLUDE payload]")
+
+local ordered_include_node = convert.index_nodes("indexes-parent", {
+  {
+    name = "idx_order",
+    columns = { "tenant_id" },
+    include_columns = { "zeta", "alpha", "gamma" },
+  },
+})[1]
+assert_contains("include preserves slice order", ordered_include_node.name, "[INCLUDE zeta, alpha, gamma]")
+
+local many_include_node = convert.index_nodes("indexes-parent", {
+  {
+    name = "idx_many",
+    columns = { "tenant_id" },
+    orders = { "ASC" },
+    include_columns = { "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india", "juliet" },
+  },
+})[1]
+assert_contains("include many more", many_include_node.name, "+5 more")
+assert_true("include many width cap", vim.fn.strdisplaywidth(many_include_node.name) <= 120)
+
+local long_include_name = string.rep("payload", 34)
+local long_include_node = convert.index_nodes("indexes-parent", {
+  {
+    name = "idx_long",
+    columns = { "tenant_id" },
+    include_columns = { long_include_name },
+  },
+})[1]
+local long_include_rendered = long_include_node.name:match("%[INCLUDE ([^%]]+)%]")
+assert_true("long include tag exists", long_include_rendered ~= nil)
+assert_true("long include truncated", long_include_rendered:sub(-3) == "...")
+assert_true("long include valid utf8", pcall(vim.fn.strchars, long_include_rendered))
+assert_true("long include display cap", vim.fn.strdisplaywidth(long_include_rendered) <= 30)
+
+local wide_include_node = convert.index_nodes("indexes-parent", {
+  {
+    name = "idx_wide",
+    columns = { "tenant_id" },
+    include_columns = { string.rep("界", 20) },
+  },
+})[1]
+local wide_include_rendered = wide_include_node.name:match("%[INCLUDE ([^%]]+)%]")
+assert_true("wide include tag exists", wide_include_rendered ~= nil)
+assert_true("wide include truncated", wide_include_rendered:sub(-3) == "...")
+assert_true("wide include valid utf8", pcall(vim.fn.strchars, wide_include_rendered))
+assert_true("wide include display cap", vim.fn.strdisplaywidth(wide_include_rendered) <= 30)
+mark("RICH_PG_INCLUDE_LABEL_WIDTH_OK")
 
 local decorated = convert.decorate_structure_node(
   { id = "mv-node", name = "mv_sales", type = "materialized_view" },
@@ -152,6 +264,81 @@ local decorated = convert.decorate_structure_node(
 )
 assert_true("mv reaches decorate_structure_node lazy branch", type(decorated.lazy_children) == "function")
 assert_eq("mv lazy children requested", decorated.lazy_children()[1], "lazy-children-requested")
+
+local function new_fake_drawer_ui(handler)
+  return setmetatable({
+    handler = handler,
+    _connection_invalidated_consumer_id = "rich-pg",
+    filter_restore_snapshot = true,
+    _struct_cache = {
+      root_epoch = { conn = 0 },
+      branches = { conn = {} },
+    },
+  }, { __index = DrawerUI })
+end
+
+local pk_backed_calls = {}
+local pk_backed_ui = new_fake_drawer_ui({
+  connection_supports_rich_metadata = function()
+    return { columns = true, indexes = true, sequences = true }
+  end,
+  connection_get_columns_rich_async = function() end,
+  connection_get_indexes_async = function(_, conn_id, request_id, branch_id, root_epoch, opts)
+    pk_backed_calls[#pk_backed_calls + 1] = {
+      conn_id = conn_id,
+      request_id = request_id,
+      branch_id = branch_id,
+      root_epoch = root_epoch,
+      opts = vim.deepcopy(opts),
+    }
+  end,
+})
+local pk_children = pk_backed_ui:_build_rich_table_children("conn", "conn.public.accounts", {
+  id = "conn.public.accounts",
+  name = "accounts",
+  schema = "public",
+  type = "table",
+})
+assert_eq("pk backed table folder count", #pk_children, 2)
+pk_children[2].lazy_children()
+assert_eq("pk backed index request count", #pk_backed_calls, 1)
+pk_backed_ui:on_structure_children_loaded({
+  conn_id = "conn",
+  request_id = pk_backed_calls[1].request_id,
+  branch_id = pk_backed_calls[1].branch_id,
+  root_epoch = pk_backed_calls[1].root_epoch,
+  kind = "indexes",
+  indexes = {
+    { name = "accounts_pkey", columns = { "id" }, pk_backed = true },
+    { name = "idx_accounts_payload", columns = { "payload" }, include_columns = { "payload_hash" } },
+  },
+})
+local rendered_indexes = pk_children[2].lazy_children()
+assert_eq("pk backed rendered index count", #rendered_indexes, 1)
+assert_eq("pk backed hidden visible name", rendered_indexes[1].raw_name, "idx_accounts_payload")
+mark("RICH_PG_PK_BACKED_HIDDEN")
+
+local view_index_calls = 0
+local view_ui = new_fake_drawer_ui({
+  connection_supports_rich_metadata = function()
+    return { columns = true, indexes = true, sequences = true }
+  end,
+  connection_get_columns_rich_async = function() end,
+  connection_get_indexes_async = function()
+    view_index_calls = view_index_calls + 1
+    fail("regular view attempted connection_get_indexes_async")
+  end,
+})
+local view_children = view_ui:_build_rich_table_children("conn", "conn.public.v_sales", {
+  id = "conn.public.v_sales",
+  name = "v_sales",
+  schema = "public",
+  type = "view",
+})
+assert_eq("view folder child count", #view_children, 1)
+assert_eq("view columns folder only", view_children[1].name, "Columns")
+assert_eq("view indexes stub never called", view_index_calls, 0)
+mark("RICH_PG_VIEW_NO_INDEXES_FOLDER_OK")
 
 local rich_calls = { columns = {}, indexes = {} }
 local fake_handler = {

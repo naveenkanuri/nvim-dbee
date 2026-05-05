@@ -1280,7 +1280,8 @@ function DrawerUI:_build_rich_table_children(conn_id, table_node_id, struct)
     return build_branch_nodes(self, conn_id, columns_branch_id, COLUMNS_RICH_KIND)
   end)
 
-  if support.indexes == true then
+  local has_indexes_folder = support.indexes == true and (struct.type == "table" or struct.type == "materialized_view")
+  if has_indexes_folder then
     local indexes_branch_id = convert.metadata_folder_node_id(table_node_id, "indexes")
     nodes[#nodes + 1] = convert.metadata_folder_node(table_node_id, "indexes", "Indexes", function()
       self:_ensure_rich_metadata_branch(conn_id, indexes_branch_id, INDEXES_KIND, {

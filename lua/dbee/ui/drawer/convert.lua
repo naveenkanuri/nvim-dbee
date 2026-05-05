@@ -6,6 +6,10 @@ local M = {}
 local ID_SEP = "\x1f"
 local SEGMENT_SEP = ":"
 local LOAD_MORE_SUFFIX = ID_SEP .. "__load_more__"
+local DEFAULT_LABEL_LIMIT = 80
+local DEFAULT_LABEL_PREFIX = 77
+local INCLUDE_LABEL_LIMIT = 5
+local INCLUDE_NAME_WIDTH = 30
 
 ---@param value string?
 ---@return string
@@ -62,6 +66,68 @@ function M.column_node_id(parent_id, column)
   })
 end
 
+---@param value any
+---@return boolean
+local function is_non_empty_string(value)
+  return type(value) == "string" and value ~= ""
+end
+
+---@param value string
+---@return string
+local function normalize_default_expr(value)
+  local expr = vim.trim(value):gsub("%s+", " ")
+  if vim.fn.strdisplaywidth(expr) > DEFAULT_LABEL_LIMIT then
+    local suffix = "..."
+    local target_width = DEFAULT_LABEL_LIMIT - vim.fn.strdisplaywidth(suffix)
+    local prefix = vim.fn.strcharpart(expr, 0, DEFAULT_LABEL_PREFIX)
+    while vim.fn.strdisplaywidth(prefix) > target_width and vim.fn.strchars(prefix) > 0 do
+      prefix = vim.fn.strcharpart(prefix, 0, vim.fn.strchars(prefix) - 1)
+    end
+    expr = prefix .. suffix
+  end
+  return expr
+end
+
+---@param value any
+---@param max_width integer
+---@return string
+local function truncate_display_width(value, max_width)
+  local text = tostring(value or "")
+  if vim.fn.strdisplaywidth(text) <= max_width then
+    return text
+  end
+
+  local suffix = "..."
+  local target_width = math.max(max_width - vim.fn.strdisplaywidth(suffix), 0)
+  local best = ""
+  for chars = 1, vim.fn.strchars(text) do
+    local candidate = vim.fn.strcharpart(text, 0, chars)
+    if vim.fn.strdisplaywidth(candidate) > target_width then
+      break
+    end
+    best = candidate
+  end
+  return best .. suffix
+end
+
+---@param include_columns any
+---@return string?
+local function include_columns_tag(include_columns)
+  if type(include_columns) ~= "table" or #include_columns == 0 then
+    return nil
+  end
+
+  local labels = {}
+  local visible_count = math.min(#include_columns, INCLUDE_LABEL_LIMIT)
+  for i = 1, visible_count do
+    labels[#labels + 1] = truncate_display_width(include_columns[i], INCLUDE_NAME_WIDTH)
+  end
+  if #include_columns > INCLUDE_LABEL_LIMIT then
+    labels[#labels + 1] = "+" .. tostring(#include_columns - INCLUDE_LABEL_LIMIT) .. " more"
+  end
+  return "INCLUDE " .. table.concat(labels, ", ")
+end
+
 ---@param ref table
 ---@return string
 function M.fk_ref_label(ref)
@@ -92,6 +158,18 @@ local function column_label(column)
   end
   if column.nullable == false then
     tags[#tags + 1] = "NOT NULL"
+  end
+  if is_non_empty_string(column.generated) then
+    tags[#tags + 1] = "GEN"
+  end
+  if is_non_empty_string(column.identity) then
+    tags[#tags + 1] = "IDENTITY"
+  end
+  if is_non_empty_string(column.default) and not is_non_empty_string(column.generated) then
+    local default_expr = normalize_default_expr(column.default)
+    if default_expr ~= "" then
+      tags[#tags + 1] = "DEFAULT=" .. default_expr
+    end
   end
 
   local fk_labels = {}
@@ -181,6 +259,10 @@ function M.index_nodes(parent_id, indexes)
     end
     if #columns > 0 then
       tags[#tags + 1] = table.concat(columns, ", ")
+    end
+    local include_tag = include_columns_tag(index.include_columns)
+    if include_tag then
+      tags[#tags + 1] = include_tag
     end
     local suffix = #tags > 0 and ("   [" .. table.concat(tags, "] [") .. "]") or ""
     nodes[#nodes + 1] = NuiTree.Node({
