@@ -94,7 +94,7 @@ local function column_completions(cache, table_ref, alias_info)
         schema_quoted = alias_info.schema_quoted,
         table_quoted = alias_info.table_quoted,
         probe_if_missing = true,
-        materializations = { "table", "view" },
+        materializations = { "table", "view", "materialized_view" },
       })
     end
   else

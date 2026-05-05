@@ -129,6 +129,7 @@ local SEARCHABLE_TYPES = drawer_model.SEARCHABLE_TYPES or {
   schema = true,
   table = true,
   view = true,
+  materialized_view = true,
   procedure = true,
   ["function"] = true,
 }
@@ -146,6 +147,7 @@ local CHILD_CHUNK_SIZE = 1000
 local TABLE_LIKE_TYPES = {
   table = true,
   view = true,
+  materialized_view = true,
 }
 
 local function normalize_mapping_lhs(key)
@@ -1535,7 +1537,14 @@ function DrawerUI:_capture_container_expansions(conn_id)
   for node_id, expanded in pairs(expansion_ids or {}) do
     if expanded and (node_id == conn_id or node_id:sub(1, #conn_id + 1) == conn_id .. ID_SEP) then
       local node = self.tree:get_node(node_id)
-      if node and node.type ~= "table" and node.type ~= "view" and node.type ~= "column" and node.type ~= "load_more" then
+      if
+        node
+        and node.type ~= "table"
+        and node.type ~= "view"
+        and node.type ~= "materialized_view"
+        and node.type ~= "column"
+        and node.type ~= "load_more"
+      then
         captured[node_id] = true
       end
     end
@@ -4055,6 +4064,7 @@ function DrawerUI:get_actions()
       local yankable_types = {
         table = true,
         view = true,
+        materialized_view = true,
         procedure = true,
         ["function"] = true,
         column = true,

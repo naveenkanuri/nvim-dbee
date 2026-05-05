@@ -275,7 +275,13 @@ end
 ---@param lazy_children_factory? fun(): DrawerUINode[]
 --- INVARIANT: struct.type MUST be passed through as the materialization.
 function M.decorate_structure_node(node, handler, result, conn_id, struct, lazy_children_factory)
-  if struct.type ~= "table" and struct.type ~= "view" and struct.type ~= "procedure" and struct.type ~= "function" then
+  if
+    struct.type ~= "table"
+    and struct.type ~= "view"
+    and struct.type ~= "materialized_view"
+    and struct.type ~= "procedure"
+    and struct.type ~= "function"
+  then
     if type(lazy_children_factory) == "function" then
       node.lazy_children = lazy_children_factory
     end
@@ -309,7 +315,7 @@ function M.decorate_structure_node(node, handler, result, conn_id, struct, lazy_
 
   if type(lazy_children_factory) == "function" then
     node.lazy_children = lazy_children_factory
-  elseif struct.type == "table" or struct.type == "view" then
+  elseif struct.type == "table" or struct.type == "view" or struct.type == "materialized_view" then
     node.lazy_children = function()
       return column_nodes(struct.id, handler:connection_get_columns(conn_id, table_opts))
     end

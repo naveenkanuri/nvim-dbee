@@ -22,10 +22,19 @@ local METADATA_QUERIES = {
     WHERE U.common = 'NO' AND view_name = UPPER(view_name)
     ORDER BY 1, 2]],
   postgres = [[
-    SELECT table_schema AS schema_name, table_name,
-      CASE table_type WHEN 'BASE TABLE' THEN 'table' ELSE 'view' END AS obj_type
-    FROM information_schema.tables
-    WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+    SELECT n.nspname AS schema_name,
+      c.relname AS table_name,
+      CASE c.relkind
+        WHEN 'r' THEN 'table'
+        WHEN 'p' THEN 'table'
+        WHEN 'f' THEN 'table'
+        WHEN 'v' THEN 'view'
+        WHEN 'm' THEN 'materialized_view'
+      END AS obj_type
+    FROM pg_catalog.pg_class c
+    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind IN ('r', 'p', 'f', 'v', 'm')
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
     ORDER BY 1, 2]],
   mysql = [[
     SELECT table_schema AS schema_name, table_name,

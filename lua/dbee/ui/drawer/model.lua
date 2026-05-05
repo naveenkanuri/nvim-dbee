@@ -7,6 +7,7 @@ local SEARCHABLE_TYPES = {
   schema = true,
   table = true,
   view = true,
+  materialized_view = true,
   procedure = true,
   ["function"] = true,
 }

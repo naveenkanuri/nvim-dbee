@@ -33,7 +33,11 @@ WALLET_GO_LOG ?= $(WALLET_ARTIFACT_DIR)/wallet-go.log
 WALLET_LUA_LOG ?= $(WALLET_ARTIFACT_DIR)/wallet-lua.log
 WALLET_ROLLUP_SCRIPT ?= $(CURDIR)/ci/headless/check_oracle_wallet_zip.lua
 
-.PHONY: perf perf-lsp perf-all wallet-test
+.PHONY: perf perf-lsp perf-all wallet-test perf-headless
+
+perf-headless: perf-bootstrap
+	@mkdir -p "$(LSP01_PERF_STATE_HOME)"
+	XDG_STATE_HOME="$(LSP01_PERF_STATE_HOME)" $(PERF_NVIM_HEADLESS) $(ARGS)
 
 perf: perf-bootstrap
 	@set -eu; \

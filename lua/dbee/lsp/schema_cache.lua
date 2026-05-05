@@ -41,8 +41,8 @@ local SYNC_COLUMN_FILE_SCAN_LIMIT = 200
 local FILTER_DELETE_SYNC_SCAN_LIMIT = 200
 local FILTER_DELETE_SYNC_DELETE_LIMIT = 100
 local COLUMN_CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
-local SCHEMA_CACHE_VERSION = 3
-local MATERIALIZATIONS = { "table", "view" }
+local SCHEMA_CACHE_VERSION = 4
+local MATERIALIZATIONS = { "table", "view", "materialized_view" }
 local SCHEMA_TABLE_PREVIEW_LIMIT = 20
 local WORKSPACE_SYMBOL_LIMIT = 200
 
@@ -104,7 +104,8 @@ local function table_completion_item(schema, name, table_type)
   local detail = (schema ~= "_default") and (schema .. "." .. name) or name
   return {
     label = name,
-    kind = (table_type == "view") and CompletionItemKind.Class or CompletionItemKind.Struct,
+    kind = (table_type == "view" or table_type == "materialized_view") and CompletionItemKind.Class
+      or CompletionItemKind.Struct,
     detail = detail .. " (" .. table_type .. ")",
     insertText = name,
     sortText = "0_" .. name,
@@ -1652,7 +1653,7 @@ function SchemaCache:_flatten(structs, parent_schema)
       if s.children then
         self:_flatten(s.children, schema_name)
       end
-    elseif stype == "table" or stype == "view" then
+    elseif stype == "table" or stype == "view" or stype == "materialized_view" then
       if schema == "" then
         schema = "_default"
       end
@@ -3206,7 +3207,7 @@ function SchemaCache:on_schema_objects_loaded(data)
         self.schemas[current_schema] = true
         self.tables[current_schema] = self.tables[current_schema] or {}
         apply_structs(struct.children or {}, current_schema)
-      elseif stype == "table" or stype == "view" then
+      elseif stype == "table" or stype == "view" or stype == "materialized_view" then
         self.tables[current_schema] = self.tables[current_schema] or {}
         self.tables[current_schema][struct.name] = { type = stype }
       elseif struct.children then
@@ -3367,7 +3368,7 @@ function SchemaCache:get_columns(schema, table_name, opts)
       add_table_candidate(candidate_table)
     end
 
-    local materializations = opts.materializations or { "table", "view" }
+    local materializations = opts.materializations or MATERIALIZATIONS
     for _, candidate_schema in ipairs(schema_candidates) do
       for _, candidate_table in ipairs(table_candidates) do
         for _, materialization in ipairs(materializations) do

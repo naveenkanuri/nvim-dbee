@@ -112,9 +112,11 @@ local function format_table(metadata, markdown)
     and (metadata.schema .. "." .. metadata.table)
     or metadata.table
   local name = markdown and inline_code(qualified) or tostring(qualified or "")
+  local table_label = metadata.table_type == "materialized_view" and "Materialized View"
+    or metadata.table_type == "view" and "View"
+    or "Table"
   local lines = {
-    markdown and ("### " .. (metadata.table_type == "view" and "View " or "Table ") .. name)
-      or ((metadata.table_type == "view" and "View " or "Table ") .. name),
+    markdown and ("### " .. table_label .. " " .. name) or (table_label .. " " .. name),
     "",
     "Type: " .. tostring(metadata.table_type or "table"),
   }

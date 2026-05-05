@@ -70,7 +70,7 @@ func (c *postgresDriver) StructureWithOptions(opts *core.StructureOptions) ([]*c
 		SELECT schema_name, object_name, object_type FROM (
 			SELECT table_schema AS schema_name, table_name AS object_name, table_type AS object_type FROM information_schema.tables` + tableWhere + `
 			UNION ALL
-			SELECT schemaname AS schema_name, matviewname AS object_name, 'VIEW' AS object_type FROM pg_matviews` + matviewWhere + `
+			SELECT schemaname AS schema_name, matviewname AS object_name, 'MATERIALIZED VIEW' AS object_type FROM pg_matviews` + matviewWhere + `
 		) dbee_objects ORDER BY schema_name, object_name
 	`
 
@@ -103,7 +103,7 @@ func (c *postgresDriver) StructureForSchema(schema string, opts *core.StructureO
 			SELECT table_schema AS schema_name, table_name AS object_name, table_type AS object_type FROM information_schema.tables
 			WHERE table_schema = $1
 			UNION ALL
-			SELECT schemaname AS schema_name, matviewname AS object_name, 'VIEW' AS object_type FROM pg_matviews
+			SELECT schemaname AS schema_name, matviewname AS object_name, 'MATERIALIZED VIEW' AS object_type FROM pg_matviews
 			WHERE schemaname = $2
 		) dbee_objects
 		ORDER BY schema_name, object_name`
