@@ -1442,6 +1442,10 @@ function SchemaCache:_load_column_file(path, prefix)
   local cols = payload
   local root_epoch = nil
   if type(payload) == "table" and payload.columns ~= nil then
+    if payload.version ~= SCHEMA_CACHE_VERSION then
+      self:_remove_corrupt_file(path, "loading column cache")
+      return false
+    end
     if payload.schema_filter_signature ~= self.schema_filter_signature then
       os.remove(path)
       return false
@@ -1715,6 +1719,34 @@ function SchemaCache:_remove_legacy_schema_index(path)
 end
 
 ---@private
+---@return integer removed
+function SchemaCache:_remove_column_cache_files_for_version_migration()
+  local prefix = self.conn_id .. "_cols_"
+  local pattern = self.cache_dir .. "/" .. prefix .. "*.json"
+  local removed = 0
+  for _, path in ipairs(vim.fn.glob(pattern, false, true)) do
+    if os.remove(path) then
+      removed = removed + 1
+    end
+  end
+  return removed
+end
+
+---@private
+---@param path string
+function SchemaCache:_remove_v3_schema_index(path)
+  local removed_columns = self:_remove_column_cache_files_for_version_migration()
+  vim.g.dbee_lsp_schema_cache_v3_to_v4_migrated = {
+    conn_id = self.conn_id,
+    path = path,
+    from_version = 3,
+    version = SCHEMA_CACHE_VERSION,
+    column_files_removed = removed_columns,
+  }
+  os.remove(path)
+end
+
+---@private
 ---@param path string
 function SchemaCache:_remove_legacy_column_cache(path)
   vim.g.dbee_lsp_column_cache_legacy_migrated = {
@@ -1842,6 +1874,11 @@ function SchemaCache:load_from_disk()
     else
       self:_remove_corrupt_file(path, "loading schema index")
     end
+    return false
+  end
+
+  if data.version == 3 then
+    self:_remove_v3_schema_index(path)
     return false
   end
 

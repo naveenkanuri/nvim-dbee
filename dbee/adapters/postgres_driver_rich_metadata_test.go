@@ -309,6 +309,68 @@ func TestPostgresRichMetadataNoNamedBindsInTests(t *testing.T) {
 	require.False(t, strings.Contains(postgresColumnsRichSQL+postgresPrimaryKeysSQL+postgresForeignKeysSQL+postgresIndexesSQL+postgresSequencesSQL, ":p_"))
 }
 
+const (
+	postgresRichMetadataBenchRows       = 10000
+	postgresRichMetadataBenchIterations = 20
+	postgresRichMetadataBenchP95Gate    = 50 * time.Millisecond
+)
+
+type postgresRichMetadataMeasureFunc func(testing.TB, int) time.Duration
+
+type postgresRichMetadataMeasure struct {
+	method  string
+	measure postgresRichMetadataMeasureFunc
+}
+
+type postgresRichMetadataBenchResult struct {
+	method string
+	rows   int
+	p50    time.Duration
+	p95    time.Duration
+}
+
+var postgresRichMetadataMeasures = []postgresRichMetadataMeasure{
+	{method: "ColumnsRich", measure: measurePostgresColumnsRichParse},
+	{method: "Indexes", measure: measurePostgresIndexesParse},
+	{method: "Sequences", measure: measurePostgresSequencesParse},
+}
+
+func TestPostgresRichMetadataBenchAggregator(t *testing.T) {
+	t.Run("slow_measure_omits_marker", func(t *testing.T) {
+		results, ok := aggregatePostgresRichMetadataGoParse(t, 1, 2, []postgresRichMetadataMeasure{
+			{
+				method: "Slow",
+				measure: func(tb testing.TB, _ int) time.Duration {
+					tb.Helper()
+					time.Sleep(60 * time.Millisecond)
+					return 60 * time.Millisecond
+				},
+			},
+		})
+		require.False(t, ok)
+		require.Len(t, results, 1)
+		require.GreaterOrEqual(t, results[0].p95, postgresRichMetadataBenchP95Gate)
+	})
+
+	results, ok := aggregatePostgresRichMetadataGoParse(
+		t,
+		postgresRichMetadataBenchRows,
+		postgresRichMetadataBenchIterations,
+		postgresRichMetadataMeasures,
+	)
+	for _, result := range results {
+		t.Logf(
+			"RICH_PG_PERF_DIAGNOSTIC=go_parse_aggregator method=%s rows=%d p50_ms=%.3f p95_ms=%.3f",
+			result.method,
+			result.rows,
+			float64(result.p50.Microseconds())/1000.0,
+			float64(result.p95.Microseconds())/1000.0,
+		)
+	}
+	require.True(t, ok, "postgres rich metadata 10000-row parse p95 must stay below %s for all methods", postgresRichMetadataBenchP95Gate)
+	t.Log("RICH_PG_BENCH_GO_PARSE_P95_OK=true")
+}
+
 func BenchmarkPostgresRichMetadataGoParseColumnsRich(b *testing.B) {
 	benchmarkPostgresRichMetadataGoParse(b, "ColumnsRich", []int{1000, 10000, 50000}, measurePostgresColumnsRichParse)
 }
@@ -319,21 +381,20 @@ func BenchmarkPostgresRichMetadataGoParseIndexes(b *testing.B) {
 
 func BenchmarkPostgresRichMetadataGoParseSequences(b *testing.B) {
 	benchmarkPostgresRichMetadataGoParse(b, "Sequences", []int{1000, 10000, 50000}, measurePostgresSequencesParse)
-	b.Log("RICH_PG_BENCH_GO_PARSE_P95_OK=true")
 }
 
 func benchmarkPostgresRichMetadataGoParse(
 	b *testing.B,
 	method string,
 	sizes []int,
-	measure func(*testing.B, int) time.Duration,
+	measure postgresRichMetadataMeasureFunc,
 ) {
 	for _, size := range sizes {
 		size := size
 		b.Run(fmt.Sprintf("%s_%d_rows", method, size), func(b *testing.B) {
 			measuredIterations := b.N
-			if measuredIterations < 20 {
-				measuredIterations = 20
+			if measuredIterations < postgresRichMetadataBenchIterations {
+				measuredIterations = postgresRichMetadataBenchIterations
 			}
 
 			// sqlmock measures deterministic Go-side row scanning, grouping, cloning,
@@ -346,27 +407,80 @@ func benchmarkPostgresRichMetadataGoParse(
 			}
 			b.StopTimer()
 
-			p50 := postgresDurationPercentile(durations, 0.50)
-			p95 := postgresDurationPercentile(durations, 0.95)
-			b.ReportMetric(float64(p50.Microseconds())/1000.0, "p50_ms")
-			b.ReportMetric(float64(p95.Microseconds())/1000.0, "p95_ms")
-			b.Logf(
-				"RICH_PG_PERF_DIAGNOSTIC=go_parse method=%s rows=%d p50_ms=%.3f p95_ms=%.3f",
-				method,
-				size,
-				float64(p50.Microseconds())/1000.0,
-				float64(p95.Microseconds())/1000.0,
-			)
-			if size == 10000 && p95 >= 50*time.Millisecond {
-				b.Fatalf("postgres %s 10000-row parse p95 %s exceeds 50ms gate", method, p95)
+			result := postgresRichMetadataBenchResult{
+				method: method,
+				rows:   size,
+				p50:    postgresDurationPercentile(durations, 0.50),
+				p95:    postgresDurationPercentile(durations, 0.95),
+			}
+			b.ReportMetric(float64(result.p50.Microseconds())/1000.0, "p50_ms")
+			b.ReportMetric(float64(result.p95.Microseconds())/1000.0, "p95_ms")
+			if b.N >= postgresRichMetadataBenchIterations {
+				b.Logf(
+					"RICH_PG_PERF_DIAGNOSTIC=go_parse method=%s rows=%d p50_ms=%.3f p95_ms=%.3f",
+					method,
+					size,
+					float64(result.p50.Microseconds())/1000.0,
+					float64(result.p95.Microseconds())/1000.0,
+				)
+				if size == postgresRichMetadataBenchRows && result.p95 >= postgresRichMetadataBenchP95Gate {
+					b.Fatalf("postgres %s 10000-row parse p95 %s exceeds %s gate", method, result.p95, postgresRichMetadataBenchP95Gate)
+				}
 			}
 		})
 	}
 }
 
-func measurePostgresColumnsRichParse(b *testing.B, rowCount int) time.Duration {
-	b.Helper()
-	driver, mock, cleanup := newPostgresRichMetadataBenchmarkMock(b)
+func aggregatePostgresRichMetadataGoParse(
+	tb testing.TB,
+	rowCount int,
+	iterations int,
+	measures []postgresRichMetadataMeasure,
+) ([]postgresRichMetadataBenchResult, bool) {
+	tb.Helper()
+	results := make([]postgresRichMetadataBenchResult, 0, len(measures))
+	allOK := true
+	for _, measure := range measures {
+		result := measurePostgresRichMetadataP95(tb, measure.method, rowCount, iterations, measure.measure)
+		results = append(results, result)
+		if result.p95 >= postgresRichMetadataBenchP95Gate {
+			allOK = false
+		}
+	}
+	return results, allOK
+}
+
+func measurePostgresRichMetadataP95(
+	tb testing.TB,
+	method string,
+	rowCount int,
+	iterations int,
+	measure postgresRichMetadataMeasureFunc,
+) postgresRichMetadataBenchResult {
+	tb.Helper()
+	if iterations < 1 {
+		iterations = 1
+	}
+
+	// sqlmock measures deterministic Go-side row scanning, grouping, cloning,
+	// and field parsing only; it cannot validate PostgreSQL catalog execution cost.
+	_ = measure(tb, rowCount) // excluded warmup
+	durations := make([]time.Duration, 0, iterations)
+	for i := 0; i < iterations; i++ {
+		durations = append(durations, measure(tb, rowCount))
+	}
+
+	return postgresRichMetadataBenchResult{
+		method: method,
+		rows:   rowCount,
+		p50:    postgresDurationPercentile(durations, 0.50),
+		p95:    postgresDurationPercentile(durations, 0.95),
+	}
+}
+
+func measurePostgresColumnsRichParse(tb testing.TB, rowCount int) time.Duration {
+	tb.Helper()
+	driver, mock, cleanup := newPostgresRichMetadataBenchmarkMock(tb)
 	defer cleanup()
 
 	columnRows := sqlmock.NewRows([]string{
@@ -411,15 +525,15 @@ func measurePostgresColumnsRichParse(b *testing.B, rowCount int) time.Duration {
 	start := time.Now()
 	columns, err := driver.ColumnsRich(&core.TableOptions{Schema: "public", Table: "bench_table"})
 	elapsed := time.Since(start)
-	require.NoError(b, err)
-	require.Len(b, columns, rowCount)
-	require.NoError(b, mock.ExpectationsWereMet())
+	require.NoError(tb, err)
+	require.Len(tb, columns, rowCount)
+	require.NoError(tb, mock.ExpectationsWereMet())
 	return elapsed
 }
 
-func measurePostgresIndexesParse(b *testing.B, rowCount int) time.Duration {
-	b.Helper()
-	driver, mock, cleanup := newPostgresRichMetadataBenchmarkMock(b)
+func measurePostgresIndexesParse(tb testing.TB, rowCount int) time.Duration {
+	tb.Helper()
+	driver, mock, cleanup := newPostgresRichMetadataBenchmarkMock(tb)
 	defer cleanup()
 
 	indexRows := sqlmock.NewRows([]string{
@@ -462,15 +576,15 @@ func measurePostgresIndexesParse(b *testing.B, rowCount int) time.Duration {
 	start := time.Now()
 	indexes, err := driver.Indexes(&core.TableOptions{Schema: "public", Table: "bench_table"})
 	elapsed := time.Since(start)
-	require.NoError(b, err)
-	require.NotEmpty(b, indexes)
-	require.NoError(b, mock.ExpectationsWereMet())
+	require.NoError(tb, err)
+	require.NotEmpty(tb, indexes)
+	require.NoError(tb, mock.ExpectationsWereMet())
 	return elapsed
 }
 
-func measurePostgresSequencesParse(b *testing.B, rowCount int) time.Duration {
-	b.Helper()
-	driver, mock, cleanup := newPostgresRichMetadataBenchmarkMock(b)
+func measurePostgresSequencesParse(tb testing.TB, rowCount int) time.Duration {
+	tb.Helper()
+	driver, mock, cleanup := newPostgresRichMetadataBenchmarkMock(tb)
 	defer cleanup()
 
 	sequenceRows := sqlmock.NewRows([]string{"sequence_name", "increment_by", "cache_size"})
@@ -482,16 +596,16 @@ func measurePostgresSequencesParse(b *testing.B, rowCount int) time.Duration {
 	start := time.Now()
 	sequences, err := driver.Sequences("public")
 	elapsed := time.Since(start)
-	require.NoError(b, err)
-	require.Len(b, sequences, rowCount)
-	require.NoError(b, mock.ExpectationsWereMet())
+	require.NoError(tb, err)
+	require.Len(tb, sequences, rowCount)
+	require.NoError(tb, mock.ExpectationsWereMet())
 	return elapsed
 }
 
-func newPostgresRichMetadataBenchmarkMock(b *testing.B) (*postgresDriver, sqlmock.Sqlmock, func()) {
-	b.Helper()
+func newPostgresRichMetadataBenchmarkMock(tb testing.TB) (*postgresDriver, sqlmock.Sqlmock, func()) {
+	tb.Helper()
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
-	require.NoError(b, err)
+	require.NoError(tb, err)
 	return &postgresDriver{c: builders.NewClient(db), url: nil}, mock, func() { _ = db.Close() }
 }
 

@@ -17,6 +17,13 @@ local function read(path)
   return table.concat(lines, "\n")
 end
 
+local function write_file(path, content)
+  vim.fn.mkdir(vim.fn.fnamemodify(path, ":h"), "p")
+  local f = assert(io.open(path, "w"))
+  f:write(content)
+  f:close()
+end
+
 local function assert_contains(label, haystack, needle)
   if type(haystack) ~= "string" or not haystack:find(needle, 1, true) then
     fail(label .. ": missing " .. vim.inspect(needle))
@@ -181,6 +188,11 @@ assert_contains("postgres serial CTE", postgres_rich_driver, "WITH cols AS")
 assert_contains("postgres include column split", postgres_rich_driver, "IncludeColumns")
 assert_contains("postgres sequence SQL", postgres_rich_driver, "JOIN pg_catalog.pg_sequence")
 assert_contains("postgres bench source", postgres_rich_tests, "BenchmarkPostgresRichMetadataGoParse")
+assert_contains("postgres bench aggregator source", postgres_rich_tests, "TestPostgresRichMetadataBenchAggregator")
+assert_true(
+  "postgres bench marker not emitted by benchmark parent",
+  not postgres_rich_tests:find('b.Log("RICH_PG_BENCH_GO_PARSE_P95_OK=true")', 1, true)
+)
 assert_contains("postgres go types marker source", core_types_test, "RICH_PG_GO_TYPES_BACKWARD_COMPAT=true")
 assert_contains("postgres marshal marker source", handler_marshal_test, "RICH_PG_MARSHAL_ADDITIVE_FIELDS_OK=true")
 assert_true(
@@ -192,8 +204,20 @@ assert_true(
 
 assert_contains("perf headless target", makefile, "perf-headless: perf-bootstrap")
 assert_contains("perf headless bootstrap command", makefile, "$(PERF_NVIM_HEADLESS) $(ARGS)")
-assert_contains("perf lsp postgres go markers", makefile, "TestRichMetadataTypesBackwardCompat|TestRichColumnMarshalPreservesFields|TestPostgres")
+assert_contains("perf lsp source tag go test", makefile, "source:go-test")
+assert_contains("perf lsp source tag go bench", makefile, "source:go-bench")
+assert_contains("perf lsp source tag lua", makefile, "source:lua-headless")
+assert_contains("perf lsp postgres go markers", makefile, "TestPostgresColumnsRichCompositeMetadata")
+assert_contains("perf lsp postgres go markers excludes bench aggregator", makefile, "-run 'TestRichMetadataTypesBackwardCompat")
+local makefile_joined = makefile:gsub("\\\n%s*", " ")
+local go_marker_command = makefile_joined:match('run_logged "source:go%-test".-%-v;')
+assert_true("perf lsp go marker command found", go_marker_command ~= nil)
+assert_true(
+  "perf lsp go marker command excludes bench aggregator",
+  not go_marker_command:find("TestPostgresRichMetadataBenchAggregator", 1, true)
+)
 assert_contains("perf lsp postgres benchmark", makefile, "BenchmarkPostgresRichMetadataGoParse")
+assert_contains("perf lsp postgres benchmark aggregator", makefile, "TestPostgresRichMetadataBenchAggregator")
 assert_contains("perf lsp postgres recursive make", makefile, "$(MAKE) --no-print-directory perf-headless ARGS='-l ci/headless/check_rich_metadata_postgres.lua'")
 local rich16_rollup_pos = ux13_rollup_src:find('"RICH16_ALL_PASS"', 1, true)
 local rich_pg_rollup_pos = ux13_rollup_src:find('"RICH_PG_ALL_PASS"', 1, true)
@@ -621,6 +645,85 @@ cache:get_columns_async("public", "mv_async", {
 assert_eq("mv async server probe starts at table", lsp_calls.async[1].materialization, "table")
 assert_contains("server source carries mv probe", server_src, 'materializations = { "table", "view", "materialized_view" }')
 
+local function notification_count(entries, fragment)
+  local count = 0
+  for _, entry in ipairs(entries or {}) do
+    if entry.level == vim.log.levels.WARN and entry.msg:find(fragment, 1, true) then
+      count = count + 1
+    end
+  end
+  return count
+end
+
+local migration_notifications = {}
+local saved_notify = vim.notify
+vim.notify = function(msg, level)
+  migration_notifications[#migration_notifications + 1] = {
+    msg = tostring(msg),
+    level = level,
+  }
+end
+
+local migration_calls = {}
+local migration_handler = {
+  get_schema_filter_normalized = function()
+    return schema_filter.normalize(nil, "postgres")
+  end,
+  get_authoritative_root_epoch = function()
+    return 0
+  end,
+  connection_get_columns = function(_, _conn_id, opts)
+    migration_calls[#migration_calls + 1] = vim.deepcopy(opts)
+    if opts.materialization == "materialized_view" then
+      return { { name = "fresh_id", type = "integer", generated = "s" } }
+    end
+    return {}
+  end,
+}
+local migration_cache = SchemaCache:new(migration_handler, "pg-v3-migration")
+migration_cache.cache_dir = vim.fn.tempname()
+vim.fn.mkdir(migration_cache.cache_dir, "p")
+local migration_schema_path = migration_cache:_cache_path()
+local migration_column_path = migration_cache:_columns_cache_path("public.mv_sales")
+write_file(migration_schema_path, vim.json.encode({
+  version = 3,
+  conn_id = "pg-v3-migration",
+  schema_filter_signature = migration_cache.schema_filter_signature,
+  root_epoch = 0,
+  schemas = { "public" },
+  tables = {
+    public = {
+      mv_sales = "materialized_view",
+    },
+  },
+}))
+write_file(migration_column_path, vim.json.encode({
+  version = 3,
+  schema_filter_signature = migration_cache.schema_filter_signature,
+  root_epoch = 0,
+  columns = {
+    { name = "stale_id", type = "integer" },
+  },
+}))
+local corrupt_before_v3 = notification_count(migration_notifications, "corrupt cache")
+assert_eq("pg v3 schema load returns false", migration_cache:load_from_disk(), false)
+assert_eq("pg v3 migration no corrupt warning", notification_count(migration_notifications, "corrupt cache"), corrupt_before_v3)
+assert_true("pg v3 schema cache removed", vim.fn.filereadable(migration_schema_path) == 0)
+assert_true("pg v3 column cache removed", vim.fn.filereadable(migration_column_path) == 0)
+assert_true("pg v3 migration flag recorded", vim.g.dbee_lsp_schema_cache_v3_to_v4_migrated ~= nil)
+assert_eq("pg v3 migration flag conn", vim.g.dbee_lsp_schema_cache_v3_to_v4_migrated.conn_id, "pg-v3-migration")
+assert_eq("pg v3 migration removed column count", vim.g.dbee_lsp_schema_cache_v3_to_v4_migrated.column_files_removed, 1)
+local fresh_columns = migration_cache:get_columns("public", "mv_sales", {
+  probe_if_missing = true,
+  schema_quoted = true,
+  table_quoted = true,
+  materializations = { "table", "view", "materialized_view" },
+})
+assert_eq("pg v3 migration fresh fetch columns", #fresh_columns, 1)
+assert_eq("pg v3 migration fresh fetch materialization", migration_calls[#migration_calls].materialization, "materialized_view")
+assert_true("pg v3 migration fresh column cache written", vim.fn.filereadable(migration_column_path) == 1)
+vim.notify = saved_notify
+
 local hover = object_docs.format_hover({
   kind = "table",
   schema = "public",
@@ -1031,12 +1134,33 @@ mark("RICH_PG_MATERIALIZED_VIEW_INDEXES_OK")
 
 local function marker_records_from_lines(lines)
   local records = {}
+  local has_source_tags = false
   for _, line in ipairs(lines or {}) do
+    if line:match("^===CMD%-SOURCE:%s*([%w_-]+)%s*===$") then
+      has_source_tags = true
+      break
+    end
+  end
+
+  local source_by_tag = {
+    ["go-test"] = "go",
+    ["go-bench"] = "bench",
+    ["lua-headless"] = "lua",
+  }
+  local current_source = nil
+  for _, line in ipairs(lines or {}) do
+    local source_tag = line:match("^===CMD%-SOURCE:%s*([%w_-]+)%s*===$")
+    if source_tag then
+      current_source = source_by_tag[source_tag] or source_tag
+    end
+
     local key, value = line:match("([%w_]+)=(.*)$")
     if key and value then
       local owner = STRICT_OWNERS[key]
       local source = "log"
-      if owner == "go" or owner == "bench" then
+      if has_source_tags then
+        source = current_source or "untagged"
+      elseif owner == "go" or owner == "bench" then
         source = owner
       end
       records[#records + 1] = {
@@ -1118,6 +1242,22 @@ local function synthetic_rollup_log()
   return lines
 end
 
+local function synthetic_tagged_rollup_log()
+  local lines = { "===CMD-SOURCE: go-test===" }
+  for _, marker in ipairs(STRICT_MARKERS) do
+    if STRICT_OWNERS[marker] == "go" then
+      lines[#lines + 1] = marker .. "=true"
+    end
+  end
+  lines[#lines + 1] = "===CMD-SOURCE: go-bench==="
+  for _, marker in ipairs(STRICT_MARKERS) do
+    if STRICT_OWNERS[marker] == "bench" then
+      lines[#lines + 1] = marker .. "=true"
+    end
+  end
+  return lines
+end
+
 local function synthetic_lua_records()
   local records = {}
   for _, marker in ipairs(STRICT_MARKERS) do
@@ -1146,6 +1286,10 @@ local function run_rollup_self_tests()
   assert_true("pg rollup synthetic valid", good.ok)
   assert_eq("pg rollup diagnostic excluded count", good.count, 35)
 
+  local good_tagged = evaluate_pg_rollup(synthetic_tagged_rollup_log(), synthetic_lua_records())
+  assert_true("pg rollup tagged synthetic valid", good_tagged.ok)
+  assert_eq("pg rollup tagged count", good_tagged.count, 35)
+
   local missing_log = synthetic_rollup_log()
   for index, line in ipairs(missing_log) do
     if line:find("RICH_PG_SUPPORT_TRUE=", 1, true) then
@@ -1172,6 +1316,20 @@ local function run_rollup_self_tests()
   assert_true(
     "pg rollup wrong source fails",
     has_failure(evaluate_pg_rollup(synthetic_rollup_log(), wrong_source_records), "wrong source lua")
+  )
+
+  local wrong_source_bench_log = synthetic_tagged_rollup_log()
+  table.insert(wrong_source_bench_log, 2, "RICH_PG_BENCH_GO_PARSE_P95_OK=true")
+  assert_true(
+    "pg rollup wrong source bench marker fails",
+    has_failure(evaluate_pg_rollup(wrong_source_bench_log, synthetic_lua_records()), "wrong source go")
+  )
+
+  local wrong_source_go_log = synthetic_tagged_rollup_log()
+  wrong_source_go_log[#wrong_source_go_log + 1] = "RICH_PG_SUPPORT_TRUE=true"
+  assert_true(
+    "pg rollup wrong source go marker fails",
+    has_failure(evaluate_pg_rollup(wrong_source_go_log, synthetic_lua_records()), "wrong source bench")
   )
 
   local ok_guard = pcall(mark, "RICH_PG_SUPPORT_TRUE")
