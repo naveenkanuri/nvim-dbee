@@ -510,7 +510,6 @@ local function append_note_picker_section(items, title, notes, tag, empty_hint)
       text = note.name,
       note_id = note.id,
       file = note.file,
-      tag = tag,
     })
   end
 end
@@ -577,13 +576,13 @@ function dbee.pick_notes()
   })
 
   if #global_notes > 0 then
-    append_note_picker_section(items, "Global notes", global_notes, "[global]")
+    append_note_picker_section(items, "Global notes", global_notes, nil)
   else
     append_note_picker_section(
       items,
       "Global notes",
       global_notes,
-      "[global]",
+      nil,
       "No global notes — press <C-g> to create"
     )
   end
@@ -593,14 +592,9 @@ function dbee.pick_notes()
       items,
       ("Local notes (%s)"):format(current_connection.name),
       local_notes,
-      ("[local: %s]"):format(current_connection.name),
+      nil,
       #local_notes == 0 and ("No local notes for %s — press <C-l> to create"):format(current_connection.name) or nil
     )
-  end
-
-  local max_tag_len = 0
-  for _, item in ipairs(items) do
-    max_tag_len = math.max(max_tag_len, #(item.tag or ""))
   end
 
   local picker
@@ -619,7 +613,6 @@ function dbee.pick_notes()
         }
       end
       return {
-        { ("%-" .. max_tag_len .. "s"):format(item.tag or ""), "SnacksPickerLabel" },
         { "  " },
         { item.text, "SnacksPickerFile" },
       }
