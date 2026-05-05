@@ -221,6 +221,13 @@ end
 M.column_nodes = column_nodes
 M.ID_SEP = ID_SEP
 M.LOAD_MORE_SUFFIX = LOAD_MORE_SUFFIX
+M.encode_node_segment = encode_node_segment
+
+---@param conn_id string
+---@return string
+function M.database_node_id(conn_id)
+  return conn_id .. ID_SEP .. encode_node_segment({ "__database__" })
+end
 
 ---@param parent_id string
 ---@param kind string
@@ -336,8 +343,9 @@ end
 
 ---@param branch_id string
 ---@param kind string
+---@param render_parent_id? string
 ---@return DrawerUINode
-function M.load_more_node(branch_id, kind)
+function M.load_more_node(branch_id, kind, render_parent_id)
   return NuiTree.Node({
     id = M.load_more_node_id(branch_id),
     name = "Load more...",
@@ -345,6 +353,7 @@ function M.load_more_node(branch_id, kind)
     structure_load_more = {
       branch_id = branch_id,
       kind = kind,
+      render_parent_id = render_parent_id,
     },
   }) --[[@as DrawerUINode]]
 end
@@ -660,26 +669,6 @@ function connection_nodes(handler, conn, result, structure_cache, opts, source_m
 
   -- recursively parse structure to drawer nodes
   local nodes = to_tree_nodes(structs, conn.id)
-
-  -- database switching
-  local current_db, available_dbs = handler:connection_list_databases(conn.id)
-  if current_db ~= "" and #available_dbs > 0 then
-    local ly = NuiTree.Node {
-      id = conn.id .. "_database_switch__",
-      name = current_db,
-      type = "database_switch",
-      action_1 = function(_, select)
-        select {
-          title = "Select a Database",
-          items = available_dbs,
-          on_confirm = function(selection)
-            handler:connection_select_database(conn.id, selection)
-          end,
-        }
-      end,
-    } --[[@as DrawerUINode]]
-    table.insert(nodes, 1, ly)
-  end
 
   return nodes
 end

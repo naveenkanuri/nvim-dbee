@@ -4,6 +4,7 @@ local M = {}
 
 local SEARCHABLE_TYPES = {
   folder = true,
+  database = true,
   schema = true,
   table = true,
   view = true,
@@ -176,12 +177,21 @@ local function add_search_part(parts, value)
   parts[#parts + 1] = tostring(value)
 end
 
-local function build_search_connection_node(conn, source_meta, structure_cache, structure_ready)
+local function build_search_connection_node(conn, source_meta, structure_cache, structure_ready, opts)
   local display_name = search_connection_name(conn, source_meta)
   local cached = structure_cache and structure_cache.root and structure_cache.root[conn.id] or structure_cache and structure_cache[conn.id]
   local children = {}
   if structure_ready and cached then
-    children = build_search_struct_nodes(cached.structures, conn.id)
+    local database_node = opts
+      and type(opts.database_node_for_connection) == "function"
+      and opts.database_node_for_connection(conn, cached)
+      or nil
+    if database_node then
+      database_node.children = build_search_struct_nodes(cached.structures, database_node.id)
+      children = { database_node }
+    else
+      children = build_search_struct_nodes(cached.structures, conn.id)
+    end
   end
 
   return {
@@ -232,11 +242,12 @@ end
 
 ---@param handler Handler
 ---@param structure_cache table
+---@param opts? { database_node_for_connection?: fun(conn: ConnectionParams, cached: table): table? }
 ---@return table[] search_model
 ---@return DrawerModelCoverage coverage
 ---@return table<string, true> all_search_conn_ids
 ---@return table<string, true> ready_conn_ids
-function M.build_search_model(handler, structure_cache)
+function M.build_search_model(handler, structure_cache, opts)
   local coverage = { ready_connections = 0, total_connections = 0 }
   local search_model = {}
   local root_id = "__handler_root__"
@@ -276,7 +287,7 @@ function M.build_search_model(handler, structure_cache)
         local conn = conn_by_id[conn_id]
         if conn then
           in_folder[conn_id] = true
-          children[#children + 1] = build_search_connection_node(conn, source_meta, structure_cache, ready_set[conn_id])
+          children[#children + 1] = build_search_connection_node(conn, source_meta, structure_cache, ready_set[conn_id], opts)
         end
       end
       search_model[#search_model + 1] = {
@@ -293,7 +304,7 @@ function M.build_search_model(handler, structure_cache)
 
     for _, conn in ipairs(conns) do
       if not in_folder[conn.id] then
-        search_model[#search_model + 1] = build_search_connection_node(conn, source_meta, structure_cache, ready_set[conn.id])
+        search_model[#search_model + 1] = build_search_connection_node(conn, source_meta, structure_cache, ready_set[conn.id], opts)
       end
     end
   end
@@ -369,6 +380,12 @@ function M.merge_visible_connection_rows(search_model, rendered_snapshot, all_se
     end
     if conn_id and not all_ids[conn_id] then
       all_ids[conn_id] = true
+      local visible_children = {}
+      for _, child in ipairs(node.children or {}) do
+        if child.type == "database" then
+          visible_children[#visible_children + 1] = child
+        end
+      end
       merged_model[#merged_model + 1] = {
         id = node.id,
         name = node.name,
@@ -381,7 +398,7 @@ function M.merge_visible_connection_rows(search_model, rendered_snapshot, all_se
         action_2 = node.action_2,
         action_3 = node.action_3,
         lazy_children = node.lazy_children,
-        children = {},
+        children = visible_children,
       }
     end
   end

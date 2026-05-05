@@ -144,6 +144,11 @@ config.default = {
         icon_highlight = "Character",
         text_highlight = "",
       },
+      database = {
+        icon = "",
+        icon_highlight = "Character",
+        text_highlight = "",
+      },
       schema = {
         icon = "",
         icon_highlight = "Removed",

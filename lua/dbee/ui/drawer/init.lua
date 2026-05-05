@@ -50,7 +50,7 @@ end
 ---@class DrawerUINode: NuiTree.Node
 ---@field id string unique identifier
 ---@field name string display name
----@field type ""|"table"|"view"|"procedure"|"function"|"column"|"index"|"sequence"|"history"|"note"|"connection"|"folder"|"database_switch"|"add"|"edit"|"remove"|"help"|"source"|"separator"|"load_more" type of node
+---@field type ""|"database"|"table"|"view"|"procedure"|"function"|"column"|"index"|"sequence"|"history"|"note"|"connection"|"folder"|"database_switch"|"add"|"edit"|"remove"|"help"|"source"|"separator"|"load_more" type of node
 ---@field schema? string
 ---@field raw_name? string
 ---@field folder_id? string
@@ -126,6 +126,7 @@ end
 local DrawerUI = {}
 
 local SEARCHABLE_TYPES = drawer_model.SEARCHABLE_TYPES or {
+  database = true,
   schema = true,
   table = true,
   view = true,
@@ -149,6 +150,46 @@ local TABLE_LIKE_TYPES = {
   view = true,
   materialized_view = true,
 }
+
+local CANONICAL_TOPOLOGY = {
+  postgres = "nested",
+  sqlserver = "nested",
+  redshift = "nested",
+  databricks = "nested",
+  mongo = "nested",
+
+  mysql = "flat",
+  clickhouse = "flat",
+  sqlite = "flat",
+  duck = "flat",
+  oracle = "flat",
+  bigquery = "flat",
+  redis = "flat",
+}
+
+local DEFERRED_CANONICAL_TOPOLOGY = {}
+for stem in pairs(DEFERRED_CANONICAL_TOPOLOGY) do
+  CANONICAL_TOPOLOGY[stem] = "deferred"
+end
+
+local ALIAS_TO_CANONICAL = {
+  postgresql = "postgres",
+  pg = "postgres",
+  mssql = "sqlserver",
+  mongodb = "mongo",
+  duckdb = "duck",
+}
+
+local function canonical_adapter_stem(adapter_type)
+  local stem = tostring(adapter_type or ""):lower()
+  stem = stem:gsub("_driver$", "")
+  return ALIAS_TO_CANONICAL[stem] or stem
+end
+
+local function adapter_topology(adapter_type)
+  local canonical = canonical_adapter_stem(adapter_type)
+  return CANONICAL_TOPOLOGY[canonical] or "flat", canonical
+end
 
 local function normalize_mapping_lhs(key)
   return vim.api.nvim_replace_termcodes(key, true, true, true)
@@ -467,6 +508,96 @@ local function database_switch_node_id(conn_id)
   return conn_id .. DATABASE_SWITCH_SUFFIX
 end
 
+---@param conn_id string
+---@return string
+local function database_node_id(conn_id)
+  if type(convert.database_node_id) == "function" then
+    return convert.database_node_id(conn_id)
+  end
+  return conn_id .. ID_SEP .. convert.encode_node_segment({ "__database__" })
+end
+
+---@param conn_id string
+---@return string
+local function database_node_child_prefix(conn_id)
+  return database_node_id(conn_id) .. ID_SEP
+end
+
+---@param ui DrawerUI
+---@param conn_or_id ConnectionParams|string|nil
+---@return boolean
+local function connection_uses_database_container(ui, conn_or_id)
+  if not ui or type(ui.handler) ~= "table" then
+    return false
+  end
+  local conn = conn_or_id
+  if type(conn_or_id) == "string" then
+    local ok, params = pcall(ui.handler.connection_get_params, ui.handler, conn_or_id)
+    conn = ok and params or nil
+    if
+      type(conn) ~= "table"
+      and type(ui.handler.get_sources) == "function"
+      and type(ui.handler.source_get_connections) == "function"
+    then
+      local ok_sources, sources = pcall(ui.handler.get_sources, ui.handler)
+      sources = ok_sources and sources or {}
+      for _, source in ipairs(sources) do
+        local source_id = type(source.name) == "function" and source:name() or nil
+        if source_id then
+          local ok_conns, conns = pcall(ui.handler.source_get_connections, ui.handler, source_id)
+          for _, candidate in ipairs(ok_conns and conns or {}) do
+            if candidate.id == conn_or_id then
+              conn = candidate
+              break
+            end
+          end
+        end
+        if type(conn) == "table" then
+          break
+        end
+      end
+    end
+  end
+  if type(conn) ~= "table" then
+    return false
+  end
+  return adapter_topology(conn.type) == "nested"
+end
+
+---@param ui DrawerUI
+---@param conn_id string
+---@param node_id string
+---@return string
+local function rewrite_database_scoped_node_id(ui, conn_id, node_id)
+  if type(node_id) ~= "string" or not connection_uses_database_container(ui, conn_id) then
+    return node_id
+  end
+
+  local db_id = database_node_id(conn_id)
+  if
+    node_id == conn_id
+    or node_id == db_id
+    or node_id == database_switch_node_id(conn_id)
+    or node_id == load_more_node_id(conn_id)
+    or node_id == conn_id .. ID_SEP .. "__loading__"
+    or node_id == conn_id .. ID_SEP .. "__error__"
+  then
+    return node_id
+  end
+
+  local db_prefix = db_id .. ID_SEP
+  if node_id:sub(1, #db_prefix) == db_prefix then
+    return node_id
+  end
+
+  local conn_prefix = conn_id .. ID_SEP
+  if node_id:sub(1, #conn_prefix) == conn_prefix then
+    return db_id .. node_id:sub(#conn_id + 1)
+  end
+
+  return node_id
+end
+
 ---@param node_id string
 ---@param old_conn_id string
 ---@param new_conn_id string
@@ -502,9 +633,143 @@ local function rewrite_conn_scoped_ids(ids, old_conn_id, new_conn_id)
   return rewritten
 end
 
----@param snapshot_nodes DrawerRenderSnapshotNode[]?
+---@param conn_id string
+---@param children DrawerRenderSnapshotNode[]
+---@return table<string, boolean>
+local function snapshot_child_id_set(children)
+  local seen = {}
+  for _, child in ipairs(children or {}) do
+    if type(child.id) == "string" then
+      seen[child.id] = true
+    end
+  end
+  return seen
+end
+
+---@param children DrawerRenderSnapshotNode[]
+---@param child DrawerRenderSnapshotNode
+---@param seen table<string, boolean>
+local function append_unique_snapshot_child(children, child, seen)
+  if not child then
+    return
+  end
+  local child_id = child.id
+  if type(child_id) == "string" and seen[child_id] then
+    return
+  end
+  children[#children + 1] = child
+  if type(child_id) == "string" then
+    seen[child_id] = true
+  end
+end
+
+---@param conn_id string
+---@param snap DrawerRenderSnapshotNode
+---@return boolean
+local function snapshot_child_belongs_under_database(conn_id, snap)
+  if type(snap) ~= "table" or snap.id == database_node_id(conn_id) then
+    return false
+  end
+  if snap.type == "" or snap.type == "database_switch" or snap.type == "header" or snap.type == "separator" then
+    return false
+  end
+  if snap.id == database_switch_node_id(conn_id) then
+    return false
+  end
+  if snap.type == "load_more" and snap.id == load_more_node_id(conn_id) then
+    return true
+  end
+  local db_prefix = database_node_child_prefix(conn_id)
+  return type(snap.id) == "string" and snap.id:sub(1, #db_prefix) == db_prefix
+end
+
+---@param ui DrawerUI
+---@param conn_id string
+---@param children DrawerRenderSnapshotNode[]
 ---@return DrawerRenderSnapshotNode[]
-local function clone_rendered_snapshot(snapshot_nodes)
+local function wrap_database_snapshot_children(ui, conn_id, children)
+  if not connection_uses_database_container(ui, conn_id) then
+    return children or {}
+  end
+
+  local db_id = database_node_id(conn_id)
+  local db_child = nil
+  local db_insert_index = nil
+  local db_wrapped_children = {}
+  local next_children = {}
+
+  for _, child in ipairs(children or {}) do
+    if child.id == database_switch_node_id(conn_id) or child.type == "database_switch" then
+      -- Nested adapters replace the legacy switch row with the database container.
+    elseif child.id == db_id or child.type == "database" then
+      db_child = db_child or child
+      next_children[#next_children + 1] = child
+    elseif snapshot_child_belongs_under_database(conn_id, child) then
+      db_insert_index = db_insert_index or (#next_children + 1)
+      db_wrapped_children[#db_wrapped_children + 1] = child
+    else
+      next_children[#next_children + 1] = child
+    end
+  end
+
+  if #db_wrapped_children > 0 then
+    if db_child then
+      db_child.children = db_child.children or {}
+      local seen = snapshot_child_id_set(db_child.children)
+      for _, child in ipairs(db_wrapped_children) do
+        append_unique_snapshot_child(db_child.children, child, seen)
+      end
+      db_child.rendered_children_loaded = true
+    else
+      db_child = ui:_database_snapshot_node(conn_id, db_wrapped_children)
+      table.insert(next_children, db_insert_index or 1, db_child)
+    end
+  end
+
+  return next_children
+end
+
+---@param ui DrawerUI
+---@param snapshot_nodes DrawerRenderSnapshotNode[]?
+---@param inherited_conn_id? string
+---@param wrap_root_children? boolean
+---@return DrawerRenderSnapshotNode[]
+local function rewrite_database_snapshot_nodes(ui, snapshot_nodes, inherited_conn_id, wrap_root_children)
+  local rewritten = {}
+  for _, snap in ipairs(snapshot_nodes or {}) do
+    local conn_id = snap.type == "connection" and (snap.conn_id or snap.id) or inherited_conn_id
+    local copy = {}
+    for key, value in pairs(snap) do
+      if key ~= "children" then
+        copy[key] = key == "fk_refs" and vim.deepcopy(value or {}) or value
+      end
+    end
+
+    if conn_id and snap.type ~= "connection" then
+      copy.id = rewrite_database_scoped_node_id(ui, conn_id, copy.id)
+    end
+
+    copy.children = rewrite_database_snapshot_nodes(ui, snap.children, conn_id)
+
+    if snap.type == "connection" and conn_id and connection_uses_database_container(ui, conn_id) then
+      copy.children = wrap_database_snapshot_children(ui, conn_id, copy.children)
+    end
+
+    rewritten[#rewritten + 1] = copy
+  end
+  if wrap_root_children and inherited_conn_id then
+    rewritten = wrap_database_snapshot_children(ui, inherited_conn_id, rewritten)
+  end
+  return rewritten
+end
+
+---@param snapshot_nodes DrawerRenderSnapshotNode[]?
+---@param ui? DrawerUI
+---@return DrawerRenderSnapshotNode[]
+local function clone_rendered_snapshot(snapshot_nodes, ui)
+  if ui then
+    snapshot_nodes = rewrite_database_snapshot_nodes(ui, snapshot_nodes)
+  end
   local cloned = {}
   for _, snap in ipairs(snapshot_nodes or {}) do
     table.insert(cloned, {
@@ -549,8 +814,12 @@ local function collect_loaded_lazy_ids(snapshot_nodes, out)
 end
 
 ---@param snapshot_nodes DrawerRenderSnapshotNode[]?
+---@param ui? DrawerUI
 ---@return DrawerUINode[]
-local function snapshot_to_tree_nodes(snapshot_nodes)
+local function snapshot_to_tree_nodes(snapshot_nodes, ui, inherited_conn_id, wrap_root_children)
+  if ui then
+    snapshot_nodes = rewrite_database_snapshot_nodes(ui, snapshot_nodes, inherited_conn_id, wrap_root_children)
+  end
   local restored = {}
   for _, snap in ipairs(snapshot_nodes or {}) do
     local children = nil
@@ -657,14 +926,69 @@ local function sorted_expansion_ids(expansion_ids)
 end
 
 ---@param ui DrawerUI
+---@param conn_id string
+---@param expansion_ids table<string, boolean>?
+---@return table<string, boolean>
+local function normalize_database_expansion_ids(ui, conn_id, expansion_ids)
+  if not connection_uses_database_container(ui, conn_id) then
+    return expansion_ids or {}
+  end
+
+  local normalized = {}
+  local db_id = database_node_id(conn_id)
+  local db_prefix = db_id .. ID_SEP
+  local conn_prefix = conn_id .. ID_SEP
+  for node_id, expanded in pairs(expansion_ids or {}) do
+    if expanded and type(node_id) == "string" then
+      local rewritten = rewrite_database_scoped_node_id(ui, conn_id, node_id)
+      normalized[rewritten] = true
+      if rewritten == db_id or rewritten:sub(1, #db_prefix) == db_prefix then
+        normalized[db_id] = true
+      elseif node_id:sub(1, #conn_prefix) == conn_prefix and node_id ~= load_more_node_id(conn_id) then
+        normalized[db_id] = true
+      end
+    end
+  end
+  return normalized
+end
+
+---@param ui DrawerUI
+---@param expansion_ids table<string, boolean>?
+---@return table<string, boolean>?
+local function normalize_database_expansion_state(ui, expansion_ids)
+  if not expansion_ids then
+    return expansion_ids
+  end
+
+  local normalized = {}
+  for node_id, expanded in pairs(expansion_ids or {}) do
+    if expanded and type(node_id) == "string" then
+      local sep_start = node_id:find(ID_SEP, 1, true)
+      local conn_id = sep_start and node_id:sub(1, sep_start - 1) or node_id
+      local rewritten = normalize_database_expansion_ids(ui, conn_id, { [node_id] = true })
+      for rewritten_id, rewritten_expanded in pairs(rewritten) do
+        if rewritten_expanded then
+          normalized[rewritten_id] = true
+        end
+      end
+    end
+  end
+  return normalized
+end
+
+---@param ui DrawerUI
 ---@param node table
 ---@param inherited_conn_id string?
 ---@param children? DrawerUINode[]
 ---@return DrawerUINode
 local function searchable_node_to_tree_node(ui, node, inherited_conn_id, children)
   local conn_id = node.type == "connection" and (node.conn_id or node.id) or inherited_conn_id
+  local node_id = node.id
+  if conn_id and node.type ~= "connection" then
+    node_id = rewrite_database_scoped_node_id(ui, conn_id, node_id)
+  end
   local tree_node = NuiTree.Node({
-    id = node.id,
+    id = node_id,
     name = node.name,
     type = node.type,
     schema = node.schema,
@@ -696,7 +1020,7 @@ local function searchable_node_to_tree_node(ui, node, inherited_conn_id, childre
     end)
   elseif SEARCHABLE_TYPES[node.type] then
     local struct_meta = node.struct_meta or {
-      id = node.id,
+      id = node_id,
       name = node.name,
       schema = node.schema,
       type = node.type,
@@ -704,7 +1028,7 @@ local function searchable_node_to_tree_node(ui, node, inherited_conn_id, childre
     local lazy_children_factory
     if TABLE_LIKE_TYPES[node.type] then
       lazy_children_factory = function()
-        return ui:_materialize_table_like_branch(conn_id or "", node.id, struct_meta)
+        return ui:_materialize_table_like_branch(conn_id or "", node_id, struct_meta)
       end
     end
     convert.decorate_structure_node(tree_node, ui.handler, ui.result, conn_id or "", struct_meta, lazy_children_factory)
@@ -1047,8 +1371,11 @@ end
 ---@param conn_id string
 ---@param branch_id string
 ---@param kind? string
+---@param opts? { render_parent_id?: string }
 ---@return DrawerUINode[]
-local function build_branch_nodes(ui, conn_id, branch_id, kind)
+local function build_branch_nodes(ui, conn_id, branch_id, kind, opts)
+  opts = opts or {}
+  local render_parent_id = opts.render_parent_id or branch_id
   local state = branch_state(ui, conn_id, branch_id, kind, false)
   if not state then
     return {}
@@ -1076,7 +1403,7 @@ local function build_branch_nodes(ui, conn_id, branch_id, kind)
   local nodes = {}
   if kind == STRUCTURES_KIND then
     for _, struct in ipairs(chunk) do
-      nodes[#nodes + 1] = ui:_build_structure_node(conn_id, branch_id, struct)
+      nodes[#nodes + 1] = ui:_build_structure_node(conn_id, render_parent_id, struct)
     end
   elseif kind == INDEXES_KIND then
     local visible = {}
@@ -1097,7 +1424,7 @@ local function build_branch_nodes(ui, conn_id, branch_id, kind)
   end
 
   if built_count < #raw then
-    nodes[#nodes + 1] = convert.load_more_node(branch_id, kind or COLUMNS_KIND)
+    nodes[#nodes + 1] = convert.load_more_node(branch_id, kind or COLUMNS_KIND, render_parent_id)
   end
 
   return nodes
@@ -1175,11 +1502,23 @@ local function build_connection_children(ui, conn, opts)
   cached_branch.loading = false
   cached_branch.error = nil
   cached_branch.raw = sorted_struct_children(cached_root.structures)
-  nodes = build_branch_nodes(ui, conn.id, conn.id, STRUCTURES_KIND)
+  local use_database_container = connection_uses_database_container(ui, conn)
+  local root_parent_id = use_database_container and database_node_id(conn.id) or conn.id
+  nodes = build_branch_nodes(ui, conn.id, conn.id, STRUCTURES_KIND, {
+    render_parent_id = root_parent_id,
+  })
 
-  local database_switch_node = ui:_build_database_switch_node(conn.id)
-  if database_switch_node then
-    table.insert(nodes, 1, database_switch_node)
+  if use_database_container then
+    local database_node = ui:_build_database_node(conn.id, nodes)
+    if database_node then
+      return { database_node }
+    end
+    return nodes
+  else
+    local database_switch_node = ui:_build_database_switch_node(conn.id)
+    if database_switch_node then
+      table.insert(nodes, 1, database_switch_node)
+    end
   end
 
   return nodes
@@ -1407,8 +1746,33 @@ function DrawerUI:_materialize_schema_branch(conn_id, node_id, struct)
   return self:_with_schema_metadata_children(conn_id, node_id, struct, { convert.loading_node(node_id) })
 end
 
+function DrawerUI:_migrate_legacy_schema_branch_state(conn_id, parent_id, struct, node_id)
+  if parent_id ~= database_node_id(conn_id) or struct.type ~= "schema" then
+    return
+  end
+
+  local legacy_id = convert.structure_node_id(conn_id, struct)
+  if legacy_id == node_id then
+    return
+  end
+
+  local branches = self._struct_cache.branches[conn_id]
+  if branches then
+    local legacy_key = branch_cache_key(legacy_id, STRUCTURES_KIND)
+    local new_key = branch_cache_key(node_id, STRUCTURES_KIND)
+    if branches[legacy_key] and not branches[new_key] then
+      branches[new_key] = branches[legacy_key]
+    end
+  end
+
+  if self._struct_cache.loaded_lazy_ids[legacy_id] and not self._struct_cache.loaded_lazy_ids[node_id] then
+    self._struct_cache.loaded_lazy_ids[node_id] = true
+  end
+end
+
 function DrawerUI:_build_structure_node(conn_id, parent_id, struct)
   local node_id = convert.structure_node_id(parent_id, struct)
+  self:_migrate_legacy_schema_branch_state(conn_id, parent_id, struct, node_id)
   local built_children = nil
   local lazy_children_factory = nil
 
@@ -1502,6 +1866,7 @@ function DrawerUI:_patch_connection_subtree(conn_id, opts)
   if opts.restore_container_expansions then
     local replay = self._replay_container_expansions[conn_id]
     self._replay_container_expansions[conn_id] = nil
+    replay = normalize_database_expansion_ids(self, conn_id, replay)
     for _, node_id in ipairs(sorted_expansion_ids(replay)) do
       if node_id ~= conn_id then
         local child = self.tree:get_node(node_id)
@@ -1550,7 +1915,7 @@ function DrawerUI:_capture_container_expansions(conn_id)
       end
     end
   end
-  self._replay_container_expansions[conn_id] = captured
+  self._replay_container_expansions[conn_id] = normalize_database_expansion_ids(self, conn_id, captured)
 end
 
 function DrawerUI:_prune_loaded_lazy_ids(conn_id)
@@ -1609,6 +1974,108 @@ function DrawerUI:_start_database_switch_load(conn_id, carried)
     end
   end
   return state
+end
+
+---@private
+---@param conn_id string
+---@param opts? { start_load?: boolean, allow_placeholder?: boolean }
+---@return table|nil
+function DrawerUI:_database_node_fields(conn_id, opts)
+  opts = opts or {}
+  local state = self._database_switch_state[conn_id]
+  if not state and opts.start_load then
+    state = self:_start_database_switch_load(conn_id)
+  end
+
+  local current_name = state and tostring(state.current or "") or ""
+  local available = state and vim.deepcopy(state.available or {}) or {}
+  local node_name = current_name
+
+  if state and state.loading then
+    node_name = current_name ~= "" and (current_name .. " (loading databases...)") or "loading databases..."
+  elseif state and state.error then
+    node_name = "database switch unavailable: " .. tostring(state.error)
+  elseif current_name == "" then
+    if not opts.allow_placeholder then
+      return nil
+    end
+    node_name = "database"
+  end
+
+  local fields = {
+    id = database_node_id(conn_id),
+    name = node_name,
+    raw_name = current_name ~= "" and current_name or nil,
+    type = "database",
+    conn_id = conn_id,
+    search_text = current_name ~= "" and current_name or node_name,
+  }
+
+  if #available > 0 then
+    fields.action_1 = function(_, select)
+      select {
+        title = "Select a Database",
+        items = available,
+        on_confirm = function(selection)
+          self.handler:connection_select_database(conn_id, selection)
+        end,
+      }
+    end
+  end
+
+  return fields
+end
+
+---@private
+---@param conn_id string
+---@param children DrawerUINode[]
+---@return DrawerUINode|nil
+function DrawerUI:_build_database_node(conn_id, children)
+  local fields = self:_database_node_fields(conn_id, { start_load = true })
+  if not fields then
+    return nil
+  end
+  return NuiTree.Node(fields, children) --[[@as DrawerUINode]]
+end
+
+---@private
+---@param conn_id string
+---@param children DrawerRenderSnapshotNode[]
+---@return DrawerRenderSnapshotNode
+function DrawerUI:_database_snapshot_node(conn_id, children)
+  local fields = self:_database_node_fields(conn_id, { allow_placeholder = true }) or {
+    id = database_node_id(conn_id),
+    name = "database",
+    type = "database",
+    conn_id = conn_id,
+  }
+  fields.children = children or {}
+  fields.rendered_children_loaded = true
+  return fields
+end
+
+---@private
+---@param conn ConnectionParams
+---@param cached_root table
+---@return table|nil
+function DrawerUI:_database_search_node(conn, cached_root)
+  local _ = cached_root
+  if not connection_uses_database_container(self, conn) then
+    return nil
+  end
+  local fields = self:_database_node_fields(conn.id, { allow_placeholder = true }) or {
+    id = database_node_id(conn.id),
+    name = "database",
+    type = "database",
+    conn_id = conn.id,
+  }
+  fields.struct_meta = {
+    id = fields.id,
+    name = fields.raw_name or fields.name,
+    type = "database",
+  }
+  fields.children = {}
+  return fields
 end
 
 ---@private
@@ -1696,8 +2163,10 @@ end
 
 ---@param branch_id string
 ---@param kind? string
-function DrawerUI:structure_load_more(branch_id, kind)
+---@param render_parent_id? string
+function DrawerUI:structure_load_more(branch_id, kind, render_parent_id)
   local conn_id = branch_owner_conn_id(branch_id)
+  render_parent_id = render_parent_id or branch_id
   local state = branch_state(self, conn_id, branch_id, kind, false)
   if not state or state.loading or state.error then
     return
@@ -1718,7 +2187,7 @@ function DrawerUI:structure_load_more(branch_id, kind)
     return
   end
 
-  local branch_node = self.tree:get_node(branch_id)
+  local branch_node = self.tree:get_node(render_parent_id)
   if not branch_node then
     state.built_count = next_built
     invalidate_render_snapshot(self)
@@ -1729,7 +2198,7 @@ function DrawerUI:structure_load_more(branch_id, kind)
   for index = state.built_count + 1, next_built do
     local nodes
     if kind == STRUCTURES_KIND then
-      nodes = { self:_build_structure_node(conn_id, branch_id, raw[index]) }
+      nodes = { self:_build_structure_node(conn_id, render_parent_id, raw[index]) }
     elseif kind == INDEXES_KIND then
       nodes = raw[index] and raw[index].pk_backed ~= true and convert.index_nodes(branch_id, { raw[index] }) or {}
     elseif kind == SEQUENCES_KIND then
@@ -1742,13 +2211,13 @@ function DrawerUI:structure_load_more(branch_id, kind)
       })
     end
     for _, child in ipairs(nodes) do
-      self.tree:add_node(child, branch_id)
+      self.tree:add_node(child, render_parent_id)
     end
   end
   state.built_count = next_built
 
   if next_built < #raw then
-    self.tree:add_node(convert.load_more_node(branch_id, kind or COLUMNS_KIND), branch_id)
+    self.tree:add_node(convert.load_more_node(branch_id, kind or COLUMNS_KIND, render_parent_id), render_parent_id)
   end
 
   branch_node._materialized_in_tree = true
@@ -2764,7 +3233,11 @@ end
 function DrawerUI:capture_filter_snapshot()
   if not self.cached_search_model then
     local search_model, coverage, all_search_conn_ids, ready_conn_ids =
-      drawer_model.build_search_model(self.handler, self._struct_cache)
+      drawer_model.build_search_model(self.handler, self._struct_cache, {
+        database_node_for_connection = function(conn, cached_root)
+          return self:_database_search_node(conn, cached_root)
+        end,
+      })
     self.cached_search_model = {
       nodes = search_model,
       coverage = coverage,
@@ -2793,7 +3266,7 @@ function DrawerUI:capture_filter_snapshot()
   self.filter_total_connections = coverage.total_connections
   self.filter_visible_connections = visible_connections
   self.filter_visible_uncached_connections = visible_uncached_connections
-  self.filter_restore_snapshot = clone_rendered_snapshot(self.cached_render_snapshot)
+  self.filter_restore_snapshot = clone_rendered_snapshot(self.cached_render_snapshot, self)
   self.filter_search_model = merged_model
   return true, nil
 end
@@ -2920,9 +3393,11 @@ function DrawerUI:render_restore_snapshot(snapshot, expansion_state, cursor)
   snapshot = snapshot or self.filter_restore_snapshot
   expansion_state = expansion_state or self.pre_filter_expansion
   cursor = cursor or self.pre_filter_cursor
+  snapshot = rewrite_database_snapshot_nodes(self, snapshot)
+  expansion_state = normalize_database_expansion_state(self, expansion_state)
 
   self._struct_cache.loaded_lazy_ids = collect_loaded_lazy_ids(snapshot)
-  self.tree:set_nodes(snapshot_to_tree_nodes(snapshot or {}))
+  self.tree:set_nodes(snapshot_to_tree_nodes(snapshot or {}, self))
   local unresolved = restore_expansion_state(self, expansion_state)
   self.tree:render()
 
@@ -3429,7 +3904,11 @@ function DrawerUI:get_actions()
         return
       end
       if node.structure_load_more then
-        self:structure_load_more(node.structure_load_more.branch_id, node.structure_load_more.kind)
+        self:structure_load_more(
+          node.structure_load_more.branch_id,
+          node.structure_load_more.kind,
+          node.structure_load_more.render_parent_id
+        )
         return
       end
       perform_node_action(node, "action_1")
@@ -4063,6 +4542,7 @@ function DrawerUI:get_actions()
       end
 
       local yankable_types = {
+        database = true,
         table = true,
         view = true,
         materialized_view = true,
@@ -4076,7 +4556,13 @@ function DrawerUI:get_actions()
       end
 
       local qualified_name
-      if node.type == "column" then
+      if node.type == "database" then
+        qualified_name = node.raw_name
+        if not qualified_name or qualified_name == "" then
+          utils.log("warn", "Nothing to copy (database unavailable)")
+          return
+        end
+      elseif node.type == "column" then
         local parent = self.tree:get_node(node:get_parent_id())
         if not parent or not parent.name then
           utils.log("warn", "Nothing to copy")
@@ -4197,7 +4683,11 @@ function DrawerUI:get_actions()
               local node = self.tree:get_node()
               if node then
                 if node.structure_load_more then
-                  self:structure_load_more(node.structure_load_more.branch_id, node.structure_load_more.kind)
+                  self:structure_load_more(
+                    node.structure_load_more.branch_id,
+                    node.structure_load_more.kind,
+                    node.structure_load_more.render_parent_id
+                  )
                   return
                 end
                 perform_node_action(node, "action_1")
@@ -4303,7 +4793,11 @@ function DrawerUI:get_actions()
                 local parent = self.tree:get_node(path_id)
                 local graft = selected_path_children[path_id]
                 if parent and graft then
-                  self.tree:set_nodes(snapshot_to_tree_nodes(graft), path_id)
+                  local graft_conn_id = branch_owner_conn_id(path_id)
+                  self.tree:set_nodes(
+                    snapshot_to_tree_nodes(graft, self, graft_conn_id, path_id == graft_conn_id),
+                    path_id
+                  )
                   parent._materialized_in_tree = true
                   parent:expand()
                   mark_lazy_loaded(self, path_id)
@@ -4311,7 +4805,7 @@ function DrawerUI:get_actions()
               end
               self.tree:render()
               if not visible_node_row(self.tree, selected_id) then
-                self.tree:set_nodes(snapshot_to_tree_nodes(filtered_snapshot))
+                self.tree:set_nodes(snapshot_to_tree_nodes(filtered_snapshot, self))
                 for index, path_id in ipairs(selected_path) do
                   if index < #selected_path then
                     local parent = self.tree:get_node(path_id)
