@@ -380,41 +380,58 @@ Phase 13 -> Phase 14 -> Phase 15. Phase 16 is conditional at Phase 15 ship.
 ## Milestone v1.4: Multi-Adapter Rich Metadata + LSP Polish
 
 **Date opened:** 2026-05-04
-**Goal:** Extend rich-table-metadata X.1 (Oracle, shipped) to PostgreSQL; surface metadata in LSP completion + diagnostics; add reverse FK references; close pending Oracle bind-name + cache cleanup work.
-**Phase ordering:** Phase 17 (Postgres rich-meta) → Phase 18 (LSP completion annotations + FK reverse refs) → Phase 19 (X.3 stub adapters + perf/cache cleanup + Oracle bind audit). Subject to fold-in if live testing surfaces priorities.
+**Goal:** Extend rich-table-metadata X.1 (Oracle, shipped) to PostgreSQL; restore notes UX; surface metadata in LSP completion; add reverse FK references; close pending Oracle bind-name + cache cleanup work.
+**Phase ordering (post-Phase-17 SHIP, renumbered 2026-05-05):** Phase 17 (Postgres rich-meta, SHIPPED) → Phase 18 (DB nesting UX) → Phase 19 (notes-create-via-snacks fix, SHIPPED) → Phase 20 (live-PG smoke test) → Phase 21 (LSP completion annotations + FK reverse refs) → Phase 22 (X.3 stub adapters + perf/cache cleanup + Oracle bind audit).
 
-### Phase 17: Rich Table Metadata X.2 — PostgreSQL Adapter
+### Phase 17: Rich Table Metadata X.2 — PostgreSQL Adapter (SHIPPED)
 **Depends on**: Phase 16 (Oracle X.1 architecture, shipped + validated)
 **Requirements**: DBEE-FEAT-04 (rich metadata multi-adapter coverage)
-**Status**: Discuss complete (`17-CONTEXT.md`, 29 locked decisions). Research dispatch next.
-**Success Criteria** (what must be TRUE):
-  1. PostgreSQL adapter produces per-table Columns + Indexes folders + per-schema Sequences folder via `pg_catalog` queries scoped by `nspname`.
-  2. Composite PKs/FKs handled with parallel `conkey`/`confkey` arrays; FK navigation via `<CR>` and `gd` works identically to Oracle.
-  3. Generated columns annotated `[GEN]`; non-trivial defaults annotated `[DEFAULT=...]`; identity columns annotated `[IDENTITY]`.
-  4. Materialized views relabeled from `'VIEW'` to `materialized_view` with rich Columns/Indexes folder treatment; `TABLE_LIKE_TYPES` extended.
-  5. Indexes split key columns from INCLUDE columns (`[INCLUDE col_a, col_b]`); ASC/DESC preserved for key columns.
-  6. Sequence support via `pg_class.relkind = 'S'` + `pg_sequence`.
-  7. Bind variables use Postgres native `$1, $2` placeholders. NEVER named binds.
-  8. New strict marker suite `RICH_PG_*` mirrors `RICH16_*` Oracle pattern (deterministic via sqlmock).
-  9. Phase 16 Oracle behavior + `RICH16_*` markers preserved.
-  10. Three single-source helpers untouched.
-**Plans**: TBD by `$gsd-plan-phase 17` after research.
+**Status**: SHIPPED 2026-05-05 PM `7931377`. User-verified end-to-end on live PG16 (podman-hosted dbee_test). Hotfix `be58045` at SHIP for composite FK ROWS FROM SQL syntax.
+**Success Criteria**: ALL met. 35/35 RICH_PG_* strict markers green; RICH_PG_ALL_PASS=true; RICH16/ARCH14/FOLDER15/LSP12 rollups preserved.
+**Plans**: 6 wave plans + CONTEXT + 2 RESEARCH at `.planning/phases/17-rich-table-metadata-postgres/`.
 
-### Phase 18: LSP Completion Annotations + FK Reverse References
-**Depends on**: Phase 17
-**Requirements**: DBEE-FEAT-05 (LSP completion uses rich metadata)
-**Status**: Pending (open after Phase 17 ships).
+### Phase 18: DB Nesting UX — schemas under current selected database
+**Depends on**: Phase 17 (SHIPPED)
+**Requirements**: TBD by discuss-phase (cross-adapter UX design)
+**Status**: Discuss + research IN PROGRESS (Codex thread). User-requested 2026-05-05 PM after Phase 17 testing — schemas should nest UNDER the database node (DBeaver-style), not as siblings of the database info node.
+**Open questions for discuss**:
+  1. Cross-adapter implications — Oracle (PDB), MySQL (DB == schema), SQLite (single file), ClickHouse, Mongo, DuckDB.
+  2. Single-DB connection edge case — collapse DB node if redundant?
+  3. Where does `database_switch_node` live after nesting?
+  4. Phase 14 schema_filter_authority (LOCKED) compatibility.
+  5. System-schema collapse (`pg_catalog`/`information_schema`).
+  6. Existing user expanded-state cache backward-compat.
+**Plans**: TBD after discuss-lock.
+
+### Phase 19: Notes-Create-Via-Snacks-Picker (SHIPPED)
+**Depends on**: none (independent UX fix)
+**Status**: SHIPPED 2026-05-05 PM `cef7957`. After NUI removal, snacks picker only listed existing notes. Wire `<C-g>` (new global) and `<C-l>` (new local) keybinds via `actions` + `win.input.keys`. Empty-name rejected; pcall around create surfaces underlying errors.
+**Plans**: 1-commit fix at `lua/dbee.lua:518-587`.
+
+### Phase 20: Live-PG Smoke Test (Docker-gated)
+**Depends on**: Phase 17 (SHIPPED)
+**Requirements**: testcontainers/podman-based smoke that runs all 5 PG SQL constants against a real PG16+ container. Closes the sqlmock SQL-shape blind spot that allowed the composite FK bug to ship.
+**Status**: Backlog. Phase 17 lessons-learned item.
 **Plans**: TBD.
 
-### Phase 19: Rich-meta X.3 stubs + perf/cache cleanup + Oracle bind audit
-**Depends on**: Phase 17, Phase 18
-**Status**: Backlog. May be split or expanded based on live testing.
+### Phase 21: LSP Completion Annotations + FK Reverse References
+**Depends on**: Phase 17 (SHIPPED)
+**Requirements**: DBEE-FEAT-05 (LSP completion uses rich metadata)
+**Status**: Pending. (Was Phase 18 pre-2026-05-05 renumbering.)
+**Plans**: TBD.
+
+### Phase 22: Rich-meta X.3 stubs + perf/cache cleanup + Oracle bind audit
+**Depends on**: Phase 17 (SHIPPED), Phase 21
+**Status**: Backlog. May be split or expanded based on live testing. (Was Phase 19 pre-2026-05-05 renumbering.)
 **Plans**: TBD.
 
 ## v1.4 Progress
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 17. Rich Table Metadata X.2 (Postgres) | 0/TBD | Discuss complete; research next | - |
-| 18. LSP Completion Annotations + FK Reverse | 0/TBD | Pending Phase 17 ship | - |
-| 19. X.3 stubs + perf/cache cleanup + Oracle bind audit | 0/TBD | Backlog | - |
+| 17. Rich Table Metadata X.2 (Postgres) | 6/6 | SHIPPED | 2026-05-05 |
+| 18. DB Nesting UX | 0/TBD | Discuss + research IN PROGRESS | - |
+| 19. Notes-Create-Via-Snacks Picker | 1/1 | SHIPPED | 2026-05-05 |
+| 20. Live-PG Smoke Test | 0/TBD | Backlog | - |
+| 21. LSP Completion Annotations + FK Reverse | 0/TBD | Pending | - |
+| 22. X.3 stubs + perf/cache cleanup + Oracle bind audit | 0/TBD | Backlog | - |
