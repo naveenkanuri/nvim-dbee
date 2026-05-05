@@ -139,6 +139,12 @@ perf-lsp: perf-bootstrap
 	  run_logged "$$script" env XDG_STATE_HOME="$(LSP01_PERF_STATE_HOME)" \
 	    $(PERF_NVIM_HEADLESS) -c "luafile $(CURDIR)/ci/headless/$$script"; \
 	done; \
+	run_logged "rich-pg-go-markers" env GOCACHE="$(LSP01_PERF_ARTIFACT_DIR)/go-cache" \
+	  go -C dbee test ./core ./handler ./adapters -run 'TestRichMetadataTypesBackwardCompat|TestRichColumnMarshalPreservesFields|TestPostgres' -v; \
+	run_logged "rich-pg-go-bench" env GOCACHE="$(LSP01_PERF_ARTIFACT_DIR)/go-cache" \
+	  go -C dbee test ./adapters -run '^$$' -bench 'BenchmarkPostgresRichMetadataGoParse' -benchtime=20x -benchmem -v; \
+	run_logged "check_rich_metadata_postgres.lua" env UX13_ROLLUP_LOG="$(UX13_ROLLUP_LOG)" \
+	  $(MAKE) --no-print-directory perf-headless ARGS='-l ci/headless/check_rich_metadata_postgres.lua'; \
 	run_logged "go-arch14" env GOCACHE="$(LSP01_PERF_ARTIFACT_DIR)/go-cache" \
 	  go -C dbee test ./core ./handler ./adapters; \
 	run_logged "perf" env XDG_STATE_HOME="$(LSP01_PERF_STATE_HOME)" $(MAKE) --no-print-directory perf \

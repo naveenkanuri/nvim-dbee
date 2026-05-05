@@ -2,8 +2,12 @@ package adapters
 
 import (
 	"errors"
+	"fmt"
+	"math"
+	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/kndndrj/nvim-dbee/dbee/core"
@@ -303,4 +307,208 @@ func postgresIndexesByName(indexes []*core.Index) map[string]*core.Index {
 
 func TestPostgresRichMetadataNoNamedBindsInTests(t *testing.T) {
 	require.False(t, strings.Contains(postgresColumnsRichSQL+postgresPrimaryKeysSQL+postgresForeignKeysSQL+postgresIndexesSQL+postgresSequencesSQL, ":p_"))
+}
+
+func BenchmarkPostgresRichMetadataGoParseColumnsRich(b *testing.B) {
+	benchmarkPostgresRichMetadataGoParse(b, "ColumnsRich", []int{1000, 10000, 50000}, measurePostgresColumnsRichParse)
+}
+
+func BenchmarkPostgresRichMetadataGoParseIndexes(b *testing.B) {
+	benchmarkPostgresRichMetadataGoParse(b, "Indexes", []int{1000, 10000, 50000}, measurePostgresIndexesParse)
+}
+
+func BenchmarkPostgresRichMetadataGoParseSequences(b *testing.B) {
+	benchmarkPostgresRichMetadataGoParse(b, "Sequences", []int{1000, 10000, 50000}, measurePostgresSequencesParse)
+	b.Log("RICH_PG_BENCH_GO_PARSE_P95_OK=true")
+}
+
+func benchmarkPostgresRichMetadataGoParse(
+	b *testing.B,
+	method string,
+	sizes []int,
+	measure func(*testing.B, int) time.Duration,
+) {
+	for _, size := range sizes {
+		size := size
+		b.Run(fmt.Sprintf("%s_%d_rows", method, size), func(b *testing.B) {
+			measuredIterations := b.N
+			if measuredIterations < 20 {
+				measuredIterations = 20
+			}
+
+			// sqlmock measures deterministic Go-side row scanning, grouping, cloning,
+			// and field parsing only; it cannot validate PostgreSQL catalog execution cost.
+			_ = measure(b, size) // excluded warmup
+			durations := make([]time.Duration, 0, measuredIterations)
+			b.ResetTimer()
+			for i := 0; i < measuredIterations; i++ {
+				durations = append(durations, measure(b, size))
+			}
+			b.StopTimer()
+
+			p50 := postgresDurationPercentile(durations, 0.50)
+			p95 := postgresDurationPercentile(durations, 0.95)
+			b.ReportMetric(float64(p50.Microseconds())/1000.0, "p50_ms")
+			b.ReportMetric(float64(p95.Microseconds())/1000.0, "p95_ms")
+			b.Logf(
+				"RICH_PG_PERF_DIAGNOSTIC=go_parse method=%s rows=%d p50_ms=%.3f p95_ms=%.3f",
+				method,
+				size,
+				float64(p50.Microseconds())/1000.0,
+				float64(p95.Microseconds())/1000.0,
+			)
+			if size == 10000 && p95 >= 50*time.Millisecond {
+				b.Fatalf("postgres %s 10000-row parse p95 %s exceeds 50ms gate", method, p95)
+			}
+		})
+	}
+}
+
+func measurePostgresColumnsRichParse(b *testing.B, rowCount int) time.Duration {
+	b.Helper()
+	driver, mock, cleanup := newPostgresRichMetadataBenchmarkMock(b)
+	defer cleanup()
+
+	columnRows := sqlmock.NewRows([]string{
+		"column_name",
+		"data_type",
+		"nullable",
+		"attgenerated",
+		"attidentity",
+		"default_expr",
+		"serial_sequence",
+	})
+	for i := 0; i < rowCount; i++ {
+		generated := ""
+		identity := ""
+		var defaultExpr any
+		var serialSequence any
+		if i%97 == 0 {
+			generated = "s"
+			defaultExpr = "(amount * tax)"
+		} else if i%89 == 0 {
+			identity = "a"
+		} else if i%17 == 0 {
+			defaultExpr = fmt.Sprintf("nextval('public.bench_col_%05d_seq'::regclass)", i)
+			serialSequence = fmt.Sprintf("public.bench_col_%05d_seq", i)
+		}
+		columnRows.AddRow(fmt.Sprintf("col_%05d", i), "text", i%3 != 0, generated, identity, defaultExpr, serialSequence)
+	}
+
+	mock.ExpectQuery(postgresColumnsRichSQL).WithArgs("public", "bench_table").WillReturnRows(columnRows)
+	mock.ExpectQuery(postgresPrimaryKeysSQL).WithArgs("public", "bench_table").
+		WillReturnRows(sqlmock.NewRows([]string{"column_name", "position"}))
+	mock.ExpectQuery(postgresForeignKeysSQL).WithArgs("public", "bench_table").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"constraint_name",
+			"source_column",
+			"ordinal",
+			"target_schema",
+			"target_table",
+			"target_column",
+		}))
+
+	start := time.Now()
+	columns, err := driver.ColumnsRich(&core.TableOptions{Schema: "public", Table: "bench_table"})
+	elapsed := time.Since(start)
+	require.NoError(b, err)
+	require.Len(b, columns, rowCount)
+	require.NoError(b, mock.ExpectationsWereMet())
+	return elapsed
+}
+
+func measurePostgresIndexesParse(b *testing.B, rowCount int) time.Duration {
+	b.Helper()
+	driver, mock, cleanup := newPostgresRichMetadataBenchmarkMock(b)
+	defer cleanup()
+
+	indexRows := sqlmock.NewRows([]string{
+		"index_name",
+		"index_owner",
+		"table_owner",
+		"table_name",
+		"uniqueness",
+		"column_name",
+		"descend",
+		"column_position",
+		"is_include",
+		"pk_backed",
+	})
+	for i := 0; i < rowCount; i++ {
+		position := int64((i % 3) + 1)
+		isInclude := position == 3
+		var order any = "ASC"
+		if isInclude {
+			order = nil
+		} else if position == 2 {
+			order = "DESC"
+		}
+		indexRows.AddRow(
+			fmt.Sprintf("idx_bench_%05d", i/3),
+			"public",
+			"public",
+			"bench_table",
+			"NONUNIQUE",
+			fmt.Sprintf("col_%05d", i),
+			order,
+			position,
+			isInclude,
+			false,
+		)
+	}
+
+	mock.ExpectQuery(postgresIndexesSQL).WithArgs("public", "bench_table").WillReturnRows(indexRows)
+
+	start := time.Now()
+	indexes, err := driver.Indexes(&core.TableOptions{Schema: "public", Table: "bench_table"})
+	elapsed := time.Since(start)
+	require.NoError(b, err)
+	require.NotEmpty(b, indexes)
+	require.NoError(b, mock.ExpectationsWereMet())
+	return elapsed
+}
+
+func measurePostgresSequencesParse(b *testing.B, rowCount int) time.Duration {
+	b.Helper()
+	driver, mock, cleanup := newPostgresRichMetadataBenchmarkMock(b)
+	defer cleanup()
+
+	sequenceRows := sqlmock.NewRows([]string{"sequence_name", "increment_by", "cache_size"})
+	for i := 0; i < rowCount; i++ {
+		sequenceRows.AddRow(fmt.Sprintf("bench_seq_%05d", i), int64((i%11)+1), int64((i%37)+1))
+	}
+	mock.ExpectQuery(postgresSequencesSQL).WithArgs("public").WillReturnRows(sequenceRows)
+
+	start := time.Now()
+	sequences, err := driver.Sequences("public")
+	elapsed := time.Since(start)
+	require.NoError(b, err)
+	require.Len(b, sequences, rowCount)
+	require.NoError(b, mock.ExpectationsWereMet())
+	return elapsed
+}
+
+func newPostgresRichMetadataBenchmarkMock(b *testing.B) (*postgresDriver, sqlmock.Sqlmock, func()) {
+	b.Helper()
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(b, err)
+	return &postgresDriver{c: builders.NewClient(db), url: nil}, mock, func() { _ = db.Close() }
+}
+
+func postgresDurationPercentile(values []time.Duration, ratio float64) time.Duration {
+	if len(values) == 0 {
+		return 0
+	}
+	sorted := append([]time.Duration(nil), values...)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i] < sorted[j]
+	})
+	index := int(math.Ceil(float64(len(sorted)) * ratio))
+	if index < 1 {
+		index = 1
+	}
+	if index > len(sorted) {
+		index = len(sorted)
+	}
+	return sorted[index-1]
 }
