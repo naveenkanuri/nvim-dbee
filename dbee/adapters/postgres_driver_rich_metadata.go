@@ -99,8 +99,10 @@ const postgresForeignKeysSQL = `
 	  ON target_cls.oid = con.confrelid
 	JOIN pg_catalog.pg_namespace target_ns
 	  ON target_ns.oid = target_cls.relnamespace
-	JOIN LATERAL pg_catalog.unnest(con.conkey, con.confkey)
-	     WITH ORDINALITY AS fk(source_attnum, target_attnum, ordinal)
+	JOIN LATERAL ROWS FROM (
+	       pg_catalog.unnest(con.conkey),
+	       pg_catalog.unnest(con.confkey)
+	     ) WITH ORDINALITY AS fk(source_attnum, target_attnum, ordinal)
 	  ON true
 	JOIN pg_catalog.pg_attribute source_attr
 	  ON source_attr.attrelid = source_cls.oid
