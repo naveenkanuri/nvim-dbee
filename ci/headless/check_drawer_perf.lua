@@ -318,8 +318,8 @@ local function build_locked_corpus()
   local root_cache = {}
   local source_connections = {
     source1 = {
-      { id = "conn-ready", name = "Ready Connection", type = "postgres" },
-      { id = "conn-alt", name = "Alt Connection", type = "postgres" },
+      { id = "conn-ready", name = "Ready Connection", type = "mysql" },
+      { id = "conn-alt", name = "Alt Connection", type = "mysql" },
     },
   }
   local ids = {
@@ -1026,7 +1026,7 @@ local function build_fallback_connections(count)
     connections[#connections + 1] = {
       id = string.format("fallback-%04d", index),
       name = string.format("Fallback Connection %04d", index),
-      type = "postgres",
+      type = "mysql",
     }
   end
   return connections
@@ -1173,7 +1173,7 @@ function build_arch14_scoped_spec(scoped_count, opts)
         {
           id = conn_id,
           name = "ARCH14 Scoped Fixture " .. tostring(scoped_count),
-          type = "postgres",
+          type = "mysql",
           schema_filter = filter,
         },
       },
@@ -1381,7 +1381,7 @@ local function build_structure_perf_spec()
   local schema_name = "warehouse"
   local source_connections = {
     source1 = {
-      { id = conn_id, name = "Structure Connection", type = "postgres" },
+      { id = conn_id, name = "Structure Connection", type = "mysql" },
     },
   }
 

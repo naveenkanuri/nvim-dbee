@@ -526,7 +526,7 @@ local function new_fixture(opts)
   local current_connection = opts.current_connection or {
     id = ids.conn_ready,
     name = "Ready Connection",
-    type = "postgres",
+    type = "mysql",
   }
 
   local counters = {
@@ -578,9 +578,9 @@ local function new_fixture(opts)
 
   local source_connections = {
     source1 = {
-      { id = ids.conn_ready, name = "Ready Connection", type = "postgres" },
-      { id = ids.conn_alt, name = "Alt Connection", type = "postgres" },
-      { id = ids.conn_cold, name = "Cold Connection", type = "postgres" },
+      { id = ids.conn_ready, name = "Ready Connection", type = "mysql" },
+      { id = ids.conn_alt, name = "Alt Connection", type = "mysql" },
+      { id = ids.conn_cold, name = "Cold Connection", type = "mysql" },
     },
   }
 
@@ -667,7 +667,7 @@ local function new_fixture(opts)
       return {
         id = conn_id,
         name = conn_id,
-        type = "postgres",
+        type = "mysql",
         url = "postgres://test/" .. conn_id,
       }
     end,
@@ -678,7 +678,7 @@ local function new_fixture(opts)
       current_connection = {
         id = conn_id,
         name = conn_id,
-        type = "postgres",
+        type = "mysql",
       }
       if handler_listeners.current_connection_changed then
         handler_listeners.current_connection_changed({ conn_id = conn_id })

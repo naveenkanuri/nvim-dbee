@@ -510,13 +510,13 @@ local function new_env(opts)
     {
       id = "conn-alpha",
       name = "Alpha",
-      type = "postgres",
+      type = "mysql",
       url = "postgres://alpha",
     },
     {
       id = "conn-beta",
       name = "Beta",
-      type = "postgres",
+      type = "mysql",
       url = "postgres://beta",
     },
   })
@@ -1200,13 +1200,13 @@ local function run_backpressure_and_sticky_contracts()
     {
       id = "conn-other-1",
       name = "Alpha Rewrite A",
-      type = "postgres",
+      type = "mysql",
       url = "postgres://shared",
     },
     {
       id = "conn-other-2",
       name = "Alpha Rewrite B",
-      type = "postgres",
+      type = "mysql",
       url = "postgres://shared",
     },
   }
@@ -1279,7 +1279,7 @@ local function run_database_switch_and_reconnect_contracts()
   assert_stale_drop("source_update", function(env)
     env.handler:source_update_connection("source1", "conn-alpha", {
       name = "Alpha",
-      type = "postgres",
+      type = "mysql",
       url = "postgres://alpha",
     })
   end)
@@ -1294,7 +1294,7 @@ local function run_database_switch_and_reconnect_contracts()
   env_reconnect.source._specs[1] = {
     id = "conn-alpha-new",
     name = "Alpha",
-    type = "postgres",
+    type = "mysql",
     url = "postgres://alpha",
   }
   local waiter_payload = nil
@@ -1357,7 +1357,7 @@ local function run_database_switch_and_reconnect_contracts()
   env_reopen_reconnect.source._specs[1] = {
     id = "conn-alpha-reopen",
     name = "Alpha",
-    type = "postgres",
+    type = "mysql",
     url = "postgres://alpha",
   }
   env_reopen_reconnect.drawer:prepare_close()
@@ -1387,14 +1387,14 @@ local function run_database_switch_and_reconnect_contracts()
   env_public_reconnect.reconnect.register_call("call-note", {
     conn_id = "conn-alpha",
     conn_name = "Alpha",
-    conn_type = "postgres",
+    conn_type = "mysql",
     note_id = "note-1",
     resolved_query = "select 1",
   })
   env_public_reconnect.source._specs[1] = {
     id = "conn-alpha-v2",
     name = "Alpha",
-    type = "postgres",
+    type = "mysql",
     url = "postgres://alpha",
   }
   local rewrite_events = {}
@@ -1439,7 +1439,7 @@ local function run_database_switch_and_reconnect_contracts()
   env_public_reconnect.source._specs[1] = {
     id = "conn-alpha-v3",
     name = "Alpha",
-    type = "postgres",
+    type = "mysql",
     url = "postgres://alpha",
   }
   local retry_ok, retry_err = env_public_reconnect.dbee.retry_last_disconnected()
@@ -1475,7 +1475,7 @@ local function run_database_switch_and_reconnect_contracts()
   env_reconnect_lsp.source._specs[1] = {
     id = "conn-alpha-new",
     name = "Alpha",
-    type = "postgres",
+    type = "mysql",
     url = "postgres://alpha",
   }
 
@@ -1513,7 +1513,7 @@ local function run_database_switch_and_reconnect_contracts()
     {
       id = "conn-solo",
       name = "Solo",
-      type = "postgres",
+      type = "mysql",
       url = "postgres://solo",
     },
   }
@@ -1547,19 +1547,19 @@ local function run_database_switch_and_reconnect_contracts()
     {
       id = "conn-alpha-new",
       name = "Alpha",
-      type = "postgres",
+      type = "mysql",
       url = "postgres://alpha",
     },
     {
       id = "conn-beta-a",
       name = "Beta Rewrite A",
-      type = "postgres",
+      type = "mysql",
       url = "postgres://shared",
     },
     {
       id = "conn-beta-b",
       name = "Beta Rewrite B",
-      type = "postgres",
+      type = "mysql",
       url = "postgres://shared",
     },
   }
@@ -1581,13 +1581,13 @@ local function run_database_switch_and_reconnect_contracts()
       {
         id = "conn-alpha",
         name = "Alpha",
-        type = "postgres",
+        type = "mysql",
         url = "postgres://shared",
       },
       {
         id = "conn-beta",
         name = "Beta",
-        type = "postgres",
+        type = "mysql",
         url = "postgres://shared",
       },
     },
@@ -1606,7 +1606,7 @@ local function run_database_switch_and_reconnect_contracts()
     {
       id = "conn-survivor",
       name = "Shared",
-      type = "postgres",
+      type = "mysql",
       url = "postgres://shared",
     },
   }
@@ -1635,20 +1635,20 @@ local function run_database_switch_and_reconnect_contracts()
     {
       id = "conn-alpha",
       name = "Alpha",
-      type = "postgres",
+      type = "mysql",
       url = "postgres://alpha",
     },
     {
       id = "conn-beta-v2",
       name = "Beta",
-      type = "postgres",
+      type = "mysql",
       url = "postgres://beta",
     },
   }
   local retry_meta = {
     conn_id = "conn-beta",
     conn_name = "Beta",
-    conn_type = "postgres",
+    conn_type = "mysql",
     resolved_query = "select retry restore",
   }
   env_retry_restore.reconnect.register_call("call-retry-restore", retry_meta)
@@ -1679,20 +1679,20 @@ local function run_database_switch_and_reconnect_contracts()
     {
       id = "conn-alpha-v2",
       name = "Alpha",
-      type = "postgres",
+      type = "mysql",
       url = "postgres://alpha",
     },
     {
       id = "conn-beta-v2",
       name = "Beta",
-      type = "postgres",
+      type = "mysql",
       url = "postgres://beta",
     },
   }
   local retry_fn_meta = {
     conn_id = "conn-beta",
     conn_name = "Beta",
-    conn_type = "postgres",
+    conn_type = "mysql",
     retry_fn = function(reconnected_conn_id)
       local call = retry_rewrite_api.core.connection_execute(reconnected_conn_id, "select retry fn restore")
       return call.id, nil

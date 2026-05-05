@@ -344,13 +344,13 @@ local function new_env(opts)
     {
       id = "conn-alpha",
       name = "Alpha",
-      type = "postgres",
+      type = "mysql",
       url = "postgres://alpha",
     },
     {
       id = "conn-beta",
       name = "Beta",
-      type = "postgres",
+      type = "mysql",
       url = "postgres://beta",
     },
   })
@@ -554,7 +554,7 @@ local function run_lifecycle_contracts()
   env.source.fail_next_create = "create boom"
   local ok_mutation, mutation_err = pcall(env.handler.source_add_connection, env.handler, "source1", {
     name = "Gamma",
-    type = "postgres",
+    type = "mysql",
     url = "postgres://gamma",
   })
   Harness.drain()
@@ -580,7 +580,7 @@ local function run_lifecycle_contracts()
   local ok_partial, partial_err = pcall(env.handler.source_add_connection, env.handler, "source1", {
     id = "conn-gamma",
     name = "Gamma",
-    type = "postgres",
+    type = "mysql",
     url = "postgres://gamma",
   })
   Harness.drain()
@@ -654,7 +654,7 @@ local function run_drawer_contracts()
   env.runtime.next_wizard_submission = {
     params = {
       name = "Delta",
-      type = "postgres",
+      type = "mysql",
       url = "postgres://delta",
     },
     wizard = {

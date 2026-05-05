@@ -544,10 +544,10 @@ local function new_fixture(opts)
 
   local source_connections = opts.source_connections or {
     source1 = {
-      { id = "conn-ready", name = "Ready Connection", type = "postgres" },
-      { id = "conn-alt", name = "Alt Connection", type = "postgres" },
-      { id = "conn-cold", name = "Cold Connection", type = "postgres" },
-      { id = "conn-error", name = "Error Connection", type = "postgres" },
+      { id = "conn-ready", name = "Ready Connection", type = "mysql" },
+      { id = "conn-alt", name = "Alt Connection", type = "mysql" },
+      { id = "conn-cold", name = "Cold Connection", type = "mysql" },
+      { id = "conn-error", name = "Error Connection", type = "mysql" },
     },
   }
 
@@ -556,7 +556,7 @@ local function new_fixture(opts)
       handler_listeners[event] = cb
     end,
     get_current_connection = function()
-      return { id = "conn-ready", name = "Ready Connection", type = "postgres" }
+      return { id = "conn-ready", name = "Ready Connection", type = "mysql" }
     end,
     get_sources = function()
       return sources
@@ -628,7 +628,7 @@ local function new_fixture(opts)
       return {
         id = conn_id,
         name = conn_id,
-        type = "postgres",
+        type = "mysql",
         url = "postgres://test/" .. conn_id,
       }
     end,
@@ -839,8 +839,8 @@ local expanded_mixed_fixture = new_fixture({
   },
   source_connections = {
     source1 = {
-      { id = "conn-ready", name = "Ready Connection", type = "postgres" },
-      { id = "conn-alt", name = "Employees Archive", type = "postgres" },
+      { id = "conn-ready", name = "Ready Connection", type = "mysql" },
+      { id = "conn-alt", name = "Employees Archive", type = "mysql" },
     },
   },
 })
