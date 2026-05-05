@@ -78,14 +78,29 @@ func (r *redshiftDriver) Structure() ([]*core.Structure, error) {
 	return core.GetGenericStructure(rows, getPGStructureType)
 }
 
-func (r *redshiftDriver) ListDatabases() (current string, available []string, err error) {
-	query := `
-		SELECT current_database() AS current, datname
+const redshiftCurrentDatabaseSQL = `SELECT current_database();`
+
+const redshiftAvailableDatabasesSQL = `
+		SELECT datname
 		FROM pg_database
 		WHERE datistemplate = false
 		  AND datname != current_database();`
 
-	rows, err := r.Query(context.Background(), query)
+func (r *redshiftDriver) ListDatabases() (current string, available []string, err error) {
+	currentRows, err := r.Query(context.Background(), redshiftCurrentDatabaseSQL)
+	if err != nil {
+		return "", nil, err
+	}
+	for currentRows.HasNext() {
+		row, err := currentRows.Next()
+		if err != nil {
+			return "", nil, err
+		}
+		current = row[0].(string)
+		break
+	}
+
+	rows, err := r.Query(context.Background(), redshiftAvailableDatabasesSQL)
 	if err != nil {
 		return "", nil, err
 	}
@@ -96,9 +111,7 @@ func (r *redshiftDriver) ListDatabases() (current string, available []string, er
 			return "", nil, err
 		}
 
-		// current database is the first column, available databases are the rest
-		current = row[0].(string)
-		available = append(available, row[1].(string))
+		available = append(available, row[0].(string))
 	}
 
 	return current, available, nil

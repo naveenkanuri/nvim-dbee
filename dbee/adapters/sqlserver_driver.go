@@ -105,14 +105,30 @@ func (c *sqlServerDriver) Close() {
 	c.c.Close()
 }
 
-func (c *sqlServerDriver) ListDatabases() (current string, available []string, err error) {
-	query := `
-		SELECT DB_NAME(), name
+const sqlServerCurrentDatabaseSQL = `SELECT DB_NAME();`
+
+const sqlServerAvailableDatabasesSQL = `
+		SELECT name
 		FROM sys.databases
-		WHERE name != DB_NAME();
+		WHERE name != DB_NAME()
+		ORDER BY name;
 	`
 
-	rows, err := c.Query(context.TODO(), query)
+func (c *sqlServerDriver) ListDatabases() (current string, available []string, err error) {
+	currentRows, err := c.Query(context.TODO(), sqlServerCurrentDatabaseSQL)
+	if err != nil {
+		return "", nil, err
+	}
+	for currentRows.HasNext() {
+		row, err := currentRows.Next()
+		if err != nil {
+			return "", nil, err
+		}
+		current = row[0].(string)
+		break
+	}
+
+	rows, err := c.Query(context.TODO(), sqlServerAvailableDatabasesSQL)
 	if err != nil {
 		return "", nil, err
 	}
@@ -123,9 +139,8 @@ func (c *sqlServerDriver) ListDatabases() (current string, available []string, e
 			return "", nil, err
 		}
 
-		// We know for a fact there are 2 string fields (see query above)
-		current = row[0].(string)
-		available = append(available, row[1].(string))
+		// We know for a fact there is 1 string field (see query above)
+		available = append(available, row[0].(string))
 	}
 
 	return current, available, nil

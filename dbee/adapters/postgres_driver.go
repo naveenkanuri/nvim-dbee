@@ -122,14 +122,29 @@ func (c *postgresDriver) Close() {
 	c.c.Close()
 }
 
-func (c *postgresDriver) ListDatabases() (current string, available []string, err error) {
-	query := `
-		SELECT current_database(), datname FROM pg_database
+const postgresCurrentDatabaseSQL = `SELECT current_database();`
+
+const postgresAvailableDatabasesSQL = `
+		SELECT datname FROM pg_database
 		WHERE datistemplate = false
 		AND datname != current_database();
 	`
 
-	rows, err := c.Query(context.TODO(), query)
+func (c *postgresDriver) ListDatabases() (current string, available []string, err error) {
+	currentRows, err := c.Query(context.TODO(), postgresCurrentDatabaseSQL)
+	if err != nil {
+		return "", nil, err
+	}
+	for currentRows.HasNext() {
+		row, err := currentRows.Next()
+		if err != nil {
+			return "", nil, err
+		}
+		current = row[0].(string)
+		break
+	}
+
+	rows, err := c.Query(context.TODO(), postgresAvailableDatabasesSQL)
 	if err != nil {
 		return "", nil, err
 	}
@@ -140,9 +155,8 @@ func (c *postgresDriver) ListDatabases() (current string, available []string, er
 			return "", nil, err
 		}
 
-		// We know for a fact there are 2 string fields (see query above)
-		current = row[0].(string)
-		available = append(available, row[1].(string))
+		// We know for a fact there is 1 string field (see query above)
+		available = append(available, row[0].(string))
 	}
 
 	return current, available, nil
