@@ -515,6 +515,37 @@ local function append_note_picker_section(items, title, notes, tag, empty_hint)
   end
 end
 
+---@param picker_handle table?
+---@param namespace_id string  "global" or connection_id
+---@param label string  "global" or connection display name
+local function create_note_via_prompt(picker_handle, namespace_id, label)
+  vim.ui.input({ prompt = ("New %s note name: "):format(label) }, function(name)
+    if name == nil then
+      return
+    end
+    name = vim.trim(name)
+    if name == "" then
+      utils.log("warn", "Note name cannot be empty")
+      return
+    end
+
+    local ok, result = pcall(api.ui.editor_namespace_create_note, namespace_id, name)
+    if not ok then
+      utils.log("error", "Failed to create note: " .. tostring(result))
+      return
+    end
+    if not result then
+      utils.log("error", "Failed to create note (no id returned)")
+      return
+    end
+
+    if picker_handle and type(picker_handle.close) == "function" then
+      picker_handle:close()
+    end
+    api.ui.editor_set_current_note(result)
+  end)
+end
+
 function dbee.pick_notes()
   if not dbee.is_open() then
     utils.log("warn", "Dbee is not open")
@@ -529,14 +560,32 @@ function dbee.pick_notes()
   local global_notes = sections.global_notes or {}
   local local_notes = sections.local_notes or {}
   local current_connection = sections.current_connection
-  if #global_notes == 0 and #local_notes == 0 then
-    utils.log("info", "No notes found")
-    return
-  end
 
   local items = {}
+
+  -- Always include hint row advertising the create keybinds.
+  local hint_text
+  if current_connection then
+    hint_text = ("<C-g> new global  ·  <C-l> new local (%s)"):format(current_connection.name)
+  else
+    hint_text = "<C-g> new global  ·  (connect to enable local notes)"
+  end
+  append_note_picker_row(items, {
+    kind = "hint",
+    text = hint_text,
+    disabled = true,
+  })
+
   if #global_notes > 0 then
     append_note_picker_section(items, "Global notes", global_notes, "[global]")
+  else
+    append_note_picker_section(
+      items,
+      "Global notes",
+      global_notes,
+      "[global]",
+      "No global notes — press <C-g> to create"
+    )
   end
 
   if current_connection then
@@ -545,7 +594,7 @@ function dbee.pick_notes()
       ("Local notes (%s)"):format(current_connection.name),
       local_notes,
       ("[local: %s]"):format(current_connection.name),
-      #local_notes == 0 and ("No local notes for %s"):format(current_connection.name) or nil
+      #local_notes == 0 and ("No local notes for %s — press <C-l> to create"):format(current_connection.name) or nil
     )
   end
 
@@ -554,7 +603,8 @@ function dbee.pick_notes()
     max_tag_len = math.max(max_tag_len, #(item.tag or ""))
   end
 
-  local picker = require("snacks").picker({
+  local picker
+  picker = require("snacks").picker({
     title = "Dbee Notes",
     items = items,
     format = function(item)
@@ -574,14 +624,34 @@ function dbee.pick_notes()
         { item.text, "SnacksPickerFile" },
       }
     end,
-    confirm = function(picker, item)
+    confirm = function(picker_self, item)
       if not item or item.kind ~= "note" or not item.note_id then
         utils.log("warn", "Select a note row")
         return
       end
-      picker:close()
+      picker_self:close()
       api.ui.editor_set_current_note(item.note_id)
     end,
+    actions = {
+      dbee_new_global_note = function(picker_self)
+        create_note_via_prompt(picker_self, "global", "global")
+      end,
+      dbee_new_local_note = function(picker_self)
+        if not current_connection then
+          utils.log("warn", "No active connection — connect first to create a local note")
+          return
+        end
+        create_note_via_prompt(picker_self, current_connection.id, current_connection.name)
+      end,
+    },
+    win = {
+      input = {
+        keys = {
+          ["<C-g>"] = { "dbee_new_global_note", mode = { "i", "n" } },
+          ["<C-l>"] = { "dbee_new_local_note", mode = { "i", "n" } },
+        },
+      },
+    },
   })
   install_note_picker_nonselectable_rows(picker)
 end
