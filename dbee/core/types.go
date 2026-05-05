@@ -234,6 +234,11 @@ type Column struct {
 	PrimaryKey        bool     `json:"primary_key,omitempty" msgpack:"primary_key,omitempty"`
 	PrimaryKeyOrdinal int      `json:"primary_key_ordinal,omitempty" msgpack:"primary_key_ordinal,omitempty"`
 	ForeignKeys       []*FKRef `json:"foreign_keys,omitempty" msgpack:"foreign_keys,omitempty"`
+
+	Generated      string `json:"generated,omitempty" msgpack:"generated,omitempty"`
+	Identity       string `json:"identity,omitempty" msgpack:"identity,omitempty"`
+	Default        string `json:"default,omitempty" msgpack:"default,omitempty"`
+	SerialSequence string `json:"serial_sequence,omitempty" msgpack:"serial_sequence,omitempty"`
 }
 
 type FKRef struct {
@@ -259,6 +264,8 @@ type Index struct {
 	Orders   []string `json:"orders,omitempty" msgpack:"orders,omitempty"`
 	Unique   bool     `json:"unique,omitempty" msgpack:"unique,omitempty"`
 	PKBacked bool     `json:"pk_backed,omitempty" msgpack:"pk_backed,omitempty"`
+
+	IncludeColumns []string `json:"include_columns,omitempty" msgpack:"include_columns,omitempty"`
 }
 
 type Sequence struct {
