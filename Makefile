@@ -33,11 +33,44 @@ WALLET_GO_LOG ?= $(WALLET_ARTIFACT_DIR)/wallet-go.log
 WALLET_LUA_LOG ?= $(WALLET_ARTIFACT_DIR)/wallet-lua.log
 WALLET_ROLLUP_SCRIPT ?= $(CURDIR)/ci/headless/check_oracle_wallet_zip.lua
 
-.PHONY: perf perf-lsp perf-all wallet-test perf-headless
+.PHONY: perf perf-lsp perf-all wallet-test perf-headless db18-locked-helpers-guard
 
 perf-headless: perf-bootstrap
 	@mkdir -p "$(LSP01_PERF_STATE_HOME)"
 	XDG_STATE_HOME="$(LSP01_PERF_STATE_HOME)" $(PERF_NVIM_HEADLESS) $(ARGS)
+
+db18-locked-helpers-guard:
+	@set -eu; \
+	mkdir -p "$(UX13_ROLLUP_ARTIFACT_DIR)"; \
+	check_empty() { \
+	  label="$$1"; \
+	  shift; \
+	  tmp="$$(mktemp)"; \
+	  set +e; \
+	  "$$@" >"$$tmp" 2>&1; \
+	  status="$$?"; \
+	  set -e; \
+	  if [ "$$status" -ne 0 ]; then \
+	    cat "$$tmp" >&2; \
+	    rm -f "$$tmp"; \
+	    printf '%s\n' "$$label failed with status $$status" >&2; \
+	    exit "$$status"; \
+	  fi; \
+	  if [ -s "$$tmp" ]; then \
+	    cat "$$tmp" >&2; \
+	    rm -f "$$tmp"; \
+	    printf '%s\n' "$$label produced locked-helper diff output" >&2; \
+	    exit 1; \
+	  fi; \
+	  rm -f "$$tmp"; \
+	}; \
+	check_empty "git diff locked helpers" git diff -- lua/dbee/schema_filter_authority.lua lua/dbee/schema_name_canonical.lua lua/dbee/lsp/epoch_authority.lua; \
+	check_empty "git diff cached locked helpers" git diff --cached -- lua/dbee/schema_filter_authority.lua lua/dbee/schema_name_canonical.lua lua/dbee/lsp/epoch_authority.lua; \
+	check_empty "git diff baseline locked helpers" git diff d8a4161..HEAD -- lua/dbee/schema_filter_authority.lua lua/dbee/schema_name_canonical.lua lua/dbee/lsp/epoch_authority.lua; \
+	check_empty "git diff baseline locked helper names" git diff --name-only d8a4161..HEAD -- lua/dbee/schema_filter_authority.lua lua/dbee/schema_name_canonical.lua lua/dbee/lsp/epoch_authority.lua; \
+	check_empty "git diff cached locked helper names" git diff --cached --name-only -- lua/dbee/schema_filter_authority.lua lua/dbee/schema_name_canonical.lua lua/dbee/lsp/epoch_authority.lua; \
+	check_empty "git diff working locked helper names" git diff --name-only -- lua/dbee/schema_filter_authority.lua lua/dbee/schema_name_canonical.lua lua/dbee/lsp/epoch_authority.lua; \
+	printf '%s\n' "DB18_LOCKED_HELPERS_GIT_DIFF_OK=true" >> "$(UX13_ROLLUP_LOG)"
 
 perf: perf-bootstrap
 	@set -eu; \
@@ -90,8 +123,10 @@ perf-lsp: perf-bootstrap
 	  if [ -n "$$source_tag" ]; then \
 	    printf '===CMD-SOURCE: %s===\n' "$$source_tag" >> "$(UX13_ROLLUP_LOG)"; \
 	  fi; \
+	  set +e; \
 	  "$$@" >"$$tmp" 2>&1; \
 	  status="$$?"; \
+	  set -e; \
 	  cat "$$tmp"; \
 	  printf '\n'; \
 	  cat "$$tmp" >> "$(UX13_ROLLUP_LOG)"; \
@@ -152,6 +187,32 @@ perf-lsp: perf-bootstrap
 	  go -C dbee test ./adapters -run 'TestPostgresRichMetadataBenchAggregator' -bench 'BenchmarkPostgresRichMetadataGoParse' -benchtime=20x -benchmem -v; \
 	run_logged "source:lua-headless" "check_rich_metadata_postgres.lua" env UX13_ROLLUP_LOG="$(UX13_ROLLUP_LOG)" \
 	  $(MAKE) --no-print-directory perf-headless ARGS='-l ci/headless/check_rich_metadata_postgres.lua'; \
+	run_logged "db18-locked-helpers-guard" \
+	  $(MAKE) --no-print-directory db18-locked-helpers-guard UX13_ROLLUP_LOG="$(UX13_ROLLUP_LOG)"; \
+	run_logged "source:db18-go-test" "db18-adapter-current-db-go" env GOCACHE=/tmp/codex-go-cache \
+	  go -C dbee test ./adapters -run 'Test(Postgres|SQLServer|Redshift)ListDatabases' -v; \
+	db18_go_log="$$(mktemp)"; \
+	awk 'found{print} /^===CMD-SOURCE: db18-go-test===$$/{found=1; next}' "$(UX13_ROLLUP_LOG)" > "$$db18_go_log"; \
+	if grep -F "no tests to run" "$$db18_go_log" >/dev/null; then \
+	  cat "$$db18_go_log" >&2; \
+	  rm -f "$$db18_go_log"; \
+	  printf '%s\n' "db18 adapter current DB focused tests did not run" >&2; \
+	  exit 1; \
+	fi; \
+	for test_name in \
+	  TestPostgresListDatabasesNoAlternatives \
+	  TestSQLServerListDatabasesNoAlternatives \
+	  TestRedshiftListDatabasesNoAlternatives \
+	  TestPostgresListDatabasesWithAlternatives \
+	  TestSQLServerListDatabasesWithAlternatives \
+	  TestRedshiftListDatabasesWithAlternatives; \
+	do \
+	  grep -F "=== RUN   $$test_name" "$$db18_go_log" >/dev/null || { cat "$$db18_go_log" >&2; rm -f "$$db18_go_log"; printf '%s\n' "missing DB18 focused RUN line $$test_name" >&2; exit 1; }; \
+	  grep -F -- "--- PASS: $$test_name" "$$db18_go_log" >/dev/null || { cat "$$db18_go_log" >&2; rm -f "$$db18_go_log"; printf '%s\n' "missing DB18 focused PASS line $$test_name" >&2; exit 1; }; \
+	done; \
+	rm -f "$$db18_go_log"; \
+	run_logged "source:lua-headless" "check_db_nesting.lua" env UX13_ROLLUP_LOG="$(UX13_ROLLUP_LOG)" \
+	  $(MAKE) --no-print-directory perf-headless ARGS='-l ci/headless/check_db_nesting.lua'; \
 	run_logged "go-arch14" env GOCACHE="$(LSP01_PERF_ARTIFACT_DIR)/go-cache" \
 	  go -C dbee test ./core ./handler ./adapters; \
 	run_logged "perf" env XDG_STATE_HOME="$(LSP01_PERF_STATE_HOME)" $(MAKE) --no-print-directory perf \
@@ -165,10 +226,10 @@ perf-lsp: perf-bootstrap
 	  PERF_PLUGIN_ROOT="$(PERF_PLUGIN_ROOT)"; \
 	run_logged "lsp12-rollup" env LSP12_ROLLUP_LOG="$(UX13_ROLLUP_LOG)" \
 	  $(PERF_NVIM_HEADLESS) -c "luafile $(LSP12_ROLLUP_SCRIPT)"; \
-	run_logged "ux13-rollup" env UX13_ROLLUP_LOG="$(UX13_ROLLUP_LOG)" \
-	  $(PERF_NVIM_HEADLESS) -c "luafile $(UX13_ROLLUP_SCRIPT)"; \
 	run_logged "arch14-rollup" env ARCH14_ROLLUP_LOG="$(ARCH14_ROLLUP_LOG)" \
-	  $(PERF_NVIM_HEADLESS) -c "luafile $(ARCH14_ROLLUP_SCRIPT)"
+	  $(PERF_NVIM_HEADLESS) -c "luafile $(ARCH14_ROLLUP_SCRIPT)"; \
+	run_logged "ux13-rollup" env UX13_ROLLUP_LOG="$(UX13_ROLLUP_LOG)" \
+	  $(PERF_NVIM_HEADLESS) -c "luafile $(UX13_ROLLUP_SCRIPT)"
 
 perf-all: perf perf-lsp
 

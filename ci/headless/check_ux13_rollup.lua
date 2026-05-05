@@ -108,7 +108,54 @@ local required_true_markers = {
   "LSP12_HOVER_RESOLVE_ALL_PASS",
 }
 
-local ROLLUP_CHECK_COUNT = #required_true_markers + 6
+local DB18_BEHAVIOR_MARKERS = {
+  "DB18_TOPOLOGY_POSTGRES_NESTED_OK",
+  "DB18_TOPOLOGY_SQLSERVER_NESTED_OK",
+  "DB18_TOPOLOGY_REDSHIFT_NESTED_OK",
+  "DB18_TOPOLOGY_DATABRICKS_NESTED_OK",
+  "DB18_TOPOLOGY_MONGO_NESTED_OK",
+  "DB18_TOPOLOGY_MYSQL_FLAT_OK",
+  "DB18_TOPOLOGY_CLICKHOUSE_FLAT_OK",
+  "DB18_TOPOLOGY_ORACLE_FLAT_OK",
+  "DB18_TOPOLOGY_SQLITE_FLAT_OK",
+  "DB18_TOPOLOGY_DUCKDB_FLAT_OK",
+  "DB18_TOPOLOGY_BIGQUERY_FLAT_OK",
+  "DB18_TOPOLOGY_REDIS_FLAT_OK",
+  "DB18_SINGLE_DB_CURRENT_RENDER_OK",
+  "DB18_DATABASE_NODE_ID_STABLE_OK",
+  "DB18_SCHEMA_ID_MIGRATION_OK",
+  "DB18_SWITCH_INVALIDATION_OK",
+  "DB18_LAZY_SCHEMA_ROOT_PRESERVED_OK",
+  "DB18_FULL_ROOT_WRAPPED_OK",
+  "DB18_REFRESH_REPLAY_DATABASE_OK",
+  "DB18_CAPTURE_CONTAINER_DATABASE_OK",
+  "DB18_SEARCH_DATABASE_OK",
+  "DB18_YANK_DATABASE_ONLY_OK",
+  "DB18_MV_RICH_FOLDERS_UNDER_DB_OK",
+  "DB18_SCHEMA_FILTER_KEY_UNCHANGED_OK",
+  "DB18_NO_CORE_STRUCTURE_DATABASE_OK",
+  "DB18_LOCKED_HELPERS_UNTOUCHED_OK",
+  "DB18_ADAPTER_CURRENT_DB_FALLBACK_OK",
+  "DB18_TOPOLOGY_REGISTRY_COMPLETE_OK",
+  "DB18_REPLAY_NO_REFETCH_OK",
+}
+
+local DB18_REQUIRED_EXISTING_MARKERS = {
+  { source = "ARCH14_ALL_PASS", preserved = "DB18_ARCH14_PRESERVED_OK" },
+  { source = "FOLDER15_ALL_PASS", preserved = "DB18_FOLDER15_PRESERVED_OK" },
+  { source = "RICH16_ALL_PASS", preserved = "DB18_RICH16_PRESERVED_OK" },
+  { source = "RICH_PG_ALL_PASS", preserved = "DB18_RICH_PG_PRESERVED_OK" },
+  { source = "LSP12_HOVER_RESOLVE_ALL_PASS", preserved = "DB18_LSP12_PRESERVED_OK" },
+}
+
+local DB18_BEHAVIOR_OWNED_MARKERS = {
+  DB18_NO_CORE_STRUCTURE_DATABASE_OK = true,
+  DB18_LOCKED_HELPERS_UNTOUCHED_OK = true,
+  DB18_ADAPTER_CURRENT_DB_FALLBACK_OK = true,
+}
+
+local DB18_STRICT_MARKER_COUNT = #DB18_BEHAVIOR_MARKERS + #DB18_REQUIRED_EXISTING_MARKERS
+local ROLLUP_CHECK_COUNT = #required_true_markers + 6 + #DB18_BEHAVIOR_MARKERS + #DB18_REQUIRED_EXISTING_MARKERS + 2
 
 local function parse_markers(lines)
   local marker_values = {}
@@ -166,6 +213,23 @@ local function evaluate(lines)
     end
   end
 
+  local function require_db18_marker(label)
+    local values = marker_values[label]
+    if not values or #values == 0 then
+      add_count_failure("missing " .. label)
+      return false
+    end
+    local saw_true = false
+    for _, value in ipairs(values) do
+      if value ~= "true" then
+        add_count_failure(label .. " has unsupported value " .. tostring(value))
+      else
+        saw_true = true
+      end
+    end
+    return saw_true
+  end
+
   local function require_pattern_count(label, key_pattern, expected, opts)
     opts = opts or {}
     local count = 0
@@ -205,10 +269,46 @@ local function evaluate(lines)
   require_pattern_count("LSP01 no-stale-client markers", "^LSP01_.*_NO_STALE_CLIENTS$", 18, { distinct = true })
   require_pattern_count("LSP01 diagnostics didchange compute-only markers", "^LSP01_DIAGNOSTICS_DIDCHANGE_COMPUTE_ONLY$", 3)
 
+  local db18_behavior_seen = {}
+  for _, marker in ipairs(DB18_BEHAVIOR_MARKERS) do
+    if require_db18_marker(marker) then
+      db18_behavior_seen[marker] = true
+    end
+  end
+
+  local db18_behavior_count = 0
+  for _, marker in ipairs(DB18_BEHAVIOR_MARKERS) do
+    if db18_behavior_seen[marker] then
+      db18_behavior_count = db18_behavior_count + 1
+    end
+  end
+  if db18_behavior_count ~= #DB18_BEHAVIOR_MARKERS then
+    add_count_failure("DB18 behavior markers expected " .. tostring(#DB18_BEHAVIOR_MARKERS) .. ", got " .. tostring(db18_behavior_count))
+  end
+
+  local db18_preservation = {}
+  for _, spec in ipairs(DB18_REQUIRED_EXISTING_MARKERS) do
+    local values = marker_values[spec.source]
+    local ok = values and #values > 0
+    if ok then
+      for _, value in ipairs(values) do
+        if value ~= "true" then
+          ok = false
+          add_count_failure(spec.source .. " has unsupported value " .. tostring(value))
+        end
+      end
+    else
+      add_count_failure("missing " .. spec.source)
+    end
+    db18_preservation[spec.preserved] = ok == true
+  end
+
   return {
     ok = #failures == 0,
     failures = failures,
     count_failures = count_failures,
+    db18_preservation = db18_preservation,
+    db18_strict_marker_count = DB18_STRICT_MARKER_COUNT,
   }
 end
 
@@ -228,6 +328,10 @@ end
 local function valid_synthetic_log()
   local lines = {}
   for _, marker in ipairs(required_true_markers) do
+    lines[#lines + 1] = marker .. "=true"
+  end
+  lines[#lines + 1] = "ARCH14_ALL_PASS=true"
+  for _, marker in ipairs(DB18_BEHAVIOR_MARKERS) do
     lines[#lines + 1] = marker .. "=true"
   end
   lines[#lines + 1] = "DRAW01_REAL_NUI_PERF_ALL_PASS=unfrozen"
@@ -291,6 +395,67 @@ local function selftest()
     fail({ "selftest false duplicate marker did not fail" })
   end
 
+  local missing_db18 = valid_synthetic_log()
+  for index = #missing_db18, 1, -1 do
+    if missing_db18[index] == "DB18_SEARCH_DATABASE_OK=true" then
+      table.remove(missing_db18, index)
+      break
+    end
+  end
+  local missing_db18_result = evaluate(missing_db18)
+  if missing_db18_result.ok or not has_failure(missing_db18_result, "missing DB18_SEARCH_DATABASE_OK") then
+    fail({ "selftest missing DB18 behavior marker did not fail" })
+  end
+
+  local false_db18 = valid_synthetic_log()
+  table.insert(false_db18, "DB18_SEARCH_DATABASE_OK=false")
+  local false_db18_result = evaluate(false_db18)
+  if false_db18_result.ok or not has_failure(false_db18_result, "DB18_SEARCH_DATABASE_OK has unsupported value false") then
+    fail({ "selftest false DB18 behavior marker did not fail" })
+  end
+
+  local conflicting_db18 = valid_synthetic_log()
+  table.insert(conflicting_db18, "DB18_SEARCH_DATABASE_OK=false")
+  local conflicting_db18_result = evaluate(conflicting_db18)
+  if conflicting_db18_result.ok or not has_failure(conflicting_db18_result, "DB18_SEARCH_DATABASE_OK has unsupported value false") then
+    fail({ "selftest conflicting duplicate DB18 behavior marker did not fail" })
+  end
+
+  local missing_arch14 = valid_synthetic_log()
+  for index = #missing_arch14, 1, -1 do
+    if missing_arch14[index] == "ARCH14_ALL_PASS=true" then
+      table.remove(missing_arch14, index)
+      break
+    end
+  end
+  local missing_arch14_result = evaluate(missing_arch14)
+  if
+    missing_arch14_result.ok
+    or missing_arch14_result.db18_preservation.DB18_ARCH14_PRESERVED_OK == true
+    or not has_failure(missing_arch14_result, "missing ARCH14_ALL_PASS")
+  then
+    fail({ "selftest missing ARCH14 preservation marker did not fail" })
+  end
+
+  local missing_lsp12 = valid_synthetic_log()
+  for index = #missing_lsp12, 1, -1 do
+    if missing_lsp12[index] == "LSP12_HOVER_RESOLVE_ALL_PASS=true" then
+      table.remove(missing_lsp12, index)
+      break
+    end
+  end
+  local missing_lsp12_result = evaluate(missing_lsp12)
+  if missing_lsp12_result.ok or missing_lsp12_result.db18_preservation.DB18_LSP12_PRESERVED_OK == true then
+    fail({ "selftest missing existing all-pass did not suppress DB18_ALL_PASS" })
+  end
+
+  local rollup_src = table.concat(vim.fn.readfile(vim.fn.getcwd() .. "/ci/headless/check_ux13_rollup.lua"), "\n")
+  for marker in pairs(DB18_BEHAVIOR_OWNED_MARKERS) do
+    if rollup_src:find('emit%("' .. marker .. '"', 1) then
+      fail({ "selftest UX13 attempted to emit behavior-owned marker " .. marker })
+    end
+  end
+
   emit("UX13_ROLLUP_SELFTEST_ALL_PASS", "true")
   vim.cmd("qa!")
 end
@@ -309,5 +474,13 @@ end
 
 emit("UX13_ROLLUP_LSP01_COUNTS_OK", "true")
 emit("UX13_ROLLUP_MARKERS_CHECKED", tostring(ROLLUP_CHECK_COUNT))
+for _, spec in ipairs(DB18_REQUIRED_EXISTING_MARKERS) do
+  if result.db18_preservation[spec.preserved] ~= true then
+    fail({ "missing preservation result " .. spec.preserved })
+  end
+  emit(spec.preserved, "true")
+end
+emit("DB18_STRICT_MARKER_COUNT", tostring(result.db18_strict_marker_count))
+emit("DB18_ALL_PASS", "true")
 emit("UX13_ALL_PASS", "true")
 vim.cmd("qa!")

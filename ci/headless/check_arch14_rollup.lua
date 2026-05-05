@@ -104,7 +104,6 @@ local required_true_markers = {
   "ARCH14_PERF_DRAWER_SCOPED_FIXTURE_OK",
   "ARCH14_PERF_REAL_MEASUREMENTS_OK",
   "ARCH14_LARGE_CACHE_BENCHMARK_ISOLATED",
-  "UX13_ALL_PASS",
 }
 
 local advisory_markers = {
