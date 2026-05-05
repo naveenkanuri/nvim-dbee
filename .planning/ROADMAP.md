@@ -367,7 +367,54 @@ Phase 13 -> Phase 14 -> Phase 15. Phase 16 is conditional at Phase 15 ship.
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 13. UX Regression Batch | 0/TBD | Pending discuss | - |
-| 14. Enterprise DB UX Architecture | 0/TBD | Pending | - |
-| 15. LSP + Drawer Polish Batch | 0/TBD | Pending | - |
-| 16. LSP Feature Gap Closure | 3/3 | Complete via Phase 12.1-12.3 | 2026-05-01 |
+| 13. UX Regression Batch | Complete | SHIPPED | 2026-04-30 |
+| 14. Enterprise DB UX Architecture | Complete | SHIPPED | 2026-05-01 |
+| 15. Connection Folder Grouping | Complete | SHIPPED | 2026-05-01 |
+| 16. Rich Table Metadata X.1 (Oracle) | Complete | SHIPPED | 2026-05-01 |
+| LSP12 Feature Gap (12.1/12.2/12.3) | Complete | SHIPPED | 2026-05-01 |
+| Wallet auto-extract | Complete | SHIPPED | 2026-05-01 |
+| Folder UX + dual-review remediation + quick-wins | Complete | SHIPPED | 2026-05-04 |
+
+**v1.3 SHIPPED 2026-05-04.** Last commit `d8a4161`. See memory `project_v13_shipped.md`.
+
+## Milestone v1.4: Multi-Adapter Rich Metadata + LSP Polish
+
+**Date opened:** 2026-05-04
+**Goal:** Extend rich-table-metadata X.1 (Oracle, shipped) to PostgreSQL; surface metadata in LSP completion + diagnostics; add reverse FK references; close pending Oracle bind-name + cache cleanup work.
+**Phase ordering:** Phase 17 (Postgres rich-meta) → Phase 18 (LSP completion annotations + FK reverse refs) → Phase 19 (X.3 stub adapters + perf/cache cleanup + Oracle bind audit). Subject to fold-in if live testing surfaces priorities.
+
+### Phase 17: Rich Table Metadata X.2 — PostgreSQL Adapter
+**Depends on**: Phase 16 (Oracle X.1 architecture, shipped + validated)
+**Requirements**: DBEE-FEAT-04 (rich metadata multi-adapter coverage)
+**Status**: Discuss complete (`17-CONTEXT.md`, 29 locked decisions). Research dispatch next.
+**Success Criteria** (what must be TRUE):
+  1. PostgreSQL adapter produces per-table Columns + Indexes folders + per-schema Sequences folder via `pg_catalog` queries scoped by `nspname`.
+  2. Composite PKs/FKs handled with parallel `conkey`/`confkey` arrays; FK navigation via `<CR>` and `gd` works identically to Oracle.
+  3. Generated columns annotated `[GEN]`; non-trivial defaults annotated `[DEFAULT=...]`; identity columns annotated `[IDENTITY]`.
+  4. Materialized views relabeled from `'VIEW'` to `materialized_view` with rich Columns/Indexes folder treatment; `TABLE_LIKE_TYPES` extended.
+  5. Indexes split key columns from INCLUDE columns (`[INCLUDE col_a, col_b]`); ASC/DESC preserved for key columns.
+  6. Sequence support via `pg_class.relkind = 'S'` + `pg_sequence`.
+  7. Bind variables use Postgres native `$1, $2` placeholders. NEVER named binds.
+  8. New strict marker suite `RICH_PG_*` mirrors `RICH16_*` Oracle pattern (deterministic via sqlmock).
+  9. Phase 16 Oracle behavior + `RICH16_*` markers preserved.
+  10. Three single-source helpers untouched.
+**Plans**: TBD by `$gsd-plan-phase 17` after research.
+
+### Phase 18: LSP Completion Annotations + FK Reverse References
+**Depends on**: Phase 17
+**Requirements**: DBEE-FEAT-05 (LSP completion uses rich metadata)
+**Status**: Pending (open after Phase 17 ships).
+**Plans**: TBD.
+
+### Phase 19: Rich-meta X.3 stubs + perf/cache cleanup + Oracle bind audit
+**Depends on**: Phase 17, Phase 18
+**Status**: Backlog. May be split or expanded based on live testing.
+**Plans**: TBD.
+
+## v1.4 Progress
+
+| Phase | Plans Complete | Status | Completed |
+|-------|----------------|--------|-----------|
+| 17. Rich Table Metadata X.2 (Postgres) | 0/TBD | Discuss complete; research next | - |
+| 18. LSP Completion Annotations + FK Reverse | 0/TBD | Pending Phase 17 ship | - |
+| 19. X.3 stubs + perf/cache cleanup + Oracle bind audit | 0/TBD | Backlog | - |

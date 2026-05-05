@@ -1,17 +1,22 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.3
-milestone_name: Enterprise DB UX + v1.2 Closure
-status: Phase 12.3 implemented and verified; ready for impl-gate r1
-stopped_at: Phase 12.3 complete; summary written
-last_updated: "2026-05-01T14:08:41Z"
-last_activity: 2026-05-01 -- Phase 12.3 LSP code actions implemented and verified
+milestone: v1.4
+milestone_name: Multi-Adapter Rich Metadata + LSP Polish
+status: Phase 17 discuss complete; CONTEXT.md written; research dispatch next
+stopped_at: Phase 17 -- discuss complete (29 locked + 2 OQ resolved); ROADMAP/STATE updated
+last_updated: "2026-05-04T18:00:00Z"
+last_activity: 2026-05-04 -- v1.3 SHIPPED; v1.4 opened with Phase 17 (Postgres rich-meta) discuss
 progress:
-  total_phases: 9
-  completed_phases: 9
-  total_plans: 21
-  completed_plans: 21
-  percent: 100
+  total_phases: 1
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
+previous_milestones:
+  - v1.0 SHIPPED
+  - v1.1 SHIPPED
+  - v1.2 SHIPPED
+  - v1.3 SHIPPED 2026-05-04 (Phase 13/14/15/16 + LSP12.1/12.2/12.3 + wallet + folder UX + dual-review remediation + 3 quick-wins)
 ---
 
 # Project State
