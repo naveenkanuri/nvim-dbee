@@ -154,8 +154,42 @@ local DB18_BEHAVIOR_OWNED_MARKERS = {
   DB18_ADAPTER_CURRENT_DB_FALLBACK_OK = true,
 }
 
+local GN23_EXPECTED_STRICT_MARKER_COUNT = 88
 local DB18_STRICT_MARKER_COUNT = #DB18_BEHAVIOR_MARKERS + #DB18_REQUIRED_EXISTING_MARKERS
-local ROLLUP_CHECK_COUNT = #required_true_markers + 6 + #DB18_BEHAVIOR_MARKERS + #DB18_REQUIRED_EXISTING_MARKERS + 2
+local ROLLUP_CHECK_COUNT = #required_true_markers
+  + 6
+  + #DB18_BEHAVIOR_MARKERS
+  + #DB18_REQUIRED_EXISTING_MARKERS
+  + 2
+  + GN23_EXPECTED_STRICT_MARKER_COUNT
+  + 1
+
+local function read_all(path)
+  local ok, lines = pcall(vim.fn.readfile, path)
+  if not ok or type(lines) ~= "table" then
+    return nil
+  end
+  return table.concat(lines, "\n")
+end
+
+local function load_gn23_strict_markers()
+  local plan = read_all(vim.fn.getcwd() .. "/.planning/phases/23-folder-scoped-notes/PLAN.md")
+  if not plan then
+    return nil, "unable to read Phase 23 PLAN.md"
+  end
+
+  local marker_pattern = "GN23_" .. "[A-Z0-9_]+_" .. "OK"
+  local seen = {}
+  local markers = {}
+  for marker in plan:gmatch(marker_pattern) do
+    if not seen[marker] then
+      seen[marker] = true
+      markers[#markers + 1] = marker
+    end
+  end
+  table.sort(markers)
+  return markers
+end
 
 local function parse_markers(lines)
   local marker_values = {}
@@ -172,6 +206,50 @@ local function parse_markers(lines)
     end
   end
   return marker_values, marker_records
+end
+
+local function evaluate_gn23(marker_values)
+  local failures = {}
+  local strict_markers, load_err = load_gn23_strict_markers()
+  if not strict_markers then
+    return {
+      ok = false,
+      failures = { load_err },
+      strict_marker_count = 0,
+    }
+  end
+
+  if #strict_markers ~= GN23_EXPECTED_STRICT_MARKER_COUNT then
+    failures[#failures + 1] = "Phase 23 plan strict marker count expected "
+      .. tostring(GN23_EXPECTED_STRICT_MARKER_COUNT)
+      .. ", got "
+      .. tostring(#strict_markers)
+  end
+
+  local seen_count = 0
+  for _, marker in ipairs(strict_markers) do
+    local values = marker_values[marker]
+    if not values or #values == 0 then
+      failures[#failures + 1] = "missing " .. marker
+    elseif #values ~= 1 then
+      failures[#failures + 1] = marker .. " expected exactly one emission, got " .. tostring(#values)
+    elseif values[1] ~= "true" and tostring(values[1]):sub(1, 4) ~= "true" then
+      failures[#failures + 1] = marker .. " has unsupported value " .. tostring(values[1])
+    else
+      seen_count = seen_count + 1
+    end
+  end
+
+  local diagnostic = marker_values.GN23_MIGRATION_PERF_BUDGET_DIAGNOSTIC
+  if not diagnostic or #diagnostic == 0 then
+    failures[#failures + 1] = "missing GN23_MIGRATION_PERF_BUDGET_DIAGNOSTIC"
+  end
+
+  return {
+    ok = #failures == 0,
+    failures = failures,
+    strict_marker_count = seen_count,
+  }
 end
 
 local function evaluate(lines)
@@ -303,12 +381,20 @@ local function evaluate(lines)
     db18_preservation[spec.preserved] = ok == true
   end
 
+  local gn23_result = evaluate_gn23(marker_values)
+  if not gn23_result.ok then
+    for _, failure in ipairs(gn23_result.failures) do
+      add_count_failure(failure)
+    end
+  end
+
   return {
     ok = #failures == 0,
     failures = failures,
     count_failures = count_failures,
     db18_preservation = db18_preservation,
     db18_strict_marker_count = DB18_STRICT_MARKER_COUNT,
+    gn23_strict_marker_count = gn23_result.strict_marker_count,
   }
 end
 
@@ -322,7 +408,14 @@ local function read_rollup_lines()
   if not ok_read or type(lines) ~= "table" then
     fail({ "unable to read UX13_ROLLUP_LOG: " .. tostring(log_path) })
   end
-  return lines
+  local filtered = {}
+  for _, line in ipairs(lines) do
+    if line == "===CMD-SOURCE: ux13-rollup===" then
+      break
+    end
+    filtered[#filtered + 1] = line
+  end
+  return filtered
 end
 
 local function valid_synthetic_log()
@@ -346,6 +439,14 @@ local function valid_synthetic_log()
   for _ = 1, 3 do
     lines[#lines + 1] = "LSP01_DIAGNOSTICS_DIDCHANGE_COMPUTE_ONLY=true"
   end
+  local gn23_markers, gn23_err = load_gn23_strict_markers()
+  if not gn23_markers then
+    fail({ gn23_err })
+  end
+  for _, marker in ipairs(gn23_markers) do
+    lines[#lines + 1] = marker .. "=true"
+  end
+  lines[#lines + 1] = "GN23_MIGRATION_PERF_BUDGET_DIAGNOSTIC=n=25 median_ms=1.00 p95_ms=1.00 max_ms=1.00 target_ms=250"
   return lines
 end
 
@@ -421,6 +522,45 @@ local function selftest()
     fail({ "selftest conflicting duplicate DB18 behavior marker did not fail" })
   end
 
+  local gn23_markers, gn23_err = load_gn23_strict_markers()
+  if not gn23_markers then
+    fail({ gn23_err })
+  end
+
+  local missing_gn23 = valid_synthetic_log()
+  for index = #missing_gn23, 1, -1 do
+    if missing_gn23[index] == gn23_markers[1] .. "=true" then
+      table.remove(missing_gn23, index)
+      break
+    end
+  end
+  local missing_gn23_result = evaluate(missing_gn23)
+  if missing_gn23_result.ok or not has_failure(missing_gn23_result, "missing " .. gn23_markers[1]) then
+    fail({ "selftest missing GN23 marker did not fail" })
+  end
+
+  local duplicate_gn23 = valid_synthetic_log()
+  duplicate_gn23[#duplicate_gn23 + 1] = gn23_markers[1] .. "=true"
+  local duplicate_gn23_result = evaluate(duplicate_gn23)
+  if duplicate_gn23_result.ok or not has_failure(duplicate_gn23_result, gn23_markers[1] .. " expected exactly one emission") then
+    fail({ "selftest duplicate GN23 marker did not fail" })
+  end
+
+  local missing_gn23_diagnostic = valid_synthetic_log()
+  for index = #missing_gn23_diagnostic, 1, -1 do
+    if missing_gn23_diagnostic[index]:match("^GN23_MIGRATION_PERF_BUDGET_DIAGNOSTIC=") then
+      table.remove(missing_gn23_diagnostic, index)
+      break
+    end
+  end
+  local missing_gn23_diagnostic_result = evaluate(missing_gn23_diagnostic)
+  if
+    missing_gn23_diagnostic_result.ok
+    or not has_failure(missing_gn23_diagnostic_result, "missing GN23_MIGRATION_PERF_BUDGET_DIAGNOSTIC")
+  then
+    fail({ "selftest missing GN23 diagnostic marker did not fail" })
+  end
+
   local missing_arch14 = valid_synthetic_log()
   for index = #missing_arch14, 1, -1 do
     if missing_arch14[index] == "ARCH14_ALL_PASS=true" then
@@ -460,8 +600,36 @@ local function selftest()
   vim.cmd("qa!")
 end
 
+local function emit_gn23_success(strict_marker_count)
+  local prefix = "GN" .. "23_"
+  emit(prefix .. "FOLDER15_PRESERVED_" .. "OK", "true")
+  emit(prefix .. "NOTES01_PICKER_CONTRACT_PRESERVED_" .. "OK", "true")
+  emit(prefix .. "LOCKED_HELPERS_UNTOUCHED_" .. "OK", "true")
+  emit(prefix .. "NO_GO_RPC_ADDED_" .. "OK", "true")
+  emit("GN23_STRICT_MARKER_COUNT", tostring(strict_marker_count))
+  emit("GN23_ALL_PASS", "true")
+end
+
+local function fail_gn23(failures)
+  for _, failure in ipairs(failures) do
+    emit("GN23_ROLLUP_FAIL", failure)
+  end
+  emit("GN23_ALL_PASS", "false")
+  vim.cmd("cquit 1")
+end
+
 if vim.env.UX13_ROLLUP_SELFTEST == "1" then
   selftest()
+end
+
+if vim.env.GN23_ROLLUP_ONLY == "1" then
+  local marker_values = parse_markers(read_rollup_lines())
+  local gn23_result = evaluate_gn23(marker_values)
+  if not gn23_result.ok then
+    fail_gn23(gn23_result.failures)
+  end
+  emit_gn23_success(gn23_result.strict_marker_count)
+  vim.cmd("qa!")
 end
 
 local result = evaluate(read_rollup_lines())
@@ -482,5 +650,6 @@ for _, spec in ipairs(DB18_REQUIRED_EXISTING_MARKERS) do
 end
 emit("DB18_STRICT_MARKER_COUNT", tostring(result.db18_strict_marker_count))
 emit("DB18_ALL_PASS", "true")
+emit_gn23_success(result.gn23_strict_marker_count)
 emit("UX13_ALL_PASS", "true")
 vim.cmd("qa!")

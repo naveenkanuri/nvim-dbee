@@ -33,11 +33,70 @@ WALLET_GO_LOG ?= $(WALLET_ARTIFACT_DIR)/wallet-go.log
 WALLET_LUA_LOG ?= $(WALLET_ARTIFACT_DIR)/wallet-lua.log
 WALLET_ROLLUP_SCRIPT ?= $(CURDIR)/ci/headless/check_oracle_wallet_zip.lua
 
-.PHONY: perf perf-lsp perf-all wallet-test perf-headless db18-locked-helpers-guard
+.PHONY: perf perf-lsp perf-all wallet-test perf-headless db18-locked-helpers-guard gn23 gn23-rollup gn23-locked-helpers-guard gn23-no-go-rpc-guard
 
 perf-headless: perf-bootstrap
 	@mkdir -p "$(LSP01_PERF_STATE_HOME)"
-	XDG_STATE_HOME="$(LSP01_PERF_STATE_HOME)" $(PERF_NVIM_HEADLESS) $(ARGS)
+	@if [ -n "$(ARGS)" ]; then \
+	  UX13_ROLLUP_LOG="$(UX13_ROLLUP_LOG)" XDG_STATE_HOME="$(LSP01_PERF_STATE_HOME)" $(PERF_NVIM_HEADLESS) $(ARGS); \
+	else \
+	  $(MAKE) --no-print-directory perf-lsp \
+	    PERF_PLATFORM="$(PERF_PLATFORM)" \
+	    DRAW01_PERF_GATE_MODE="$(DRAW01_PERF_GATE_MODE)" \
+	    LSP01_PERF_GATE_MODE="$(LSP01_PERF_GATE_MODE)" \
+	    NVIM_BIN="$(NVIM_BIN)" \
+	    PERF_PLUGIN_ROOT="$(PERF_PLUGIN_ROOT)"; \
+	fi
+
+gn23: perf-bootstrap
+	@set -eu; \
+	mkdir -p "$(LSP01_PERF_STATE_HOME)" "$(UX13_ROLLUP_ARTIFACT_DIR)"; \
+	: > "$(UX13_ROLLUP_LOG)"; \
+	run_logged() { \
+	  label="$$1"; \
+	  shift; \
+	  tmp="$$(mktemp)"; \
+	  set +e; \
+	  "$$@" >"$$tmp" 2>&1; \
+	  status="$$?"; \
+	  set -e; \
+	  cat "$$tmp"; \
+	  printf '\n'; \
+	  cat "$$tmp" >> "$(UX13_ROLLUP_LOG)"; \
+	  printf '\n' >> "$(UX13_ROLLUP_LOG)"; \
+	  rm -f "$$tmp"; \
+	  if [ "$$status" -ne 0 ]; then \
+	    printf '%s\n' "$$label failed with status $$status" >&2; \
+	    printf '%s\n' "rollup log path: $(UX13_ROLLUP_LOG)" >&2; \
+	    exit "$$status"; \
+	  fi; \
+	}; \
+	for script in \
+	  check_folder_scoped_notes.lua \
+	  check_notes_picker.lua \
+	  check_folder_persistence.lua \
+	  check_drawer_folders.lua; \
+	do \
+	  run_logged "$$script" env UX13_ROLLUP_LOG="$(UX13_ROLLUP_LOG)" XDG_STATE_HOME="$(LSP01_PERF_STATE_HOME)" \
+	    $(PERF_NVIM_HEADLESS) -l "ci/headless/$$script"; \
+	done; \
+	run_logged "gn23-locked-helpers-guard" $(MAKE) --no-print-directory gn23-locked-helpers-guard; \
+	run_logged "gn23-no-go-rpc-guard" $(MAKE) --no-print-directory gn23-no-go-rpc-guard
+
+gn23-rollup: gn23
+	UX13_ROLLUP_LOG="$(UX13_ROLLUP_LOG)" GN23_ROLLUP_ONLY=1 XDG_STATE_HOME="$(LSP01_PERF_STATE_HOME)" $(PERF_NVIM_HEADLESS) -l ci/headless/check_ux13_rollup.lua
+
+gn23-locked-helpers-guard:
+	@set -eu; \
+	git diff --exit-code -- lua/dbee/schema_filter_authority.lua lua/dbee/schema_name_canonical.lua lua/dbee/lsp/epoch_authority.lua >/dev/null; \
+	git diff --cached --exit-code -- lua/dbee/schema_filter_authority.lua lua/dbee/schema_name_canonical.lua lua/dbee/lsp/epoch_authority.lua >/dev/null
+
+gn23-no-go-rpc-guard:
+	@set -eu; \
+	if rg -n 'DbeeConnectionGetFolder|DbeeFolder|Dbee.*Folder.*Note|FolderNotes|ConnectionGetFolder' dbee/endpoints.go dbee/handler/handler.go; then \
+	  printf '%s\n' "Phase 23 forbids Go RPC folder lookup additions" >&2; \
+	  exit 1; \
+	fi
 
 db18-locked-helpers-guard:
 	@set -eu; \
@@ -168,6 +227,7 @@ perf-lsp: perf-bootstrap
 	  check_lsp_schema_filter_lazy.lua \
 	  check_drawer_filter.lua \
 	  check_structure_lazy.lua \
+	  check_folder_scoped_notes.lua \
 	  check_notes_picker.lua \
 	  check_connection_lifecycle.lua \
 	  check_connection_coordination.lua \
@@ -228,7 +288,7 @@ perf-lsp: perf-bootstrap
 	  $(PERF_NVIM_HEADLESS) -c "luafile $(LSP12_ROLLUP_SCRIPT)"; \
 	run_logged "arch14-rollup" env ARCH14_ROLLUP_LOG="$(ARCH14_ROLLUP_LOG)" \
 	  $(PERF_NVIM_HEADLESS) -c "luafile $(ARCH14_ROLLUP_SCRIPT)"; \
-	run_logged "ux13-rollup" env UX13_ROLLUP_LOG="$(UX13_ROLLUP_LOG)" \
+	run_logged "source:ux13-rollup" "ux13-rollup" env UX13_ROLLUP_LOG="$(UX13_ROLLUP_LOG)" \
 	  $(PERF_NVIM_HEADLESS) -c "luafile $(UX13_ROLLUP_SCRIPT)"
 
 perf-all: perf perf-lsp

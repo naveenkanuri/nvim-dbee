@@ -46,6 +46,7 @@ end
 
 local function emit(marker)
   print(marker .. "=true")
+  io.stdout:flush()
 end
 
 local notifications = {}
@@ -1263,7 +1264,6 @@ local function run_static_wave2_contracts()
 
   assert_match("recursive rmdir uses vim.fn.delete rf", namespace, 'vim.fn.delete(path, "rf") == 0')
   emit("GN23_FOLDER_ID_PATH_GUARD_OK")
-  emit("GN23_NAMESPACE_INPUT_VALIDATION_OK")
 
   local helpers = {
     "schema_filter_authority.lua",
@@ -1286,6 +1286,73 @@ local function run_notes01_and_folder15_presence_markers()
   emit("GN23_NOTES01_PICKER_CONTRACT_PRESERVED_OK")
 end
 
+local function percentile(sorted, pct)
+  local index = math.ceil(#sorted * pct)
+  if index < 1 then
+    index = 1
+  elseif index > #sorted then
+    index = #sorted
+  end
+  return sorted[index]
+end
+
+local function run_migration_perf_diagnostic()
+  local notes_migration = require("dbee.notes_migration")
+  local measured = {}
+
+  for iteration = 1, 30 do
+    local root = make_temp_dir()
+    local ok, err = pcall(function()
+      local notes_dir = vim.fs.joinpath(root, "notes")
+      local global_dir = vim.fs.joinpath(notes_dir, "global")
+      vim.fn.mkdir(global_dir, "p")
+      for note_index = 1, 100 do
+        write_file(vim.fs.joinpath(global_dir, string.format("note_%03d.sql", note_index)), "select " .. note_index .. ";\n")
+      end
+
+      local records = {}
+      local folders = {}
+      for folder_index = 1, 10 do
+        local conn_id = "conn-perf-" .. folder_index
+        records[#records + 1] = {
+          id = conn_id,
+          name = conn_id,
+          type = "postgres",
+          url = "postgres://" .. conn_id,
+        }
+        folders[#folders + 1] = {
+          id = "folder_Perf" .. folder_index,
+          name = "Perf " .. folder_index,
+          connection_ids = { conn_id },
+        }
+      end
+
+      local source = make_source(root, "source-perf.json", records, folders)
+      local handler = make_handler({ source }, "conn-perf-1")
+      local started = vim.loop.hrtime()
+      local result = notes_migration.maybe_run(handler, notes_dir, {})
+      assert_true("perf migration result", result == true)
+      local elapsed_ms = (vim.loop.hrtime() - started) / 1000000
+      if iteration > 5 then
+        measured[#measured + 1] = elapsed_ms
+      end
+    end)
+    cleanup_path(root)
+    if not ok then
+      fail(err)
+    end
+  end
+
+  table.sort(measured)
+  print(string.format(
+    "GN23_MIGRATION_PERF_BUDGET_DIAGNOSTIC=n=%d median_ms=%.2f p95_ms=%.2f max_ms=%.2f target_ms=250",
+    #measured,
+    percentile(measured, 0.50),
+    percentile(measured, 0.95),
+    measured[#measured] or 0
+  ))
+end
+
 run_source_handler_contracts()
 run_handler_defensive_contracts()
 run_collision_and_load_uncertainty_contracts()
@@ -1302,6 +1369,7 @@ run_folder_lifecycle_contracts()
 run_command_contracts()
 run_static_wave2_contracts()
 run_notes01_and_folder15_presence_markers()
+run_migration_perf_diagnostic()
 
 vim.notify = saved_notify
 vim.cmd("qa!")
