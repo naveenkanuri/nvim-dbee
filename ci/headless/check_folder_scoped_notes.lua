@@ -312,6 +312,15 @@ local function run_collision_and_load_uncertainty_contracts()
     local folder, lookup_error_kind = corrupt_handler:get_folder_for_connection("conn-corrupt")
     assert_eq("load uncertainty folder", folder, nil)
     assert_eq("load uncertainty lookup", lookup_error_kind, "load_failed")
+    local migration_source = read_file("lua/dbee/notes_migration.lua")
+    assert_false(
+      "legacy rename validation detail is not an error_kind",
+      migration_source:find('"legacy_local_rename_validation_failed"', 1, true)
+    )
+    assert_false(
+      "manifest mismatch detail is not an error_kind",
+      migration_source:find('"manifest_mismatch"', 1, true)
+    )
     emit("GN23_FOLDER_LOAD_UNCERTAINTY_FAIL_CLOSED_OK")
     emit("GN23_ERROR_KIND_VOCAB_LOCKED_OK")
   end)
@@ -448,6 +457,7 @@ local function run_namespace_contracts()
       "create_note_in_folder",
       "encode_local_namespace_path",
       "decode_local_namespace_path",
+      "_ensure_folder_namespace_unchecked_for_migration",
       "delete_folder_namespace",
       "list_existing_folder_namespaces",
       "recursive_rmdir",
@@ -941,9 +951,11 @@ local function run_migration_failure_and_recovery_contracts()
       entries = {},
     }))
     local legacy_bad_handler = make_handler({}, nil)
-    local legacy_bad_result, legacy_bad_kind = notes_migration.maybe_run(legacy_bad_handler, legacy_bad_notes, {})
+    local legacy_bad_result, legacy_bad_kind, legacy_bad_detail =
+      notes_migration.maybe_run(legacy_bad_handler, legacy_bad_notes, {})
     assert_false("legacy rename recovery rejects missing encoded path", legacy_bad_result)
-    assert_eq("legacy rename recovery failure kind", legacy_bad_kind, "legacy_local_rename_validation_failed")
+    assert_eq("legacy rename recovery failure kind", legacy_bad_kind, "recovery_validation_failed")
+    assert_match("legacy rename recovery detail", legacy_bad_detail, "legacy local rename validation failed")
     emit_value("GN23_LEGACY_RENAME_RECOVERY_VALIDATION_DIAGNOSTIC", "ok")
   end)
   cleanup_path(root)
@@ -1677,6 +1689,21 @@ local function run_static_wave2_contracts()
     "folder mkdir consumers routed",
     "rg -n -e 'vim\\.fn\\.mkdir\\([^)]*\"folder:' lua/dbee | rg -v 'lua/dbee/notes_namespace.lua'"
   )
+  assert_no_grep_hits(
+    "folder authority skip option removed",
+    "rg -n -e 'skip_authority_check' lua/dbee"
+  )
+  local unchecked_hits =
+    vim.fn.systemlist({ "rg", "-n", "_ensure_folder_namespace_unchecked_for_migration", "lua/dbee" })
+  local unchecked_call_count = 0
+  for _, line in ipairs(unchecked_hits) do
+    if line:find("lua/dbee/notes_migration.lua", 1, true) then
+      unchecked_call_count = unchecked_call_count + 1
+    else
+      assert_true("unchecked helper owner " .. line, line:find("lua/dbee/notes_namespace.lua", 1, true))
+    end
+  end
+  assert_eq("unchecked helper migration call count", unchecked_call_count, 1)
   emit("GN23_NOTES_NAMESPACE_AUTHORITY_ALL_CONSUMERS_ROUTED_OK")
 
   assert_match("private clear cache annotation", editor, "---@private\n---@param namespace namespace_id\nfunction EditorUI:namespace_clear_cache")

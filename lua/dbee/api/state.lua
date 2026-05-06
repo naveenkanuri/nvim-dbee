@@ -56,8 +56,8 @@ local function resolve_notes_dir()
   return (m.config.editor and m.config.editor.directory) or (vim.fn.stdpath("state") .. "/dbee/notes")
 end
 
-local function write_migration_failure_log(notes_dir, err)
-  pcall(notes_migration.write_last_failure_log, notes_dir, err, debug.traceback("", 2))
+local function write_migration_failure_log(notes_dir, err, detail)
+  pcall(notes_migration.write_last_failure_log, notes_dir, err, debug.traceback("", 2), detail)
 end
 
 local function _throw_migration_aborted(error_kind)
@@ -123,7 +123,8 @@ local function setup_handler()
     end
   end
 
-  local ok_migration, migration_result, migration_error_kind = pcall(notes_migration.maybe_run, m.handler, notes_dir, m)
+  local ok_migration, migration_result, migration_error_kind, migration_detail =
+    pcall(notes_migration.maybe_run, m.handler, notes_dir, m)
   if not ok_migration then
     m.migration_fatal_failed = true
     write_migration_failure_log(notes_dir, migration_result)
@@ -136,7 +137,7 @@ local function setup_handler()
   if migration_result == false then
     local err = migration_error_kind or "unknown"
     m.migration_fatal_failed = true
-    write_migration_failure_log(notes_dir, err)
+    write_migration_failure_log(notes_dir, err, migration_detail)
     _throw_migration_aborted(err)
   end
   if migration_result == true then

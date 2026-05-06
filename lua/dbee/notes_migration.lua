@@ -43,6 +43,8 @@ local TRASH_PREFIX = ".notes-migration-v1.trash-"
 local FRESH_LOCK_SECONDS = 300
 local SCRATCH_STALE_SECONDS = 3600
 local FAILURE_LOG_MAX_BYTES = 64 * 1024
+local RECOVERY_VALIDATION_FAILED = "recovery_validation_failed"
+local LEGACY_LOCAL_RENAME_FAILED = "legacy_local_rename_failed"
 
 local CROSS_FS_NOTIFY =
   "dbee: migration aborted — cross-filesystem rename detected; not supported. Move notes/ off bind mounts and retry, OR set editor.directory in setup() to a same-filesystem path and retry."
@@ -174,9 +176,10 @@ end
 ---@param notes_dir string
 ---@param err any
 ---@param stack? string
+---@param detail? any
 ---@return boolean
 ---@return string? error
-function M.write_last_failure_log(notes_dir, err, stack)
+function M.write_last_failure_log(notes_dir, err, stack, detail)
   if type(notes_dir) ~= "string" or notes_dir == "" then
     return false, "invalid notes_dir"
   end
@@ -185,7 +188,8 @@ function M.write_last_failure_log(notes_dir, err, stack)
   local entry = table.concat({
     "timestamp=" .. now_iso(),
     "error_kind=" .. tostring(err),
-    "error=" .. tostring(err),
+    "error=" .. tostring(detail or err),
+    "detail=" .. tostring(detail or ""),
     "stack=" .. tostring(stack or debug.traceback("", 2)),
     "sentinel=" .. sentinel_path(notes_dir),
     "lock=" .. lock_path(notes_dir),
@@ -206,11 +210,11 @@ end
 local function read_json_file(path)
   local content = read_file(path)
   if not content or content == "" then
-    return nil, "missing"
+    return nil, RECOVERY_VALIDATION_FAILED, "manifest missing: " .. tostring(path)
   end
   local ok, decoded = pcall(vim.json.decode, content)
   if not ok or type(decoded) ~= "table" then
-    return nil, "decode_failed"
+    return nil, RECOVERY_VALIDATION_FAILED, "manifest decode_failed: " .. tostring(path)
   end
   return decoded
 end
@@ -376,7 +380,11 @@ local function apply_legacy_local_namespace_renames(handler, notes_dir)
             vim.notify(CROSS_FS_NOTIFY, vim.log.levels.ERROR)
             return nil, "EXDEV"
           end
-          return nil, tostring(rename_err)
+          vim.notify(
+            "dbee: legacy local note namespace rename failed: " .. tostring(rename_err),
+            vim.log.levels.ERROR
+          )
+          return nil, LEGACY_LOCAL_RENAME_FAILED, tostring(rename_err)
         end
       else
         remove_empty_parent_dirs(notes_dir, dirname(rename.raw_path))
@@ -650,35 +658,35 @@ end
 
 local function validate_promote_manifest(manifest, require_staging_absent)
   if type(manifest) ~= "table" or type(manifest.entries) ~= "table" then
-    return false, "manifest malformed"
+    return false, RECOVERY_VALIDATION_FAILED, "manifest malformed"
   end
   if #manifest.entries ~= tonumber(manifest.expected_count or -1) then
-    return false, "manifest count mismatch"
+    return false, RECOVERY_VALIDATION_FAILED, "manifest count mismatch"
   end
   if not planned_dst_unique_per_folder(manifest.entries) then
-    return false, "planned destinations not unique"
+    return false, RECOVERY_VALIDATION_FAILED, "planned destinations not unique"
   end
   for _, entry in ipairs(manifest.entries) do
     if require_staging_absent and exists(entry.src_staging) then
-      return false, "staging source still exists"
+      return false, RECOVERY_VALIDATION_FAILED, "staging source still exists"
     end
     local size = file_size(entry.planned_dst)
     if not size or size <= 0 then
-      return false, "planned destination missing"
+      return false, RECOVERY_VALIDATION_FAILED, "planned destination missing"
     end
     if tonumber(entry.src_size_bytes or -1) ~= size then
-      return false, "planned destination size mismatch"
+      return false, RECOVERY_VALIDATION_FAILED, "planned destination size mismatch"
     end
     if not basename_matches_planned(tostring(entry.src_basename or ""), basename(entry.planned_dst or "")) then
-      return false, "planned destination basename mismatch"
+      return false, RECOVERY_VALIDATION_FAILED, "planned destination basename mismatch"
     end
   end
   for _, rename in ipairs(manifest.legacy_local_renames or {}) do
     if type(rename.raw_path) ~= "string" or type(rename.encoded_path) ~= "string" then
-      return false, "legacy local rename malformed"
+      return false, RECOVERY_VALIDATION_FAILED, "legacy local rename malformed"
     end
     if exists(rename.raw_path) or not is_dir(rename.encoded_path) then
-      return false, "legacy_local_rename_validation_failed"
+      return false, RECOVERY_VALIDATION_FAILED, "legacy local rename validation failed"
     end
   end
   return true
@@ -749,48 +757,58 @@ end
 
 local function validate_recovery_manifest(recovery)
   if type(recovery) ~= "table" or type(recovery.final_paths) ~= "table" then
-    return false
+    return false, "recovery manifest malformed"
   end
   for _, final_path in ipairs(recovery.final_paths) do
     local size = file_size(final_path)
     if not size or size <= 0 then
-      return false
+      return false, "recovery final path missing"
     end
     local expected = recovery.final_sizes and tonumber(recovery.final_sizes[final_path])
     if expected and expected ~= size then
-      return false
+      return false, "recovery final path size mismatch"
     end
   end
   return true
 end
 
 local function handle_recovery_needed(notes_dir)
-  local recovery, recovery_err = read_json_file(recovery_needed_path(notes_dir))
+  local recovery, recovery_err, recovery_detail = read_json_file(recovery_needed_path(notes_dir))
   if not recovery then
-    return false, recovery_err
+    return false, recovery_err, recovery_detail
   end
 
   local promote = nil
   if exists(promote_manifest_path(notes_dir)) then
-    promote = read_json_file(promote_manifest_path(notes_dir))
+    local promote_err, promote_detail
+    promote, promote_err, promote_detail = read_json_file(promote_manifest_path(notes_dir))
     if
       not promote
       or recovery.migration_run_ts ~= promote.migration_run_ts
       or not final_paths_superset(recovery, promote)
     then
-      vim.notify("dbee: manifest mismatch; inspect via :Dbee notes_migration_inspect; manually resolve", vim.log.levels.ERROR)
-      return false, "manifest_mismatch"
+      local detail = promote_detail or promote_err or "manifest mismatch"
+      vim.notify(
+        "dbee: manifest mismatch; inspect via :Dbee notes_migration_inspect; manually resolve: " .. tostring(detail),
+        vim.log.levels.ERROR
+      )
+      return false, RECOVERY_VALIDATION_FAILED, detail
     end
   end
 
-  if not validate_recovery_manifest(recovery) then
-    vim.notify("dbee: recovery manifest validation failed; run :Dbee notes_migration_inspect", vim.log.levels.ERROR)
-    return false, "recovery_validation_failed"
+  local ok_recovery_manifest, recovery_manifest_detail = validate_recovery_manifest(recovery)
+  if not ok_recovery_manifest then
+    vim.notify(
+      "dbee: recovery manifest validation failed; run :Dbee notes_migration_inspect: "
+        .. tostring(recovery_manifest_detail),
+      vim.log.levels.ERROR
+    )
+    return false, RECOVERY_VALIDATION_FAILED, recovery_manifest_detail
   end
 
   local ok_sentinel, sentinel_err = write_sentinel(notes_dir)
   if not ok_sentinel then
-    return false, sentinel_err
+    return false, RECOVERY_VALIDATION_FAILED, "sentinel write failed: " .. tostring(sentinel_err)
   end
   safe_unlink(recovery_needed_path(notes_dir))
   safe_unlink(promote_manifest_path(notes_dir))
@@ -798,26 +816,33 @@ local function handle_recovery_needed(notes_dir)
 end
 
 local function handle_promote_manifest(notes_dir)
-  local manifest, read_err = read_json_file(promote_manifest_path(notes_dir))
+  local manifest, read_err, read_detail = read_json_file(promote_manifest_path(notes_dir))
   if not manifest then
-    return false, read_err
+    return false, read_err, read_detail
   end
 
   local require_staging_absent = manifest.promote_complete == false
-  local ok_validate, validate_err = validate_promote_manifest(manifest, require_staging_absent)
+  local ok_validate, validate_err, validate_detail = validate_promote_manifest(manifest, require_staging_absent)
   if not ok_validate then
     if require_staging_absent then
       vim.notify(
-        "dbee: promote crashed mid-flight; run :Dbee notes_migration_inspect to inspect notes/.notes-migration-v1.staging-* directories before retry",
+        "dbee: promote crashed mid-flight; run :Dbee notes_migration_inspect to inspect notes/.notes-migration-v1.staging-* directories before retry: "
+          .. tostring(validate_detail),
+        vim.log.levels.ERROR
+      )
+    else
+      vim.notify(
+        "dbee: promote manifest validation failed; run :Dbee notes_migration_inspect: "
+          .. tostring(validate_detail),
         vim.log.levels.ERROR
       )
     end
-    return false, validate_err
+    return false, validate_err, validate_detail
   end
 
   local ok_complete, complete_err = complete_after_promotion(notes_dir, manifest)
   if not ok_complete then
-    return false, complete_err
+    return false, RECOVERY_VALIDATION_FAILED, "complete after promotion failed: " .. tostring(complete_err)
   end
   return true, "promote_recovered"
 end
@@ -1012,7 +1037,7 @@ local function run_fresh_migration(handler, notes_dir, legacy_local_renames)
   if #global_files == 0 then
     for _, folder_id in ipairs(folder_ids) do
       local ok_ensure, ensure_err =
-        notes_namespace.ensure_folder_namespace(notes_dir, folder_id, handler, { skip_authority_check = true })
+        notes_namespace._ensure_folder_namespace_unchecked_for_migration(notes_dir, folder_id)
       if not ok_ensure then
         return false, ensure_err
       end
@@ -1107,15 +1132,16 @@ function M.maybe_run(handler, notes_dir, m)
     return false, lock_or_err
   end
 
-  local ok, result, err = pcall(function()
-    local legacy_local_renames, legacy_local_err = apply_legacy_local_namespace_renames(handler, notes_dir)
+  local ok, result, err, detail = pcall(function()
+    local legacy_local_renames, legacy_local_err, legacy_local_detail =
+      apply_legacy_local_namespace_renames(handler, notes_dir)
     if not legacy_local_renames then
-      return false, legacy_local_err
+      return false, legacy_local_err, legacy_local_detail
     end
 
-    local artifact_result, artifact_err = handle_post_lock_artifacts(notes_dir)
+    local artifact_result, artifact_err, artifact_detail = handle_post_lock_artifacts(notes_dir)
     if artifact_result ~= nil then
-      return artifact_result, artifact_err
+      return artifact_result, artifact_err, artifact_detail
     end
     return run_fresh_migration(handler, notes_dir, legacy_local_renames)
   end)
@@ -1125,7 +1151,7 @@ function M.maybe_run(handler, notes_dir, m)
   if not ok then
     error(result)
   end
-  return result, err
+  return result, err, detail
 end
 
 return M

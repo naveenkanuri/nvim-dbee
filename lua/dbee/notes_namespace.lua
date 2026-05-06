@@ -7,7 +7,8 @@ local M = {}
 -- decode_local_namespace_path.
 --
 -- Internal exports:
--- delete_folder_namespace, list_existing_folder_namespaces, recursive_rmdir.
+-- _ensure_folder_namespace_unchecked_for_migration, delete_folder_namespace,
+-- list_existing_folder_namespaces, recursive_rmdir.
 
 ---@param folder_id any
 ---@return boolean
@@ -90,35 +91,15 @@ local function notify_duplicate_folder_id(folder_id)
   )
 end
 
+---@private
 ---@param notes_dir string
 ---@param folder_id string
----@param handler? Handler
----@param opts? { skip_authority_check?: boolean }
 ---@return boolean
 ---@return string? err
-function M.ensure_folder_namespace(notes_dir, folder_id, handler, opts)
+local function ensure_folder_namespace_dir(notes_dir, folder_id)
   local ok_dir, dir_or_err = pcall(M.folder_namespace_dir, notes_dir, folder_id)
   if not ok_dir then
     return false, tostring(dir_or_err)
-  end
-
-  if
-    not (opts and opts.skip_authority_check == true)
-    and handler
-    and type(handler.list_all_folder_ids_across_sources) == "function"
-  then
-    local counts, error_kind = handler:list_all_folder_ids_across_sources()
-    if error_kind then
-      return false, error_kind
-    end
-    local count = (counts or {})[folder_id] or 0
-    if count > 1 then
-      notify_duplicate_folder_id(folder_id)
-      return false, "duplicate_folder_id"
-    end
-    if count ~= 1 then
-      return false, "folder_not_found"
-    end
   end
 
   local mkdir_ok = vim.fn.mkdir(dir_or_err, "p")
@@ -126,6 +107,39 @@ function M.ensure_folder_namespace(notes_dir, folder_id, handler, opts)
     return false, "mkdir_failed"
   end
   return true
+end
+
+---@private
+---@param notes_dir string
+---@param folder_id string
+---@return boolean
+---@return string? err
+function M._ensure_folder_namespace_unchecked_for_migration(notes_dir, folder_id)
+  return ensure_folder_namespace_dir(notes_dir, folder_id)
+end
+
+---@param notes_dir string
+---@param folder_id string
+---@param handler? Handler
+---@return boolean
+---@return string? err
+function M.ensure_folder_namespace(notes_dir, folder_id, handler)
+  if not handler or type(handler.list_all_folder_ids_across_sources) ~= "function" then
+    return false, "missing_handler"
+  end
+  local counts, error_kind = handler:list_all_folder_ids_across_sources()
+  if error_kind then
+    return false, error_kind
+  end
+  local count = (counts or {})[folder_id] or 0
+  if count > 1 then
+    notify_duplicate_folder_id(folder_id)
+    return false, "duplicate_folder_id"
+  end
+  if count ~= 1 then
+    return false, "folder_not_found"
+  end
+  return ensure_folder_namespace_dir(notes_dir, folder_id)
 end
 
 ---@param editor EditorUI
@@ -279,7 +293,8 @@ function M.delete_folder_namespace(notes_dir, folder_id, source_id, handler)
         return false, "EXDEV"
       end
       M.recursive_rmdir(trash_root)
-      return false, tostring(rename_err)
+      vim.notify("dbee: folder notes trash staging failed: " .. tostring(rename_err), vim.log.levels.ERROR)
+      return false, "trash_mkdir_failed"
     end
     staged = true
   end
@@ -300,7 +315,8 @@ function M.delete_folder_namespace(notes_dir, folder_id, source_id, handler)
       end
       M.recursive_rmdir(trash_root)
     end
-    return false, tostring(remove_err)
+    vim.notify("dbee: folder delete failed; restored notes when possible: " .. tostring(remove_err), vim.log.levels.ERROR)
+    return false, "trash_mkdir_failed"
   end
 
   if staged then
