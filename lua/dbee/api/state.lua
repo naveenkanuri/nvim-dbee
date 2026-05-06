@@ -145,13 +145,12 @@ local function setup_handler()
 end
 
 local function setup_ui()
+  setup_handler()
   _assert_migration_ok()
 
   if m.ui_loaded then
     return
   end
-
-  setup_handler()
 
   -- configure options for floating windows
   floats.configure(m.config.float_options)
@@ -204,29 +203,29 @@ end
 
 ---@return EditorUI
 function M.editor()
-  _assert_migration_ok()
   setup_ui()
+  _assert_migration_ok()
   return m.editor
 end
 
 ---@return CallLogUI
 function M.call_log()
-  _assert_migration_ok()
   setup_ui()
+  _assert_migration_ok()
   return m.call_log
 end
 
 ---@return DrawerUI
 function M.drawer()
-  _assert_migration_ok()
   setup_ui()
+  _assert_migration_ok()
   return m.drawer
 end
 
 ---@return ResultUI
 function M.result()
-  _assert_migration_ok()
   setup_ui()
+  _assert_migration_ok()
   return m.result
 end
 

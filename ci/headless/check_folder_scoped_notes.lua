@@ -34,6 +34,12 @@ local function assert_match(label, actual, pattern)
   end
 end
 
+local function assert_not_match(label, actual, pattern)
+  if type(actual) == "string" and actual:find(pattern, 1, true) then
+    fail(label .. ": expected " .. vim.inspect(actual) .. " not to contain " .. vim.inspect(pattern))
+  end
+end
+
 local function assert_errors(label, fn, pattern)
   local ok, err = pcall(fn)
   if ok then
@@ -46,6 +52,11 @@ end
 
 local function emit(marker)
   print(marker .. "=true")
+  io.stdout:flush()
+end
+
+local function emit_value(marker, value)
+  print(marker .. "=" .. tostring(value))
   io.stdout:flush()
 end
 
@@ -889,6 +900,51 @@ local function run_migration_failure_and_recovery_contracts()
     emit("GN23_RECOVERY_VALIDATES_STAGING_ABSENT_AND_SIZE_OK")
     emit("GN23_RECOVERY_PROMOTE_MANIFEST_TS_MATCH_OK")
     emit("GN23_RECOVERY_SENTINEL_AFTER_VALIDATION_OK")
+
+    local legacy_recovery_notes = vim.fs.joinpath(root, "legacy-rename-recovery")
+    local encoded_dir = vim.fs.joinpath(legacy_recovery_notes, "with%2Edot")
+    vim.fn.mkdir(encoded_dir, "p")
+    write_file(vim.fs.joinpath(encoded_dir, "legacy.sql"), "select 'legacy';")
+    write_file(vim.fs.joinpath(legacy_recovery_notes, ".notes-migration-v1.promote-manifest"), vim.json.encode({
+      expected_count = 0,
+      promote_complete = true,
+      migration_run_ts = "2026-01-01T00:00:00Z",
+      reserved_dst_uniqueness_assertion = true,
+      folder_ids = {},
+      legacy_local_renames = {
+        {
+          raw_path = vim.fs.joinpath(legacy_recovery_notes, "with.dot"),
+          encoded_path = encoded_dir,
+        },
+      },
+      entries = {},
+    }))
+    local legacy_recovery_handler = make_handler({}, nil)
+    local legacy_recovery_result = notes_migration.maybe_run(legacy_recovery_handler, legacy_recovery_notes, {})
+    assert_true("legacy rename recovery validates", legacy_recovery_result == true)
+    assert_path_exists("legacy rename recovery sentinel", vim.fs.joinpath(legacy_recovery_notes, ".notes-migration-v1"))
+
+    local legacy_bad_notes = vim.fs.joinpath(root, "legacy-rename-recovery-bad")
+    vim.fn.mkdir(legacy_bad_notes, "p")
+    write_file(vim.fs.joinpath(legacy_bad_notes, ".notes-migration-v1.promote-manifest"), vim.json.encode({
+      expected_count = 0,
+      promote_complete = true,
+      migration_run_ts = "2026-01-01T00:00:00Z",
+      reserved_dst_uniqueness_assertion = true,
+      folder_ids = {},
+      legacy_local_renames = {
+        {
+          raw_path = vim.fs.joinpath(legacy_bad_notes, "with.dot"),
+          encoded_path = vim.fs.joinpath(legacy_bad_notes, "with%2Edot"),
+        },
+      },
+      entries = {},
+    }))
+    local legacy_bad_handler = make_handler({}, nil)
+    local legacy_bad_result, legacy_bad_kind = notes_migration.maybe_run(legacy_bad_handler, legacy_bad_notes, {})
+    assert_false("legacy rename recovery rejects missing encoded path", legacy_bad_result)
+    assert_eq("legacy rename recovery failure kind", legacy_bad_kind, "legacy_local_rename_validation_failed")
+    emit_value("GN23_LEGACY_RENAME_RECOVERY_VALIDATION_DIAGNOSTIC", "ok")
   end)
   cleanup_path(root)
   if not ok then
@@ -994,6 +1050,27 @@ local function run_migration_edge_contracts()
     local future_result = notes_migration.maybe_run(future_handler, future_notes, {})
     assert_true("future stale lock removed and retried", future_result == true)
     emit("GN23_PROBE_BEFORE_REGISTER_OK")
+
+    local locked_legacy_notes = vim.fs.joinpath(root, "legacy-local-locked")
+    local locked_legacy_raw = vim.fs.joinpath(locked_legacy_notes, "with.dot")
+    local locked_legacy_encoded = vim.fs.joinpath(locked_legacy_notes, notes_namespace.encode_local_namespace_path("with.dot"))
+    vim.fn.mkdir(locked_legacy_raw, "p")
+    write_file(vim.fs.joinpath(locked_legacy_raw, "legacy.sql"), "select 'legacy';")
+    vim.fn.mkdir(vim.fs.joinpath(locked_legacy_notes, ".notes-migration-v1.lock"), "p")
+    local locked_legacy_source = make_source(root, "legacy-local-locked.json", {
+      { id = "with.dot", name = "Locked Legacy Local", type = "postgres", url = "postgres://legacy" },
+    }, {})
+    local locked_legacy_handler = make_handler({ locked_legacy_source }, "with.dot")
+    local locked_result, locked_kind = notes_migration.maybe_run(locked_legacy_handler, locked_legacy_notes, {})
+    assert_false("legacy rename blocked by lock", locked_result)
+    assert_eq("legacy rename blocked kind", locked_kind, "lock_held")
+    assert_path_exists("legacy raw untouched while lock held", locked_legacy_raw)
+    assert_path_absent("legacy encoded absent while lock held", locked_legacy_encoded)
+    vim.fn.delete(vim.fs.joinpath(locked_legacy_notes, ".notes-migration-v1.lock"), "d")
+    local locked_retry_result = notes_migration.maybe_run(locked_legacy_handler, locked_legacy_notes, {})
+    assert_true("legacy rename after lock release", locked_retry_result == true)
+    assert_path_absent("legacy raw moved after lock release", locked_legacy_raw)
+    assert_path_exists("legacy encoded after lock release", locked_legacy_encoded)
 
     local legacy_local_notes = vim.fs.joinpath(root, "legacy-local-notes")
     local legacy_raw = vim.fs.joinpath(legacy_local_notes, "with.dot")
@@ -1142,6 +1219,29 @@ local function run_migration_edge_contracts()
     emit("GN23_MIGRATION_FOLDER_SNAPSHOT_POST_LOCK_OK")
     emit("GN23_MIGRATION_NOTES_DIR_CONFIG_OK")
     cleanup_path(snapshot_root)
+
+    local toctou_root = make_temp_dir()
+    local toctou_notes = vim.fs.joinpath(toctou_root, "notes")
+    local toctou_source = make_source(toctou_root, "toctou.json", {
+      { id = "conn-toctou", name = "TOCTOU", type = "postgres", url = "postgres://toctou" },
+    }, {
+      { id = "folder_Toctou123", name = "TOCTOU", connection_ids = { "conn-toctou" } },
+    })
+    local toctou_handler = make_handler({ toctou_source }, "conn-toctou")
+    local list_all = toctou_handler.list_all_folder_ids_across_sources
+    local list_calls = 0
+    toctou_handler.list_all_folder_ids_across_sources = function(self)
+      list_calls = list_calls + 1
+      if list_calls == 1 then
+        return list_all(self)
+      end
+      return {}, nil
+    end
+    local toctou_result = notes_migration.maybe_run(toctou_handler, toctou_notes, {})
+    assert_true("migration uses locked snapshot for namespace mkdir", toctou_result == true)
+    assert_eq("authority checked once under lock", list_calls, 1)
+    assert_path_exists("toctou namespace created", vim.fs.joinpath(toctou_notes, "folder:folder_Toctou123"))
+    cleanup_path(toctou_root)
   end)
   cleanup_path(root)
   if not ok then
@@ -1267,7 +1367,7 @@ local function run_command_contracts()
     vim.fn.mkdir(vim.fs.joinpath(notes_dir, "folder:folder_Keep123"), "p")
     write_file(
       vim.fs.joinpath(notes_dir, ".notes-migration-v1.last-failure.log"),
-      string.rep("old-failure\n", 12 * 1024) .. "NEWEST_FAILURE_TOKEN\n"
+      "OLDEST_FAILURE_TOKEN\n" .. string.rep("old-failure\n", 12 * 1024) .. "NEWEST_FAILURE_TOKEN\n"
     )
     for i = 1, 60 do
       vim.fn.mkdir(vim.fs.joinpath(notes_dir, ".notes-migration-v1.staging-" .. tostring(i) .. "-x"), "p")
@@ -1283,9 +1383,19 @@ local function run_command_contracts()
       final_paths = {},
     }))
 
+    local fatal_latch_proxy = setmetatable({}, {
+      __index = function()
+        error("fatal migration latch should be bypassed by inspect")
+      end,
+    })
+    package.loaded["dbee.api.state"] = {
+      _private_state_for_test = function()
+        return { migration_fatal_failed = true }
+      end,
+    }
     package.loaded["dbee.api"] = {
-      core = {},
-      ui = {},
+      core = fatal_latch_proxy,
+      ui = fatal_latch_proxy,
       setup = function() end,
       current_config = function()
         return {
@@ -1314,6 +1424,7 @@ local function run_command_contracts()
     assert_match("inspect staging truncated", inspect_text, "staging_dir_count_truncated=true")
     assert_match("inspect log truncated", inspect_text, "last_failure_log_truncated=true")
     assert_match("inspect log newest tail", inspect_text, "NEWEST_FAILURE_TOKEN")
+    assert_not_match("inspect log omits oldest head", inspect_text, "OLDEST_FAILURE_TOKEN")
     assert_match("inspect bounded manifest", inspect_text, "promote_manifest_summary=")
     assert_match("inspect bounded manifest truncation", inspect_text, "truncated_size_bytes")
     assert_path_exists("inspect did not delete lock", vim.fs.joinpath(notes_dir, ".notes-migration-v1.lock"))
@@ -1365,6 +1476,7 @@ local function run_state_latch_behavior_contracts()
       "dbee.notes_migration",
       "dbee.api.__register",
       "dbee.api.state",
+      "dbee.lsp",
     }
     local saved = {}
     for _, name in ipairs(module_names) do
@@ -1387,6 +1499,7 @@ local function run_state_latch_behavior_contracts()
       package.loaded["dbee.ui.editor"] = { new = function() return {} end }
       package.loaded["dbee.ui.result"] = { new = function() return {} end }
       package.loaded["dbee.ui.call_log"] = { new = function() return {} end }
+      package.loaded["dbee.lsp"] = { register_events = function() end }
       package.loaded["dbee.install"] = { dir = function() return root end }
       package.loaded["dbee.handler"] = {
         new = function()
@@ -1434,6 +1547,7 @@ local function run_state_latch_behavior_contracts()
     package.loaded["dbee.ui.editor"] = { new = function() return {} end }
     package.loaded["dbee.ui.result"] = { new = function() return {} end }
     package.loaded["dbee.ui.call_log"] = { new = function() return {} end }
+    package.loaded["dbee.lsp"] = { register_events = function() end }
     package.loaded["dbee.install"] = { dir = function() return root end }
     package.loaded["dbee.handler"] = {
       new = function()
@@ -1468,12 +1582,24 @@ local function run_state_latch_behavior_contracts()
     local retry_notes_dir = vim.fs.joinpath(root, "notes-lock-retry")
     local retry_state = require("dbee.api.state")
     retry_state.setup({ sources = {}, editor = { directory = retry_notes_dir }, extra_helpers = {} })
-    local ok_first, first_err = pcall(retry_state.handler)
+    local ok_first, first_err = pcall(retry_state.editor)
     assert_false("first lock-held setup aborts", ok_first)
     assert_match("first lock-held retryable message", tostring(first_err), "another nvim instance is migrating notes")
-    local ok_second, retry_handler = pcall(retry_state.handler)
-    assert_true("second setup retries migration", ok_second)
-    assert_true("second setup returns handler", type(retry_handler) == "table")
+    local ok_drawer, retry_drawer = pcall(retry_state.drawer)
+    assert_true("drawer retries migration", ok_drawer)
+    assert_true("drawer returns ui", type(retry_drawer) == "table")
+    local ok_result, retry_result = pcall(retry_state.result)
+    assert_true("result accessor works after retry", ok_result)
+    assert_true("result returns ui", type(retry_result) == "table")
+    local ok_call_log, retry_call_log = pcall(retry_state.call_log)
+    assert_true("call_log accessor works after retry", ok_call_log)
+    assert_true("call_log returns ui", type(retry_call_log) == "table")
+    local ok_editor, retry_editor = pcall(retry_state.editor)
+    assert_true("editor accessor works after retry", ok_editor)
+    assert_true("editor returns ui", type(retry_editor) == "table")
+    local ok_handler, retry_handler = pcall(retry_state.handler)
+    assert_true("handler accessor works after retry", ok_handler)
+    assert_true("handler returns handler", type(retry_handler) == "table")
     assert_eq("register called once", register_count, 1)
     assert_eq("maybe_run retried", maybe_run_count, 2)
     emit("GN23_LOCK_HELD_RETRYABLE_AFTER_REGISTER_OK")
@@ -1501,7 +1627,8 @@ local function run_static_wave2_contracts()
   assert_true("helper before setup", state:find("local function _assert_migration_ok", 1, true) < state:find("local function setup_handler", 1, true))
   assert_match("throw helper", state, "local function _throw_migration_in_progress")
   assert_match("fatal latch set", state, "m.migration_fatal_failed = true")
-  assert_match("editor accessor asserts", state, "function M.editor()\n  _assert_migration_ok()")
+  assert_match("setup ui retries before strict assert", state, "local function setup_ui()\n  setup_handler()\n  _assert_migration_ok()")
+  assert_match("editor accessor routes through setup ui", state, "function M.editor()\n  setup_ui()\n  _assert_migration_ok()")
   emit("GN23_LATCH_CENTRAL_HELPER_GREP_GUARD_OK")
   emit("GN23_LATCH_HELPERS_LEXICAL_BEFORE_CONSUMERS_OK")
   emit("GN23_MIGRATION_FATAL_LATCH_BLOCKS_UI_OK")
@@ -1512,6 +1639,7 @@ local function run_static_wave2_contracts()
 
   assert_match("attempted flag doc", migration, "m.migration_attempted")
   assert_match("fatal flag doc", migration, "m.migration_fatal_failed")
+  assert_match("complete flag doc", migration, "m.migration_complete")
   assert_match("register failure doc migration", migration, "`register()` failure remains out")
   assert_match("register failure doc plan", plan, "register()` failure | Out of Phase 23")
   assert_false("no migration_in_progress implementation", migration:find("m.migration_in_progress", 1, true))

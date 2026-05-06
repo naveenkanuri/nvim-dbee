@@ -21,9 +21,13 @@ local M = {}
 -- State flags:
 -- - `m.migration_attempted` is set by the first two lines of `maybe_run`.
 --   It is a per-process retry guard and defense-in-depth for future direct
---   callers outside setup_handler().
+--   callers outside setup_handler(). state.lua resets it only for retryable
+--   post-register `lock_held` so the same nvim session can retry after the
+--   other instance releases the lock.
 -- - `m.migration_fatal_failed` is owned by state.lua's pcall wrapper and is
 --   read only by the fatal latch helper.
+-- - `m.migration_complete` is set by state.lua after `maybe_run` succeeds and
+--   gates UI construction plus the core-loaded early return.
 --
 -- `register()` failure remains out of Phase 23 migration-latch scope. The
 -- pre-existing register-once landmine is documented in state.lua; users
@@ -674,7 +678,7 @@ local function validate_promote_manifest(manifest, require_staging_absent)
       return false, "legacy local rename malformed"
     end
     if exists(rename.raw_path) or not is_dir(rename.encoded_path) then
-      return false, "legacy local rename validation failed"
+      return false, "legacy_local_rename_validation_failed"
     end
   end
   return true
@@ -1007,7 +1011,8 @@ local function run_fresh_migration(handler, notes_dir, legacy_local_renames)
 
   if #global_files == 0 then
     for _, folder_id in ipairs(folder_ids) do
-      local ok_ensure, ensure_err = notes_namespace.ensure_folder_namespace(notes_dir, folder_id, handler)
+      local ok_ensure, ensure_err =
+        notes_namespace.ensure_folder_namespace(notes_dir, folder_id, handler, { skip_authority_check = true })
       if not ok_ensure then
         return false, ensure_err
       end
@@ -1085,11 +1090,6 @@ function M.maybe_run(handler, notes_dir, m)
 
   gc_stale_scratch_dirs(notes_dir)
 
-  local legacy_local_renames, legacy_local_err = apply_legacy_local_namespace_renames(handler, notes_dir)
-  if not legacy_local_renames then
-    return false, legacy_local_err
-  end
-
   if exists(sentinel_path(notes_dir)) then
     return true
   end
@@ -1108,6 +1108,11 @@ function M.maybe_run(handler, notes_dir, m)
   end
 
   local ok, result, err = pcall(function()
+    local legacy_local_renames, legacy_local_err = apply_legacy_local_namespace_renames(handler, notes_dir)
+    if not legacy_local_renames then
+      return false, legacy_local_err
+    end
+
     local artifact_result, artifact_err = handle_post_lock_artifacts(notes_dir)
     if artifact_result ~= nil then
       return artifact_result, artifact_err

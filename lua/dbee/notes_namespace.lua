@@ -93,15 +93,20 @@ end
 ---@param notes_dir string
 ---@param folder_id string
 ---@param handler? Handler
+---@param opts? { skip_authority_check?: boolean }
 ---@return boolean
 ---@return string? err
-function M.ensure_folder_namespace(notes_dir, folder_id, handler)
+function M.ensure_folder_namespace(notes_dir, folder_id, handler, opts)
   local ok_dir, dir_or_err = pcall(M.folder_namespace_dir, notes_dir, folder_id)
   if not ok_dir then
     return false, tostring(dir_or_err)
   end
 
-  if handler and type(handler.list_all_folder_ids_across_sources) == "function" then
+  if
+    not (opts and opts.skip_authority_check == true)
+    and handler
+    and type(handler.list_all_folder_ids_across_sources) == "function"
+  then
     local counts, error_kind = handler:list_all_folder_ids_across_sources()
     if error_kind then
       return false, error_kind
