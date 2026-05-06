@@ -2146,7 +2146,12 @@ function dbee.notes_migration_inspect()
   vim.bo[buf].filetype = "dbee-notes-migration-inspect"
   vim.bo[buf].bufhidden = "wipe"
   vim.bo[buf].modifiable = false
-  vim.api.nvim_set_current_buf(buf)
+  -- Open in a split rather than replacing the current buffer. Replacing the
+  -- current buffer fired BufWinEnter while a Snacks picker preview was active,
+  -- triggering "Invalid buffer id" inside snacks' preview handler.
+  vim.cmd("botright split")
+  vim.api.nvim_win_set_buf(0, buf)
+  vim.api.nvim_win_set_height(0, math.min(#lines + 2, 20))
   return lines
 end
 
