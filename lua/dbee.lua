@@ -1940,21 +1940,33 @@ local function read_json_summary(path)
   if not st then
     return nil
   end
-  local limit = 64 * 1024
-  if (st.size or 0) > limit then
-    return { truncated = true, size_bytes = st.size or 0 }
-  end
+  local limit = 1024 * 1024
   local file = io.open(path, "r")
   if not file then
     return nil
   end
-  local content = file:read("*a")
+  local content = file:read(limit + 1)
   file:close()
+  local truncated = (st.size or 0) > limit
+  if truncated and #content > limit then
+    content = content:sub(1, limit)
+  end
   local ok, decoded = pcall(vim.json.decode, content)
   if not ok or type(decoded) ~= "table" then
-    return { decode_error = tostring(decoded), size_bytes = st.size or #(content or "") }
+    local expected_count = tostring(content or ""):match('"expected_count"%s*:%s*(%d+)') or "unknown"
+    local summary = { decode_error = tostring(decoded), size_bytes = st.size or #(content or "") }
+    if truncated then
+      summary.truncated = true
+      summary.truncated_size_bytes = st.size or 0
+      summary.expected_count = expected_count
+    end
+    return summary
   end
   local summary = {}
+  if truncated then
+    summary.truncated = true
+    summary.truncated_size_bytes = st.size or 0
+  end
   for _, key in ipairs({
     "expected_count",
     "promote_complete",
@@ -2031,11 +2043,15 @@ local function migration_failure_excerpt(path)
   if not file then
     return st.size or 0, false, ""
   end
-  local excerpt = file:read(limit) or ""
+  local size = st.size or 0
+  if size > limit then
+    file:seek("set", size - limit)
+  end
+  local excerpt = file:read("*a") or ""
   file:close()
-  local truncated = (st.size or 0) > limit
+  local truncated = size > limit
   if truncated then
-    excerpt = excerpt .. "... [truncated]"
+    excerpt = "[truncated to newest " .. tostring(limit) .. " bytes]\n" .. excerpt
   end
   return st.size or 0, truncated, excerpt
 end
@@ -2092,6 +2108,13 @@ function dbee.notes_migration_inspect()
     "lock_mtime_age_seconds=" .. tostring(lock_stat and lock_stat.mtime and (os.time() - lock_stat.mtime.sec) or -1),
     "sentinel_present=" .. tostring(migration_stat(sentinel) ~= nil),
     "sentinel_path=" .. (migration_stat(sentinel) and sentinel or "nil"),
+    "last_failure_log_size_bytes=" .. tostring(log_size),
+    "last_failure_log_truncated=" .. tostring(log_truncated),
+    "last_failure_log_excerpt=" .. json_line_value(log_excerpt),
+    "recovery_needed_present=" .. tostring(migration_stat(recovery) ~= nil),
+    "recovery_needed_summary=" .. json_line_value(read_json_summary(recovery)),
+    "promote_manifest_present=" .. tostring(migration_stat(promote) ~= nil),
+    "promote_manifest_summary=" .. json_line_value(read_json_summary(promote)),
     "staging_dir_count=" .. tostring(staging_count),
     "staging_dir_count_truncated=" .. tostring(staging_truncated),
     "staging_dirs=" .. json_line_value(staging_dirs),
@@ -2099,13 +2122,6 @@ function dbee.notes_migration_inspect()
     "trash_dir_count=" .. tostring(trash_count),
     "trash_dir_count_truncated=" .. tostring(trash_truncated),
     "trash_dirs=" .. json_line_value(trash_dirs),
-    "recovery_needed_present=" .. tostring(migration_stat(recovery) ~= nil),
-    "recovery_needed_summary=" .. json_line_value(read_json_summary(recovery)),
-    "promote_manifest_present=" .. tostring(migration_stat(promote) ~= nil),
-    "promote_manifest_summary=" .. json_line_value(read_json_summary(promote)),
-    "last_failure_log_size_bytes=" .. tostring(log_size),
-    "last_failure_log_truncated=" .. tostring(log_truncated),
-    "last_failure_log_excerpt=" .. json_line_value(log_excerpt),
   }
 
   local joined = table.concat(lines, "\n")
