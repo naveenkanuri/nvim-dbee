@@ -51,8 +51,12 @@ local runtime = {
   layout_open = true,
   ui_loaded = true,
   current_connection = nil,
-  global_notes = {},
+  current_folder = nil,
+  folder_notes = {},
   local_notes = {},
+  local_notes_by_conn = {},
+  folder_by_conn = {},
+  folder_notes_by_id = {},
   set_current_note_calls = {},
   picker_section_calls = 0,
   all_notes_calls = 0,
@@ -60,14 +64,17 @@ local runtime = {
 }
 
 local editor_stub = {
-  namespace_get_notes = function(_, namespace)
+  namespace_get_notes = function(_, namespace, opts)
     if namespace == "global" then
-      return vim.deepcopy(runtime.global_notes)
+      fail("legacy global namespace should not be read")
     end
-    if runtime.current_connection and namespace == tostring(runtime.current_connection.id) then
-      return vim.deepcopy(runtime.local_notes)
+    local notes_namespace = require("dbee.notes_namespace")
+    local folder_id = notes_namespace.parse_folder_namespace(namespace)
+    if folder_id then
+      assert_true("folder_namespace_authorized", opts and opts.from_authority == true)
+      return vim.deepcopy(runtime.folder_notes_by_id[folder_id] or {})
     end
-    return {}
+    return vim.deepcopy(runtime.local_notes_by_conn[tostring(namespace)] or {})
   end,
   set_current_note = function(_, note_id)
     runtime.set_current_note_calls[#runtime.set_current_note_calls + 1] = note_id
@@ -80,6 +87,13 @@ local handler_stub = {
       return nil
     end
     return vim.deepcopy(runtime.current_connection)
+  end,
+  get_folder_for_connection = function(_, conn_id)
+    local folder = runtime.folder_by_conn[tostring(conn_id)]
+    if not folder then
+      return nil
+    end
+    return vim.deepcopy(folder)
   end,
 }
 
@@ -197,8 +211,32 @@ local function set_notes(opts)
   runtime.layout_open = opts.layout_open ~= false
   runtime.ui_loaded = opts.ui_loaded ~= false
   runtime.current_connection = opts.current_connection
-  runtime.global_notes = vim.deepcopy(opts.global_notes or {})
+  runtime.current_folder = opts.current_folder
+  runtime.folder_notes = vim.deepcopy(opts.folder_notes or {})
   runtime.local_notes = vim.deepcopy(opts.local_notes or {})
+  runtime.local_notes_by_conn = {}
+  runtime.folder_by_conn = {}
+  runtime.folder_notes_by_id = {}
+  if runtime.current_connection then
+    runtime.local_notes_by_conn[tostring(runtime.current_connection.id)] = vim.deepcopy(runtime.local_notes)
+    if runtime.current_folder then
+      runtime.folder_by_conn[tostring(runtime.current_connection.id)] = {
+        source_id = runtime.current_folder.source_id or "source-main",
+        folder_id = runtime.current_folder.id,
+        folder_name = runtime.current_folder.name,
+      }
+      runtime.folder_notes_by_id[runtime.current_folder.id] = vim.deepcopy(runtime.folder_notes)
+    end
+  end
+  for conn_id, notes in pairs(opts.local_notes_by_conn or {}) do
+    runtime.local_notes_by_conn[tostring(conn_id)] = vim.deepcopy(notes)
+  end
+  for conn_id, folder in pairs(opts.folder_by_conn or {}) do
+    runtime.folder_by_conn[tostring(conn_id)] = vim.deepcopy(folder)
+  end
+  for folder_id, notes in pairs(opts.folder_notes_by_id or {}) do
+    runtime.folder_notes_by_id[tostring(folder_id)] = vim.deepcopy(notes)
+  end
   runtime.set_current_note_calls = {}
   runtime.picker_section_calls = 0
   runtime.all_notes_calls = 0
@@ -284,24 +322,37 @@ local local_note = {
   file = "local-note.sql",
 }
 
+local ready_connection = {
+  id = "conn-ready",
+  name = "Ready Connection",
+}
+
+local ready_folder = {
+  id = "folder_Ready123",
+  name = "Ready Folder",
+  source_id = "source-main",
+}
+
 do
   set_notes()
   dbee.pick_notes()
   assert_eq("empty_state_picker_calls", #runtime.picker_calls, 1)
   local items = picker_items()
   assert_true("empty_state_has_hint_row", #items >= 1 and items[1].kind == "hint")
-  assert_match("empty_state_hint_advertises_create", items[1].text, "<C-g>")
+  assert_eq("empty_state_hint_advertises_create", items[1].text, "(open a connection to enable notes)")
 end
 
 do
   set_notes({
-    global_notes = { global_note },
+    current_connection = ready_connection,
+    current_folder = ready_folder,
+    folder_notes = { global_note },
   })
   dbee.pick_notes()
   assert_eq("global_only_section_calls", runtime.picker_section_calls, 1)
   assert_eq("global_only_flat_helper_unused", runtime.all_notes_calls, 0)
   local items = picker_items()
-  assert_eq("global_only_item_count", #items, 3)
+  assert_eq("global_only_item_count", #items, 5)
   assert_eq("global_only_hint_kind", items[1].kind, "hint")
   assert_eq("global_only_header_kind", items[2].kind, "header")
   assert_eq("global_only_header_text", items[2].text, "Global notes")
@@ -311,28 +362,24 @@ end
 
 do
   set_notes({
-    current_connection = {
-      id = "conn-ready",
-      name = "Ready Connection",
-    },
-    global_notes = { global_note },
+    current_connection = ready_connection,
+    current_folder = ready_folder,
+    folder_notes = { global_note },
     local_notes = { local_note },
   })
   local flat_notes = api_ui.editor_get_all_notes()
   assert_eq("flat_helper_count", #flat_notes, 2)
-  assert_eq("flat_helper_global_namespace", flat_notes[1].namespace, "global")
-  assert_eq("flat_helper_local_namespace", flat_notes[2].namespace, "Ready Connection")
+  assert_eq("flat_helper_global_namespace", flat_notes[1].namespace, "folder:folder_Ready123")
+  assert_eq("flat_helper_local_namespace", flat_notes[2].namespace, "conn-ready")
   assert_true("flat_helper_shape_no_kind", flat_notes[1].kind == nil and flat_notes[2].kind == nil)
   print("NOTES01_FLAT_HELPER_COMPAT_OK=true")
 end
 
 do
   set_notes({
-    current_connection = {
-      id = "conn-ready",
-      name = "Ready Connection",
-    },
-    global_notes = { global_note },
+    current_connection = ready_connection,
+    current_folder = ready_folder,
+    folder_notes = { global_note },
     local_notes = { local_note },
   })
   dbee.pick_notes()
@@ -355,11 +402,9 @@ end
 
 do
   set_notes({
-    current_connection = {
-      id = "conn-ready",
-      name = "Ready Connection",
-    },
-    global_notes = { global_note },
+    current_connection = ready_connection,
+    current_folder = ready_folder,
+    folder_notes = { global_note },
     local_notes = {},
   })
   dbee.pick_notes()
@@ -382,11 +427,9 @@ end
 
 do
   set_notes({
-    current_connection = {
-      id = "conn-ready",
-      name = "Ready Connection",
-    },
-    global_notes = { global_note },
+    current_connection = ready_connection,
+    current_folder = ready_folder,
+    folder_notes = { global_note },
     local_notes = { local_note },
   })
   dbee.pick_notes()
@@ -415,11 +458,9 @@ do
 
   clear_notifications()
   set_notes({
-    current_connection = {
-      id = "conn-ready",
-      name = "Ready Connection",
-    },
-    global_notes = { global_note },
+    current_connection = ready_connection,
+    current_folder = ready_folder,
+    folder_notes = { global_note },
     local_notes = {},
   })
   dbee.pick_notes()
@@ -428,11 +469,9 @@ do
 
   clear_notifications()
   set_notes({
-    current_connection = {
-      id = "conn-ready",
-      name = "Ready Connection",
-    },
-    global_notes = { global_note },
+    current_connection = ready_connection,
+    current_folder = ready_folder,
+    folder_notes = { global_note },
     local_notes = { local_note },
   })
   dbee.pick_notes()
@@ -446,7 +485,9 @@ do
   assert_eq("shift_tab_wraps_to_last_selectable", picker_current_item().text, "local-note.sql")
 
   set_notes({
-    global_notes = { global_note },
+    current_connection = ready_connection,
+    current_folder = ready_folder,
+    folder_notes = { global_note },
   })
   dbee.pick_notes()
   local global_only_picker = current_picker()
@@ -455,11 +496,7 @@ do
   assert_eq("global_only_tab_stays_on_note", picker_current_item().text, "global-note.sql")
 
   set_notes({
-    current_connection = {
-      id = "conn-ready",
-      name = "Ready Connection",
-    },
-    global_notes = {},
+    current_connection = ready_connection,
     local_notes = { local_note },
   })
   dbee.pick_notes()
@@ -470,11 +507,9 @@ do
 
   clear_notifications()
   set_notes({
-    current_connection = {
-      id = "conn-ready",
-      name = "Ready Connection",
-    },
-    global_notes = { global_note },
+    current_connection = ready_connection,
+    current_folder = ready_folder,
+    folder_notes = { global_note },
     local_notes = { local_note },
   })
   dbee.pick_notes()
@@ -488,11 +523,7 @@ end
 
 do
   set_notes({
-    current_connection = {
-      id = "conn-ready",
-      name = "Ready Connection",
-    },
-    global_notes = {},
+    current_connection = ready_connection,
     local_notes = { local_note },
   })
   dbee.pick_notes()
@@ -508,11 +539,9 @@ end
 
 do
   set_notes({
-    current_connection = {
-      id = "conn-ready",
-      name = "Ready Connection",
-    },
-    global_notes = { global_note },
+    current_connection = ready_connection,
+    current_folder = ready_folder,
+    folder_notes = { global_note },
     local_notes = { local_note },
   })
   dbee.pick_notes()
