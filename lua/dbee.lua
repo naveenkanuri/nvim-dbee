@@ -1936,6 +1936,14 @@ local function json_line_value(value)
 end
 
 local function read_json_summary(path)
+  local st = migration_stat(path)
+  if not st then
+    return nil
+  end
+  local limit = 64 * 1024
+  if (st.size or 0) > limit then
+    return { truncated = true, size_bytes = st.size or 0 }
+  end
   local file = io.open(path, "r")
   if not file then
     return nil
@@ -1944,7 +1952,7 @@ local function read_json_summary(path)
   file:close()
   local ok, decoded = pcall(vim.json.decode, content)
   if not ok or type(decoded) ~= "table" then
-    return { decode_error = true, size_bytes = #(content or "") }
+    return { decode_error = tostring(decoded), size_bytes = st.size or #(content or "") }
   end
   local summary = {}
   for _, key in ipairs({
@@ -1970,6 +1978,15 @@ local function read_json_summary(path)
     summary.folder_ids = decoded.folder_ids
   end
   return summary
+end
+
+local function migration_has_backup(notes_dir)
+  for _, name in ipairs(migration_scandir(notes_dir)) do
+    if name:match("^global%.bak$") or name:match("^global%.bak%.%d%d%d%d%d%d%d%d%d%d%d%d%d%d$") then
+      return true
+    end
+  end
+  return false
 end
 
 local function migration_dirs_with_prefix(notes_dir, prefix)
@@ -2027,6 +2044,16 @@ end
 ---@return integer deleted_count
 function dbee.notes_migration_cleanup_backups()
   local notes_dir = notes_migration_notes_dir()
+  if migration_stat(migration_child_path(notes_dir, ".notes-migration-v1.recovery-needed")) then
+    error(
+      "dbee: cannot cleanup backups; migration recovery pending (notes/.notes-migration-v1.recovery-needed exists). Run :Dbee notes_migration_inspect for details."
+    )
+  end
+  if not migration_stat(migration_child_path(notes_dir, ".notes-migration-v1")) and migration_has_backup(notes_dir) then
+    error(
+      "dbee: cannot cleanup backups; sentinel absent + global.bak present (recovery state). Restart nvim to complete migration first."
+    )
+  end
   local deleted = 0
   for _, name in ipairs(migration_scandir(notes_dir)) do
     if name:match("^global%.bak$") or name:match("^global%.bak%.%d%d%d%d%d%d%d%d%d%d%d%d%d%d$") then

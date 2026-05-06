@@ -47,22 +47,15 @@ local function resolve_notes_dir()
 end
 
 local function write_migration_failure_log(notes_dir, err)
-  if type(notes_dir) ~= "string" or notes_dir == "" then
-    return
-  end
-  pcall(vim.fn.mkdir, notes_dir, "p")
-  local path = notes_dir .. "/.notes-migration-v1.last-failure.log"
-  local file = io.open(path, "w")
-  if not file then
-    return
-  end
-  file:write("error=" .. tostring(err) .. "\n")
-  file:write("traceback=" .. debug.traceback("", 2) .. "\n")
-  file:write("sentinel=" .. notes_dir .. "/.notes-migration-v1\n")
-  file:write("lock=" .. notes_dir .. "/.notes-migration-v1.lock\n")
-  file:write("promote_manifest=" .. notes_dir .. "/.notes-migration-v1.promote-manifest\n")
-  file:write("recovery_needed=" .. notes_dir .. "/.notes-migration-v1.recovery-needed\n")
-  file:close()
+  pcall(notes_migration.write_last_failure_log, notes_dir, err, debug.traceback("", 2))
+end
+
+local function _throw_migration_aborted(error_kind)
+  error(
+    "dbee migration aborted ("
+      .. tostring(error_kind or "unknown")
+      .. "); restart nvim to retry. See notes/.notes-migration-v1.last-failure.log for details."
+  )
 end
 
 local function oracle_wallet_auto_extract_enabled()
@@ -125,10 +118,13 @@ local function setup_handler()
     error(migration_result)
   end
   if migration_result == false and migration_error_kind == "lock_held" then
-    local err = "notes migration lock was acquired by another process after register"
+    _throw_migration_in_progress()
+  end
+  if migration_result == false then
+    local err = migration_error_kind or "unknown"
     m.migration_fatal_failed = true
     write_migration_failure_log(notes_dir, err)
-    error(err)
+    _throw_migration_aborted(err)
   end
 end
 

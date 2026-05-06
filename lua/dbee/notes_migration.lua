@@ -38,6 +38,7 @@ local STAGING_PREFIX = ".notes-migration-v1.staging-"
 local TRASH_PREFIX = ".notes-migration-v1.trash-"
 local FRESH_LOCK_SECONDS = 300
 local SCRATCH_STALE_SECONDS = 3600
+local FAILURE_LOG_MAX_BYTES = 64 * 1024
 
 local CROSS_FS_NOTIFY =
   "dbee: migration aborted — cross-filesystem rename detected; not supported. Move notes/ off bind mounts and retry, OR set editor.directory in setup() to a same-filesystem path and retry."
@@ -157,6 +158,38 @@ local function read_file(path, limit)
   local content = limit and file:read(limit) or file:read("*a")
   file:close()
   return content
+end
+
+---@param notes_dir string
+---@param err any
+---@param stack? string
+---@return boolean
+---@return string? error
+function M.write_last_failure_log(notes_dir, err, stack)
+  if type(notes_dir) ~= "string" or notes_dir == "" then
+    return false, "invalid notes_dir"
+  end
+  pcall(vim.fn.mkdir, notes_dir, "p")
+
+  local entry = table.concat({
+    "timestamp=" .. now_iso(),
+    "error_kind=" .. tostring(err),
+    "error=" .. tostring(err),
+    "stack=" .. tostring(stack or debug.traceback("", 2)),
+    "sentinel=" .. sentinel_path(notes_dir),
+    "lock=" .. lock_path(notes_dir),
+    "promote_manifest=" .. promote_manifest_path(notes_dir),
+    "recovery_needed=" .. recovery_needed_path(notes_dir),
+    "",
+  }, "\n")
+
+  local existing = read_file(failure_log_path(notes_dir), FAILURE_LOG_MAX_BYTES) or ""
+  local content = existing .. entry
+  if #content > FAILURE_LOG_MAX_BYTES then
+    content = content:sub(#content - FAILURE_LOG_MAX_BYTES + 1)
+  end
+
+  return write_file_atomic(failure_log_path(notes_dir), content)
 end
 
 local function read_json_file(path)
@@ -918,6 +951,10 @@ function M.maybe_run(handler, notes_dir, m)
   if m.migration_attempted then return end
   m.migration_attempted = true
 
+  if exists(sentinel_path(notes_dir)) then
+    return true
+  end
+
   if vim.fn.mkdir(notes_dir, "p") == 0 then
     vim.notify("dbee: cannot create notes directory: " .. tostring(notes_dir) .. "; check permissions", vim.log.levels.ERROR)
     error("cannot create notes directory: " .. tostring(notes_dir))
@@ -932,6 +969,9 @@ function M.maybe_run(handler, notes_dir, m)
 
   local acquired, lock_or_err = acquire_lock(notes_dir)
   if not acquired then
+    if exists(sentinel_path(notes_dir)) then
+      return true
+    end
     return false, lock_or_err
   end
 
