@@ -1,5 +1,9 @@
 # Known Issues
 
+## v1.5 Backlog
+
+- **Phase 23 perf polish** — manifest single-flip + `ensure_dir` hoist + per-copy `file_size` dedup. Target P95 <=250ms on the 100 legacy notes x 10 folders fixture.
+
 ## v1.3 Backlog
 
 ### Pending milestone v1.3 candidates

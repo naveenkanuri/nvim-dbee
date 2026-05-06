@@ -295,7 +295,8 @@ local function run_collision_and_load_uncertainty_contracts()
       { id = "conn-corrupt", name = "Corrupt", type = "postgres", url = "postgres://corrupt" },
     }, "not-json")
     local corrupt_handler = make_handler({ corrupt }, "conn-corrupt")
-    local _, load_error_kind = corrupt_handler:list_all_folder_ids_across_sources()
+    local corrupt_counts, load_error_kind = corrupt_handler:list_all_folder_ids_across_sources()
+    assert_eq("load uncertainty counts", corrupt_counts, nil)
     assert_eq("load uncertainty list", load_error_kind, "load_failed")
     local folder, lookup_error_kind = corrupt_handler:get_folder_for_connection("conn-corrupt")
     assert_eq("load uncertainty folder", folder, nil)
@@ -369,6 +370,23 @@ local function run_namespace_contracts()
         editor:namespace_create_note(invalid_ns, "bad")
       end, "invalid namespace")
     end
+
+    local unsafe_handler = {
+      source_conn_lookup = { ["source-main"] = { "../escape" } },
+      _source_id_for_connection = function(_, conn_id)
+        return conn_id == "../escape" and "source-main" or nil
+      end,
+      get_current_connection = function()
+        return { id = "../escape", name = "Unsafe", type = "postgres" }
+      end,
+      register_event_listener = function() end,
+    }
+    local unsafe_editor = EditorUI:new(unsafe_handler, make_result_stub(), { directory = dir })
+    local unsafe_note_id = unsafe_editor:namespace_create_note("../escape", "safe")
+    local unsafe_note = unsafe_editor:search_note(unsafe_note_id)
+    assert_match("unsafe namespace encoded path", unsafe_note.file, notes_namespace.encode_local_namespace_path("../escape"))
+    assert_true("unsafe namespace stays under notes dir", vim.startswith(unsafe_note.file, dir .. "/"))
+    assert_eq("unsafe namespace no parent escape", vim.fn.filereadable(vim.fs.joinpath(vim.fs.dirname(dir), "escape", "safe.sql")), 0)
     emit("GN23_NAMESPACE_INPUT_VALIDATION_OK")
 
     local retired = "namespace 'global' has been retired in Phase 23; use folder:<id> namespace via notes_namespace authority"
@@ -396,6 +414,8 @@ local function run_namespace_contracts()
       "ensure_folder_namespace",
       "read_folder_namespace_notes",
       "create_note_in_folder",
+      "encode_local_namespace_path",
+      "decode_local_namespace_path",
       "delete_folder_namespace",
       "list_existing_folder_namespaces",
       "recursive_rmdir",
@@ -522,6 +542,8 @@ local function run_api_contracts()
     local no_folder_sections = fixture.api_ui.editor_get_note_picker_sections()
     assert_eq("no folder namespace nil", no_folder_sections.global_namespace_id, nil)
     assert_eq("no folder notes empty", #no_folder_sections.global_notes, 0)
+    fixture.handler.current_conn_id = nil
+    assert_eq("no current all notes empty", #fixture.api_ui.editor_get_all_notes(), 0)
     emit("GN23_NO_FOLDER_NAMESPACE_EMPTY_OK")
   end)
   cleanup_path(fixture.dir)
@@ -904,6 +926,31 @@ local function run_migration_edge_contracts()
     assert_eq("fresh lock kind", lock_kind, "lock_held")
     emit("GN23_MIGRATION_LOCK_SERIALIZES_OK")
 
+    local completed_notes = vim.fs.joinpath(root, "completed-notes")
+    vim.fn.mkdir(vim.fs.joinpath(completed_notes, ".notes-migration-v1.lock"), "p")
+    write_file(vim.fs.joinpath(completed_notes, ".notes-migration-v1"), "done")
+    local completed_load_called = false
+    local completed_handler = make_handler({
+      {
+        name = function()
+          return "completed"
+        end,
+        load = function()
+          return {}
+        end,
+        supports_folders = function()
+          return true
+        end,
+        load_folders = function()
+          completed_load_called = true
+          error("sentinel fast-exit should not load folders")
+        end,
+      },
+    }, nil)
+    local completed_result = notes_migration.maybe_run(completed_handler, completed_notes, {})
+    assert_true("sentinel fast-exit result", completed_result == true)
+    assert_false("sentinel fast-exit avoids source load", completed_load_called)
+
     local stale_notes = vim.fs.joinpath(root, "stale-notes")
     vim.fn.mkdir(vim.fs.joinpath(stale_notes, ".notes-migration-v1.lock"), "p")
     set_mtime(vim.fs.joinpath(stale_notes, ".notes-migration-v1.lock"), os.time() - 360)
@@ -1146,11 +1193,11 @@ local function run_command_contracts()
       vim.fn.mkdir(vim.fs.joinpath(notes_dir, ".notes-migration-v1.staging-" .. tostring(i) .. "-x"), "p")
     end
     vim.fn.mkdir(vim.fs.joinpath(notes_dir, ".notes-migration-v1.lock"), "p")
-    write_file(vim.fs.joinpath(notes_dir, ".notes-migration-v1.promote-manifest"), vim.json.encode({
+    write_file(vim.fs.joinpath(notes_dir, ".notes-migration-v1.promote-manifest"), string.rep("x", 65 * 1024))
+    write_file(vim.fs.joinpath(notes_dir, ".notes-migration-v1.recovery-needed"), vim.json.encode({
       expected_count = 1,
-      promote_complete = false,
       migration_run_ts = "2026-01-01T00:00:00Z",
-      entries = {},
+      final_paths = {},
     }))
 
     package.loaded["dbee.api"] = {
@@ -1183,12 +1230,22 @@ local function run_command_contracts()
     assert_match("inspect staging count", inspect_text, "staging_dir_count=60")
     assert_match("inspect staging truncated", inspect_text, "staging_dir_count_truncated=true")
     assert_match("inspect log truncated", inspect_text, "last_failure_log_truncated=true")
+    assert_match("inspect bounded manifest", inspect_text, "promote_manifest_summary=")
+    assert_match("inspect bounded manifest truncation", inspect_text, "truncated")
     assert_path_exists("inspect did not delete lock", vim.fs.joinpath(notes_dir, ".notes-migration-v1.lock"))
     emit("GN23_NOTES_MIGRATION_INSPECT_COMMAND_OK")
     emit("GN23_INSPECT_BYPASSES_FATAL_LATCH_OK")
     emit("GN23_INSPECT_BOUNDED_TRAVERSAL_OK")
     emit("GN23_INSPECT_OUTPUT_FORMAT_LOCKED_OK")
 
+    assert_errors("cleanup refuses recovery pending", function()
+      dbee.notes_migration_cleanup_backups()
+    end, "migration recovery pending")
+    vim.fn.delete(vim.fs.joinpath(notes_dir, ".notes-migration-v1.recovery-needed"))
+    assert_errors("cleanup refuses sentinel absent backup", function()
+      dbee.notes_migration_cleanup_backups()
+    end, "sentinel absent")
+    write_file(vim.fs.joinpath(notes_dir, ".notes-migration-v1"), "done")
     local deleted = dbee.notes_migration_cleanup_backups()
     assert_eq("cleanup deleted count", deleted, 2)
     assert_path_absent("cleanup default backup", vim.fs.joinpath(notes_dir, "global.bak"))
@@ -1205,6 +1262,90 @@ local function run_command_contracts()
     emit("GN23_README_MIGRATION_CLEANUP_DOCUMENTED_OK")
   end)
   cleanup_path(root)
+  if not ok then
+    fail(err)
+  end
+end
+
+local function run_state_latch_behavior_contracts()
+  local root = make_temp_dir()
+  local ok, err = pcall(function()
+    local module_names = {
+      "dbee.ui.common.floats",
+      "dbee.ui.drawer",
+      "dbee.ui.editor",
+      "dbee.ui.result",
+      "dbee.ui.call_log",
+      "dbee.handler",
+      "dbee.install",
+      "dbee.notes_migration",
+      "dbee.api.__register",
+      "dbee.api.state",
+    }
+    local saved = {}
+    for _, name in ipairs(module_names) do
+      saved[name] = package.loaded[name]
+    end
+
+    local function restore_modules()
+      for _, name in ipairs(module_names) do
+        package.loaded[name] = saved[name]
+      end
+    end
+
+    local function run_abort_scenario(error_kind)
+      for _, name in ipairs(module_names) do
+        package.loaded[name] = nil
+      end
+
+      package.loaded["dbee.ui.common.floats"] = { configure = function() end }
+      package.loaded["dbee.ui.drawer"] = { new = function() return {} end }
+      package.loaded["dbee.ui.editor"] = { new = function() return {} end }
+      package.loaded["dbee.ui.result"] = { new = function() return {} end }
+      package.loaded["dbee.ui.call_log"] = { new = function() return {} end }
+      package.loaded["dbee.install"] = { dir = function() return root end }
+      package.loaded["dbee.handler"] = {
+        new = function()
+          return {
+            add_helpers = function() end,
+            set_current_connection = function() end,
+          }
+        end,
+      }
+      package.loaded["dbee.api.__register"] = function() end
+      package.loaded["dbee.notes_migration"] = {
+        is_migration_in_progress = function()
+          return false
+        end,
+        maybe_run = function()
+          return false, error_kind
+        end,
+        write_last_failure_log = function(dir, logged_kind)
+          vim.fn.mkdir(dir, "p")
+          write_file(vim.fs.joinpath(dir, ".notes-migration-v1.last-failure.log"), "error_kind=" .. tostring(logged_kind))
+          return true
+        end,
+      }
+
+      local notes_dir = vim.fs.joinpath(root, "notes-" .. tostring(error_kind))
+      local state = require("dbee.api.state")
+      state.setup({ sources = {}, editor = { directory = notes_dir }, extra_helpers = {} })
+      local ok_handler, handler_err = pcall(state.handler)
+      assert_false("false migration result aborts handler " .. tostring(error_kind), ok_handler)
+      assert_match("false migration result message " .. tostring(error_kind), tostring(handler_err), "migration aborted (" .. tostring(error_kind) .. ")")
+      assert_path_exists("false migration result failure log " .. tostring(error_kind), vim.fs.joinpath(notes_dir, ".notes-migration-v1.last-failure.log"))
+      local ok_editor, editor_err = pcall(state.editor)
+      assert_false("fatal latch blocks editor after false result " .. tostring(error_kind), ok_editor)
+      assert_match("fatal latch editor message " .. tostring(error_kind), tostring(editor_err), "dbee migration failed; restart nvim to retry")
+    end
+
+    run_abort_scenario("cross_filesystem")
+    run_abort_scenario("load_failed")
+    restore_modules()
+  end)
+  cleanup_path(root)
+  package.loaded["dbee.api.state"] = nil
+  package.loaded["dbee.notes_migration"] = nil
   if not ok then
     fail(err)
   end
@@ -1252,12 +1393,35 @@ local function run_static_wave2_contracts()
   assert_false("raw folder namespace create absent", editor:find('namespace_create_note("folder:', 1, true))
   emit("GN23_FOLDER_NAMESPACE_AUTHORITY_GREP_GUARD_OK")
 
+  local function assert_no_grep_hits(label, command)
+    local lines = vim.fn.systemlist({ "sh", "-c", command })
+    local status = vim.v.shell_error
+    if status ~= 0 and status ~= 1 then
+      fail(label .. ": grep command failed with status " .. tostring(status))
+    end
+    assert_eq(label, #lines, 0)
+  end
+  assert_no_grep_hits(
+    "folder concat consumers routed",
+    "rg -n -e '\"folder:\" \\.\\. ' lua/dbee | rg -v 'lua/dbee/notes_namespace.lua|ci/headless/'"
+  )
+  assert_no_grep_hits(
+    "folder format consumers routed",
+    "rg -n -e 'string\\.format\\(\"folder:' lua/dbee | rg -v 'lua/dbee/notes_namespace.lua|ci/headless/'"
+  )
+  assert_no_grep_hits(
+    "folder mkdir consumers routed",
+    "rg -n -e 'vim\\.fn\\.mkdir\\([^)]*\"folder:' lua/dbee | rg -v 'lua/dbee/notes_namespace.lua'"
+  )
+  emit("GN23_NOTES_NAMESPACE_AUTHORITY_ALL_CONSUMERS_ROUTED_OK")
+
   assert_match("private clear cache annotation", editor, "---@private\n---@param namespace namespace_id\nfunction EditorUI:namespace_clear_cache")
   emit("GN23_NAMESPACE_CLEAR_CACHE_INTERNAL_ANNOTATION_OK")
 
   assert_match("delete label drawer", drawer, "Delete folder and notes")
   assert_match("delete label convert", convert, "Delete folder and notes")
   assert_match("delete callback", drawer, "delete_folder_namespace")
+  assert_match("hydrate delete callback", drawer, "end, delete_folder_namespace)")
   emit("GN23_BULK_FOLDER_CREATE_NAMESPACE_OK")
   emit("GN23_COLLISION_RESERVED_SET_PER_FOLDER_OK")
   emit("GN23_BACKUP_ATOMIC_RENAME_OK")
@@ -1367,6 +1531,7 @@ run_migration_edge_contracts()
 run_editor_startup_contracts()
 run_folder_lifecycle_contracts()
 run_command_contracts()
+run_state_latch_behavior_contracts()
 run_static_wave2_contracts()
 run_notes01_and_folder15_presence_markers()
 run_migration_perf_diagnostic()
