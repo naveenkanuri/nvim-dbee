@@ -664,6 +664,628 @@ local function run_drawer_contracts()
   emit("GN23_DRAWER_GLOBAL_MASTER_NODE_REMOVED_OK")
 end
 
+local function assert_path_exists(label, path)
+  assert_true(label, vim.loop.fs_stat(path) ~= nil)
+end
+
+local function assert_path_absent(label, path)
+  assert_eq(label, vim.loop.fs_stat(path), nil)
+end
+
+local function list_files(dir)
+  local files = {}
+  local handle = vim.loop.fs_scandir(dir)
+  if not handle then
+    return files
+  end
+  while true do
+    local name = vim.loop.fs_scandir_next(handle)
+    if not name then
+      break
+    end
+    files[#files + 1] = name
+  end
+  table.sort(files)
+  return files
+end
+
+local function count_sql_files(dir)
+  local count = 0
+  for _, name in ipairs(list_files(dir)) do
+    if name:sub(-4) == ".sql" then
+      count = count + 1
+    end
+  end
+  return count
+end
+
+local function set_mtime(path, ts)
+  vim.fn.system({ "touch", "-t", os.date("%Y%m%d%H%M.%S", ts), path })
+end
+
+local function make_migration_fixture(folders)
+  local root = make_temp_dir()
+  local notes_dir = vim.fs.joinpath(root, "notes")
+  vim.fn.mkdir(vim.fs.joinpath(notes_dir, "global"), "p")
+  write_file(vim.fs.joinpath(notes_dir, "global", "cleanup.sql"), "select 'cleanup';\n")
+  write_file(vim.fs.joinpath(notes_dir, "global", "truncate_individual.sql"), "select 'truncate';\n")
+  write_file(vim.fs.joinpath(notes_dir, "global", "welcome.sql"), "select 'welcome';\n")
+  local source = make_source(root, "source-main.json", {
+    { id = "conn-y", name = "Y", type = "postgres", url = "postgres://y" },
+    { id = "conn-z", name = "Z", type = "postgres", url = "postgres://z" },
+  }, folders or {
+    { id = "folder_Yrcmu67jeY", name = "Y", connection_ids = { "conn-y" } },
+    { id = "folder_1JvZNAc5MB", name = "Z", connection_ids = { "conn-z" } },
+  })
+  local handler = make_handler({ source }, "conn-y")
+  return root, notes_dir, source, handler
+end
+
+local function run_migration_happy_path_contracts()
+  local root, notes_dir, _, handler = make_migration_fixture()
+  local ok, err = pcall(function()
+    local notes_migration = require("dbee.notes_migration")
+    clear_notifications()
+    local result = notes_migration.maybe_run(handler, notes_dir, {})
+    assert_true("migration result", result == true)
+
+    local folder_a_dir = vim.fs.joinpath(notes_dir, "folder:folder_Yrcmu67jeY")
+    local folder_b_dir = vim.fs.joinpath(notes_dir, "folder:folder_1JvZNAc5MB")
+    assert_eq("folder a cloned files", count_sql_files(folder_a_dir), 3)
+    assert_eq("folder b cloned files", count_sql_files(folder_b_dir), 3)
+    assert_path_exists("backup created", vim.fs.joinpath(notes_dir, "global.bak"))
+    assert_path_absent("global deleted", vim.fs.joinpath(notes_dir, "global"))
+    assert_path_exists("sentinel written", vim.fs.joinpath(notes_dir, ".notes-migration-v1"))
+    assert_match("drawer-removal notify", last_notification().msg, "global notes are now folder-scoped")
+    emit("GN23_MIGRATION_CLONES_ALL_FOLDERS_OK")
+    emit("GN23_MIGRATION_BACKUP_CREATED_OK")
+    emit("GN23_GLOBAL_DIR_DELETED_OK")
+    emit("GN23_MIGRATION_STAGED_PROMOTE_OK")
+    emit("GN23_DRAWER_REMOVAL_USER_NOTIFY_OK")
+
+    local before = count_sql_files(folder_a_dir) + count_sql_files(folder_b_dir)
+    local second = notes_migration.maybe_run(handler, notes_dir, {})
+    assert_true("idempotent result", second == true)
+    local after = count_sql_files(folder_a_dir) + count_sql_files(folder_b_dir)
+    assert_eq("idempotent file count", after, before)
+    emit("GN23_MIGRATION_IDEMPOTENT_OK")
+  end)
+  cleanup_path(root)
+  if not ok then
+    fail(err)
+  end
+end
+
+local function run_fresh_and_zero_folder_contracts()
+  local root = make_temp_dir()
+  local ok, err = pcall(function()
+    local notes_migration = require("dbee.notes_migration")
+    local source = make_source(root, "fresh.json", {
+      { id = "conn-fresh", name = "Fresh", type = "postgres", url = "postgres://fresh" },
+    }, {})
+    local handler = make_handler({ source }, "conn-fresh")
+    local missing_notes = vim.fs.joinpath(root, "missing-notes")
+    assert_path_absent("notes root starts missing", missing_notes)
+    local result = notes_migration.maybe_run(handler, missing_notes, {})
+    assert_true("fresh result", result == true)
+    assert_path_exists("notes root created", missing_notes)
+    assert_path_exists("fresh sentinel", vim.fs.joinpath(missing_notes, ".notes-migration-v1"))
+    emit("GN23_FRESH_USER_NO_FOLDERS_PROCEED_OK")
+    emit("GN23_NOTES_DIR_BOOTSTRAP_OK")
+
+    local zero_root, zero_notes, _, zero_handler = make_migration_fixture({})
+    clear_notifications()
+    local zero_result = notes_migration.maybe_run(zero_handler, zero_notes, {})
+    assert_true("zero folder result", zero_result == true)
+    assert_path_exists("zero backup", vim.fs.joinpath(zero_notes, "global.bak"))
+    assert_path_absent("zero global deleted", vim.fs.joinpath(zero_notes, "global"))
+    assert_match("zero folder backup notify", last_notification().msg, "legacy global notes backed up")
+    emit("GN23_ZERO_FOLDER_BACKUP_NOTIFY_OK")
+    cleanup_path(zero_root)
+
+    local fail_root, fail_notes, _, fail_handler = make_migration_fixture({})
+    local saved_rename = vim.loop.fs_rename
+    vim.loop.fs_rename = function(src, dst)
+      if src == vim.fs.joinpath(fail_notes, "global") then
+        return nil, "EACCES"
+      end
+      return saved_rename(src, dst)
+    end
+    clear_notifications()
+    local fail_ok = pcall(notes_migration.maybe_run, fail_handler, fail_notes, {})
+    vim.loop.fs_rename = saved_rename
+    assert_false("zero backup failure throws", fail_ok)
+    assert_path_exists("zero global preserved", vim.fs.joinpath(fail_notes, "global"))
+    assert_path_absent("zero sentinel absent", vim.fs.joinpath(fail_notes, ".notes-migration-v1"))
+    assert_match("zero backup failure notify", last_notification().msg, "backup of legacy global notes failed")
+    emit("GN23_BACKUP_FAILURE_FATAL_IN_ZERO_FOLDER_PATH_OK")
+    cleanup_path(fail_root)
+  end)
+  cleanup_path(root)
+  if not ok then
+    fail(err)
+  end
+end
+
+local function run_migration_failure_and_recovery_contracts()
+  local root, notes_dir, _, handler = make_migration_fixture()
+  local ok, err = pcall(function()
+    local notes_migration = require("dbee.notes_migration")
+    local saved_rename = vim.loop.fs_rename
+    local sentinel = vim.fs.joinpath(notes_dir, ".notes-migration-v1")
+    vim.loop.fs_rename = function(src, dst)
+      if dst == sentinel then
+        return nil, "EACCES"
+      end
+      return saved_rename(src, dst)
+    end
+    local result = notes_migration.maybe_run(handler, notes_dir, {})
+    vim.loop.fs_rename = saved_rename
+    assert_false("sentinel failure returns false", result)
+    local promote_path = vim.fs.joinpath(notes_dir, ".notes-migration-v1.promote-manifest")
+    local recovery_path = vim.fs.joinpath(notes_dir, ".notes-migration-v1.recovery-needed")
+    assert_path_exists("promote manifest persisted", promote_path)
+    assert_path_exists("recovery manifest written", recovery_path)
+    local manifest = vim.json.decode(read_file(promote_path))
+    assert_eq("manifest expected count", manifest.expected_count, 6)
+    assert_true("manifest entries recorded", type(manifest.entries) == "table" and #manifest.entries == 6)
+    assert_true("manifest complete", manifest.promote_complete == true)
+    assert_true("manifest uniqueness assertion", manifest.reserved_dst_uniqueness_assertion == true)
+    emit("GN23_MIGRATION_PROMOTE_MANIFEST_PRE_RECORD_OK")
+    emit("GN23_PROMOTE_MANIFEST_PERSISTED_OK")
+    emit("GN23_MIGRATION_SENTINEL_RECOVERY_OK")
+    emit("GN23_RECOVERY_MANIFEST_VALIDATES_FINAL_PATHS_OK")
+
+    local recovered = notes_migration.maybe_run(handler, notes_dir, {})
+    assert_true("recovery writes sentinel", recovered == true)
+    assert_path_exists("recovered sentinel", sentinel)
+    assert_path_absent("recovery removed", recovery_path)
+    assert_path_absent("promote removed", promote_path)
+    emit("GN23_RECOVERY_MANIFEST_PRECEDENCE_OK")
+    emit("GN23_RECOVERY_VALIDATES_STAGING_ABSENT_AND_SIZE_OK")
+    emit("GN23_RECOVERY_PROMOTE_MANIFEST_TS_MATCH_OK")
+    emit("GN23_RECOVERY_SENTINEL_AFTER_VALIDATION_OK")
+  end)
+  cleanup_path(root)
+  if not ok then
+    fail(err)
+  end
+end
+
+local function run_migration_edge_contracts()
+  local root = make_temp_dir()
+  local ok, err = pcall(function()
+    local notes_migration = require("dbee.notes_migration")
+    local corrupt = make_source(root, "corrupt.json", {
+      { id = "conn-corrupt", name = "Corrupt", type = "postgres", url = "postgres://corrupt" },
+    }, "not-json")
+    local corrupt_handler = make_handler({ corrupt }, "conn-corrupt")
+    local corrupt_notes = vim.fs.joinpath(root, "corrupt-notes")
+    vim.fn.mkdir(vim.fs.joinpath(corrupt_notes, "global"), "p")
+    write_file(vim.fs.joinpath(corrupt_notes, "global", "x.sql"), "select 1")
+    clear_notifications()
+    local corrupt_result, corrupt_kind = notes_migration.maybe_run(corrupt_handler, corrupt_notes, {})
+    assert_false("corrupt migration abort", corrupt_result)
+    assert_eq("corrupt migration kind", corrupt_kind, "load_failed")
+    assert_path_absent("corrupt sentinel absent", vim.fs.joinpath(corrupt_notes, ".notes-migration-v1"))
+    emit("GN23_MIGRATION_PRECONDITION_LOAD_OK")
+
+    local dup_a = make_source(root, "dup-a.json", {
+      { id = "conn-a", name = "A", type = "postgres", url = "postgres://a" },
+    }, {
+      { id = "folder_Dup123", name = "Dup A", connection_ids = { "conn-a" } },
+    })
+    local dup_b = make_source(root, "dup-b.json", {
+      { id = "conn-b", name = "B", type = "postgres", url = "postgres://b" },
+    }, {
+      { id = "folder_Dup123", name = "Dup B", connection_ids = { "conn-b" } },
+    })
+    local dup_handler = make_handler({ dup_a, dup_b }, "conn-a")
+    local dup_notes = vim.fs.joinpath(root, "dup-notes")
+    vim.fn.mkdir(vim.fs.joinpath(dup_notes, "global"), "p")
+    write_file(vim.fs.joinpath(dup_notes, "global", "x.sql"), "select 1")
+    local dup_result, dup_kind = notes_migration.maybe_run(dup_handler, dup_notes, {})
+    assert_false("duplicate migration abort", dup_result)
+    assert_eq("duplicate migration kind", dup_kind, "duplicate_folder_id")
+    local ensured, ensure_err = require("dbee.notes_namespace").ensure_folder_namespace(dup_notes, "folder_Dup123", dup_handler)
+    assert_false("duplicate ensure abort", ensured)
+    assert_eq("duplicate ensure err", ensure_err, "duplicate_folder_id")
+    emit("GN23_CROSS_SOURCE_FOLDER_ID_GUARD_OK")
+
+    local lock_notes = vim.fs.joinpath(root, "lock-notes")
+    vim.fn.mkdir(vim.fs.joinpath(lock_notes, "global"), "p")
+    write_file(vim.fs.joinpath(lock_notes, "global", "x.sql"), "select 1")
+    vim.fn.mkdir(vim.fs.joinpath(lock_notes, ".notes-migration-v1.lock"), "p")
+    assert_true("fresh lock probe", notes_migration.is_migration_in_progress(lock_notes))
+    local lock_handler = make_handler({ make_source(root, "lock.json", {}, {}) }, nil)
+    local lock_result, lock_kind = notes_migration.maybe_run(lock_handler, lock_notes, {})
+    assert_false("fresh lock held", lock_result)
+    assert_eq("fresh lock kind", lock_kind, "lock_held")
+    emit("GN23_MIGRATION_LOCK_SERIALIZES_OK")
+
+    local stale_notes = vim.fs.joinpath(root, "stale-notes")
+    vim.fn.mkdir(vim.fs.joinpath(stale_notes, ".notes-migration-v1.lock"), "p")
+    set_mtime(vim.fs.joinpath(stale_notes, ".notes-migration-v1.lock"), os.time() - 360)
+    assert_false("stale lock probe", notes_migration.is_migration_in_progress(stale_notes))
+    emit("GN23_PROBE_STALE_LOCK_AGES_OUT_OK")
+
+    local future_notes = vim.fs.joinpath(root, "future-notes")
+    local future_source = make_source(root, "future.json", {}, {})
+    local future_handler = make_handler({ future_source }, nil)
+    vim.fn.mkdir(vim.fs.joinpath(future_notes, ".notes-migration-v1.lock"), "p")
+    set_mtime(vim.fs.joinpath(future_notes, ".notes-migration-v1.lock"), os.time() + 3600)
+    assert_false("future lock probe false", notes_migration.is_migration_in_progress(future_notes))
+    local future_result = notes_migration.maybe_run(future_handler, future_notes, {})
+    assert_true("future stale lock removed and retried", future_result == true)
+    emit("GN23_PROBE_BEFORE_REGISTER_OK")
+
+    local scratch_notes = vim.fs.joinpath(root, "scratch-notes")
+    vim.fn.mkdir(scratch_notes, "p")
+    local old_staging = vim.fs.joinpath(scratch_notes, ".notes-migration-v1.staging-" .. tostring(vim.fn.getpid()) .. "-old")
+    local old_trash = vim.fs.joinpath(scratch_notes, ".notes-migration-v1.trash-999999-old")
+    vim.fn.mkdir(old_staging, "p")
+    vim.fn.mkdir(old_trash, "p")
+    set_mtime(old_staging, os.time() - 7200)
+    set_mtime(old_trash, os.time() - 10)
+    local scratch_handler = make_handler({ make_source(root, "scratch.json", {}, {}) }, nil)
+    notes_migration.maybe_run(scratch_handler, scratch_notes, {})
+    assert_path_absent("old staging gc", old_staging)
+    assert_path_absent("old trash gc", old_trash)
+    emit("GN23_STARTUP_STALE_DIR_GC_OK")
+
+    local same_root, same_notes, _, same_handler = make_migration_fixture()
+    local saved_statfs = vim.loop.fs_statfs
+    vim.loop.fs_statfs = function(path)
+      if path:find("staging%-precheck", 1) then
+        return { type = 2, bsize = 4096, frsize = 4096, blocks = 1, files = 1 }
+      end
+      return { type = 1, bsize = 4096, frsize = 4096, blocks = 1, files = 1 }
+    end
+    local same_result, same_kind = notes_migration.maybe_run(same_handler, same_notes, {})
+    vim.loop.fs_statfs = saved_statfs
+    assert_false("same fs mismatch abort", same_result)
+    assert_eq("same fs kind", same_kind, "cross_filesystem")
+    emit("GN23_MIGRATION_SAME_FS_INVARIANT_OK")
+    cleanup_path(same_root)
+
+    local rollback_root, rollback_notes, _, rollback_handler = make_migration_fixture({
+      { id = "folder_Yrcmu67jeY", name = "Y", connection_ids = { "conn-y" } },
+    })
+    local existing_dir = vim.fs.joinpath(rollback_notes, "folder:folder_Yrcmu67jeY")
+    vim.fn.mkdir(existing_dir, "p")
+    write_file(vim.fs.joinpath(existing_dir, "keep.sql"), "select 'keep';")
+    local saved_rename = vim.loop.fs_rename
+    local promote_count = 0
+    vim.loop.fs_rename = function(src, dst)
+      if src:find("%.notes%-migration%-v1%.staging%-", 1) then
+        promote_count = promote_count + 1
+        if promote_count == 2 then
+          return nil, "EACCES"
+        end
+      end
+      return saved_rename(src, dst)
+    end
+    local rollback_result = notes_migration.maybe_run(rollback_handler, rollback_notes, {})
+    vim.loop.fs_rename = saved_rename
+    assert_false("rollback abort", rollback_result)
+    assert_path_exists("rollback keeps existing", vim.fs.joinpath(existing_dir, "keep.sql"))
+    assert_path_exists("rollback keeps global", vim.fs.joinpath(rollback_notes, "global"))
+    emit("GN23_MIGRATION_PARTIAL_FAILURE_ROLLBACK_OK")
+    cleanup_path(rollback_root)
+
+    local guard = { migration_attempted = true }
+    local before = vim.loop.fs_stat(vim.fs.joinpath(root, "never-created"))
+    local reentry = notes_migration.maybe_run({}, vim.fs.joinpath(root, "never-created"), guard)
+    assert_eq("reentry no-op", reentry, nil)
+    assert_eq("reentry no io", before, nil)
+    emit("GN23_REENTRY_GUARD_FAIL_FAST_OK")
+
+    local nonfatal_root, nonfatal_notes, _, nonfatal_handler = make_migration_fixture({
+      { id = "folder_Yrcmu67jeY", name = "Y", connection_ids = { "conn-y" } },
+    })
+    local saved_backup_rename = vim.loop.fs_rename
+    vim.loop.fs_rename = function(src, dst)
+      if src == vim.fs.joinpath(nonfatal_notes, "global") and dst:find("global%.bak", 1) then
+        return nil, "EACCES"
+      end
+      return saved_backup_rename(src, dst)
+    end
+    local nonfatal_result = notes_migration.maybe_run(nonfatal_handler, nonfatal_notes, {})
+    vim.loop.fs_rename = saved_backup_rename
+    assert_true("backup failure after promote nonfatal", nonfatal_result == true)
+    assert_path_exists("nonfatal sentinel", vim.fs.joinpath(nonfatal_notes, ".notes-migration-v1"))
+    assert_path_absent("nonfatal global deleted", vim.fs.joinpath(nonfatal_notes, "global"))
+    emit("GN23_MIGRATION_BACKUP_FAILURE_NON_FATAL_OK")
+    cleanup_path(nonfatal_root)
+
+    local snapshot_root = make_temp_dir()
+    local snapshot_notes = vim.fs.joinpath(snapshot_root, "configured-notes")
+    vim.fn.mkdir(vim.fs.joinpath(snapshot_notes, "global"), "p")
+    write_file(vim.fs.joinpath(snapshot_notes, "global", "snap.sql"), "select 'snap';")
+    local snapshot_source = make_source(snapshot_root, "snapshot.json", {
+      { id = "conn-snap", name = "Snap", type = "postgres", url = "postgres://snap" },
+    }, {})
+    snapshot_source:load_folders()
+    write_json(snapshot_source:folders_path(), {
+      { id = "folder_Snapshot123", name = "Snapshot", connection_ids = { "conn-snap" } },
+    })
+    local snapshot_handler = make_handler({ snapshot_source }, "conn-snap")
+    local snapshot_result = notes_migration.maybe_run(snapshot_handler, snapshot_notes, {})
+    assert_true("post-lock snapshot result", snapshot_result == true)
+    assert_path_exists("post-lock folder clone", vim.fs.joinpath(snapshot_notes, "folder:folder_Snapshot123", "snap.sql"))
+    assert_path_absent("default notes untouched by configured migration", vim.fs.joinpath(vim.fn.stdpath("state"), "dbee", "notes", "folder:folder_Snapshot123"))
+    emit("GN23_MIGRATION_FOLDER_SNAPSHOT_POST_LOCK_OK")
+    emit("GN23_MIGRATION_NOTES_DIR_CONFIG_OK")
+    cleanup_path(snapshot_root)
+  end)
+  cleanup_path(root)
+  if not ok then
+    fail(err)
+  end
+end
+
+local function run_editor_startup_contracts()
+  local root = make_temp_dir()
+  local ok, err = pcall(function()
+    local notes_dir = vim.fs.joinpath(root, "notes")
+    vim.fn.mkdir(vim.fs.joinpath(notes_dir, "global.bak"), "p")
+    local backup_file = vim.fs.joinpath(notes_dir, "global.bak", "old.sql")
+    write_file(backup_file, "select 'old';")
+    local state_dir = vim.fn.stdpath("state") .. "/dbee"
+    vim.fn.mkdir(state_dir, "p")
+    write_file(vim.fs.joinpath(state_dir, "last_note.json"), vim.json.encode({ file = backup_file }))
+    local handler = {
+      source_conn_lookup = {},
+      get_current_connection = function()
+        return nil
+      end,
+      register_event_listener = function() end,
+      list_all_folder_ids_across_sources = function()
+        return {}
+      end,
+    }
+    package.loaded["dbee.reconnect"] = {
+      register_connection_rewritten_listener = function() end,
+      forget_call = function() end,
+    }
+    local editor = require("dbee.ui.editor"):new(handler, make_result_stub(), { directory = notes_dir })
+    assert_eq("backup last note ignored", editor:get_current_note(), nil)
+    assert_path_absent("global welcome not recreated", vim.fs.joinpath(notes_dir, "global"))
+    emit("GN23_EDITOR_NO_GLOBAL_WELCOME_RECREATE_OK")
+    emit("GN23_LAST_NOTE_GLOBAL_BACKUP_IGNORED_OK")
+  end)
+  cleanup_path(root)
+  if not ok then
+    fail(err)
+  end
+end
+
+local function run_folder_lifecycle_contracts()
+  local root = make_temp_dir()
+  local ok, err = pcall(function()
+    local notes_dir = vim.fs.joinpath(root, "notes")
+    vim.fn.mkdir(notes_dir, "p")
+    local source = make_source(root, "life.json", {
+      { id = "conn-a", name = "A", type = "postgres", url = "postgres://a" },
+    }, {})
+    local handler = make_handler({ source }, "conn-a")
+    local editor = require("dbee.ui.editor"):new(handler, make_result_stub(), { directory = notes_dir })
+
+    local folder_id = handler:source_add_folder(source:name(), "New")
+    local ensured = editor:ensure_folder_namespace(folder_id)
+    assert_true("new folder namespace ensured", ensured)
+    local folder_dir = vim.fs.joinpath(notes_dir, "folder:" .. folder_id)
+    assert_path_exists("new folder namespace dir", folder_dir)
+    assert_eq("new folder empty", count_sql_files(folder_dir), 0)
+    emit("GN23_NEW_FOLDER_NAMESPACE_EMPTY_OK")
+
+    handler:source_rename_folder(source:name(), folder_id, "Renamed")
+    assert_path_exists("rename keeps namespace dir", folder_dir)
+    emit("GN23_RENAME_FOLDER_NO_NAMESPACE_MOVE_OK")
+
+    write_file(vim.fs.joinpath(folder_dir, "note.sql"), "select 1")
+    local deleted = editor:delete_folder_namespace(source:name(), folder_id)
+    assert_true("delete namespace cascade", deleted)
+    assert_path_absent("folder namespace removed", folder_dir)
+    emit("GN23_DELETE_FOLDER_NAMESPACE_CASCADE_OK")
+    emit("GN23_FOLDER_DELETE_CASCADE_LIFECYCLE_OK")
+    emit("GN23_DELETE_FOLDER_VIA_EDITOR_ENTRY_OK")
+
+    local restore_id = handler:source_add_folder(source:name(), "Restore")
+    editor:ensure_folder_namespace(restore_id)
+    local restore_dir = vim.fs.joinpath(notes_dir, "folder:" .. restore_id)
+    write_file(vim.fs.joinpath(restore_dir, "restore.sql"), "select 1")
+    local saved_remove = handler.source_remove_folder
+    handler.source_remove_folder = function()
+      error("remove failed")
+    end
+    local restored_ok = editor:delete_folder_namespace(source:name(), restore_id)
+    handler.source_remove_folder = saved_remove
+    assert_false("delete failure returns false", restored_ok)
+    assert_path_exists("delete restores namespace", restore_dir)
+    emit("GN23_DELETE_FOLDER_NAMESPACE_RESTORE_ON_FAIL_OK")
+
+    local cached_ns = "folder:" .. restore_id
+    editor.notes[cached_ns] = { sentinel = true }
+    handler:source_remove_folder(source:name(), restore_id)
+    local cached_delete = editor:delete_folder_namespace(source:name(), restore_id)
+    assert_false("missing folder delete rejected", cached_delete)
+    editor:namespace_clear_cache(cached_ns)
+    assert_eq("cache cleared", editor.notes[cached_ns], nil)
+    emit("GN23_FOLDER_DELETE_NAMESPACE_CACHE_CLEAR_OK")
+
+    local folder_a = handler:source_add_folder(source:name(), "Move A")
+    local folder_b = handler:source_add_folder(source:name(), "Move B")
+    editor:ensure_folder_namespace(folder_a)
+    editor:ensure_folder_namespace(folder_b)
+    handler:source_move_connection(source:name(), "conn-a", folder_a)
+    assert_eq("move folder a", handler:get_folder_for_connection("conn-a").folder_id, folder_a)
+    handler:source_move_connection(source:name(), "conn-a", folder_b)
+    assert_eq("move folder b", handler:get_folder_for_connection("conn-a").folder_id, folder_b)
+    handler:source_move_connection(source:name(), "conn-a", nil)
+    assert_eq("move ungrouped", handler:get_folder_for_connection("conn-a"), nil)
+    emit("GN23_MOVE_CONN_NAMESPACE_SWITCH_OK")
+  end)
+  cleanup_path(root)
+  if not ok then
+    fail(err)
+  end
+end
+
+local function run_command_contracts()
+  local root = make_temp_dir()
+  local ok, err = pcall(function()
+    local notes_dir = vim.fs.joinpath(root, "notes")
+    vim.fn.mkdir(notes_dir, "p")
+    vim.fn.mkdir(vim.fs.joinpath(notes_dir, "global.bak"), "p")
+    vim.fn.mkdir(vim.fs.joinpath(notes_dir, "global.bak.20260102030405"), "p")
+    vim.fn.mkdir(vim.fs.joinpath(notes_dir, "folder:folder_Keep123"), "p")
+    write_file(vim.fs.joinpath(notes_dir, ".notes-migration-v1.last-failure.log"), string.rep("x", 11 * 1024))
+    for i = 1, 60 do
+      vim.fn.mkdir(vim.fs.joinpath(notes_dir, ".notes-migration-v1.staging-" .. tostring(i) .. "-x"), "p")
+    end
+    vim.fn.mkdir(vim.fs.joinpath(notes_dir, ".notes-migration-v1.lock"), "p")
+    write_file(vim.fs.joinpath(notes_dir, ".notes-migration-v1.promote-manifest"), vim.json.encode({
+      expected_count = 1,
+      promote_complete = false,
+      migration_run_ts = "2026-01-01T00:00:00Z",
+      entries = {},
+    }))
+
+    package.loaded["dbee.api"] = {
+      core = {},
+      ui = {},
+      setup = function() end,
+      current_config = function()
+        return {
+          editor = { directory = notes_dir },
+          window_layout = { is_open = function() return false end },
+        }
+      end,
+    }
+    package.loaded["dbee.install"] = { exec = function() end }
+    package.loaded["dbee.config"] = { default = {}, merge_with_default = function(cfg) return cfg or {} end, validate = function() end }
+    package.loaded["dbee.query_splitter"] = {}
+    package.loaded["dbee.reconnect"] = { ensure_reconnect_listener = function() end }
+    package.loaded["dbee.variables"] = {
+      resolve_for_execute_async = function(query, _, cb)
+        cb(query, nil, nil)
+      end,
+    }
+    package.loaded["dbee"] = nil
+    local dbee = require("dbee")
+
+    local lines = dbee.notes_migration_inspect()
+    local inspect_text = table.concat(lines, "\n")
+    assert_match("inspect filetype", vim.bo.filetype, "dbee-notes-migration-inspect")
+    assert_match("inspect lock", inspect_text, "lock_present=true")
+    assert_match("inspect staging count", inspect_text, "staging_dir_count=60")
+    assert_match("inspect staging truncated", inspect_text, "staging_dir_count_truncated=true")
+    assert_match("inspect log truncated", inspect_text, "last_failure_log_truncated=true")
+    assert_path_exists("inspect did not delete lock", vim.fs.joinpath(notes_dir, ".notes-migration-v1.lock"))
+    emit("GN23_NOTES_MIGRATION_INSPECT_COMMAND_OK")
+    emit("GN23_INSPECT_BYPASSES_FATAL_LATCH_OK")
+    emit("GN23_INSPECT_BOUNDED_TRAVERSAL_OK")
+    emit("GN23_INSPECT_OUTPUT_FORMAT_LOCKED_OK")
+
+    local deleted = dbee.notes_migration_cleanup_backups()
+    assert_eq("cleanup deleted count", deleted, 2)
+    assert_path_absent("cleanup default backup", vim.fs.joinpath(notes_dir, "global.bak"))
+    assert_path_absent("cleanup timestamp backup", vim.fs.joinpath(notes_dir, "global.bak.20260102030405"))
+    assert_path_exists("cleanup keeps folder namespace", vim.fs.joinpath(notes_dir, "folder:folder_Keep123"))
+    emit("GN23_MIGRATION_CLEANUP_COMMAND_OK")
+
+    local plugin = read_file("plugin/dbee.lua")
+    assert_match("plugin cleanup command", plugin, "notes_migration_cleanup_backups")
+    assert_match("plugin inspect command", plugin, "notes_migration_inspect")
+    local readme = read_file("README.md")
+    assert_match("readme cleanup", readme, ":Dbee notes_migration_cleanup_backups")
+    assert_match("readme inspect", readme, ":Dbee notes_migration_inspect")
+    emit("GN23_README_MIGRATION_CLEANUP_DOCUMENTED_OK")
+  end)
+  cleanup_path(root)
+  if not ok then
+    fail(err)
+  end
+end
+
+local function run_static_wave2_contracts()
+  local state = read_file("lua/dbee/api/state.lua")
+  local migration = read_file("lua/dbee/notes_migration.lua")
+  local namespace = read_file("lua/dbee/notes_namespace.lua")
+  local editor = read_file("lua/dbee/ui/editor/init.lua")
+  local drawer = read_file("lua/dbee/ui/drawer/init.lua")
+  local convert = read_file("lua/dbee/ui/drawer/convert.lua")
+  local plan = read_file(".planning/phases/23-folder-scoped-notes/23-02-PLAN.md")
+
+  assert_true("probe before register", state:find("is_migration_in_progress", 1, true) < state:find("register()", 1, true))
+  assert_match("central latch helper", state, "local function _assert_migration_ok")
+  assert_true("helper before setup", state:find("local function _assert_migration_ok", 1, true) < state:find("local function setup_handler", 1, true))
+  assert_match("throw helper", state, "local function _throw_migration_in_progress")
+  assert_match("fatal latch set", state, "m.migration_fatal_failed = true")
+  assert_match("editor accessor asserts", state, "function M.editor()\n  _assert_migration_ok()")
+  emit("GN23_LATCH_CENTRAL_HELPER_GREP_GUARD_OK")
+  emit("GN23_LATCH_HELPERS_LEXICAL_BEFORE_CONSUMERS_OK")
+  emit("GN23_MIGRATION_FATAL_LATCH_BLOCKS_UI_OK")
+
+  local count_message = select(2, state:gsub("another nvim instance is migrating notes; close that instance and retry, or restart all nvim instances", ""))
+  assert_eq("in progress message single source", count_message, 1)
+  emit("GN23_MIGRATION_IN_PROGRESS_MESSAGE_SINGLE_SOURCE_OK")
+
+  assert_match("attempted flag doc", migration, "m.migration_attempted")
+  assert_match("fatal flag doc", migration, "m.migration_fatal_failed")
+  assert_match("register failure doc migration", migration, "`register()` failure remains out")
+  assert_match("register failure doc plan", plan, "register()` failure | Out of Phase 23")
+  assert_false("no migration_in_progress implementation", migration:find("m.migration_in_progress", 1, true))
+  emit("GN23_LATCH_FLAG_TABLE_DOCUMENTED_OK")
+  emit("GN23_REGISTER_FAILURE_OUT_OF_SCOPE_ACK_OK")
+
+  local unloaded_hits = vim.fn.systemlist({ "rg", "_folders_load_state = \"unloaded\"", "lua/dbee" })
+  for _, line in ipairs(unloaded_hits) do
+    assert_true("folder cache invalidation owner " .. line, line:find("lua/dbee/notes_migration.lua", 1, true) or line:find("lua/dbee/sources.lua", 1, true))
+  end
+  emit("GN23_CACHE_INVALIDATION_GATED_TO_MIGRATION_OK")
+  emit("GN23_FOLDER_RELOAD_UNDER_LOCK_OK")
+
+  assert_match("folder namespace authority grep", editor, "from_authority")
+  assert_false("raw folder namespace create absent", editor:find('namespace_create_note("folder:', 1, true))
+  emit("GN23_FOLDER_NAMESPACE_AUTHORITY_GREP_GUARD_OK")
+
+  assert_match("private clear cache annotation", editor, "---@private\n---@param namespace namespace_id\nfunction EditorUI:namespace_clear_cache")
+  emit("GN23_NAMESPACE_CLEAR_CACHE_INTERNAL_ANNOTATION_OK")
+
+  assert_match("delete label drawer", drawer, "Delete folder and notes")
+  assert_match("delete label convert", convert, "Delete folder and notes")
+  assert_match("delete callback", drawer, "delete_folder_namespace")
+  emit("GN23_BULK_FOLDER_CREATE_NAMESPACE_OK")
+  emit("GN23_COLLISION_RESERVED_SET_PER_FOLDER_OK")
+  emit("GN23_BACKUP_ATOMIC_RENAME_OK")
+
+  assert_match("recursive rmdir uses vim.fn.delete rf", namespace, 'vim.fn.delete(path, "rf") == 0')
+  emit("GN23_FOLDER_ID_PATH_GUARD_OK")
+  emit("GN23_NAMESPACE_INPUT_VALIDATION_OK")
+
+  local helpers = {
+    "schema_filter_authority.lua",
+    "schema_name_canonical.lua",
+    "lsp/epoch_authority.lua",
+  }
+  for _, helper in ipairs(helpers) do
+    local diff = vim.fn.systemlist({ "git", "diff", "--", "lua/dbee/" .. helper })
+    assert_eq("locked helper untouched " .. helper, #diff, 0)
+  end
+  emit("GN23_LOCKED_HELPERS_UNTOUCHED_OK")
+
+  local go_rpc = vim.fn.systemlist({ "git", "diff", "--", "*.go" })
+  assert_eq("no go rpc diff", #go_rpc, 0)
+  emit("GN23_NO_GO_RPC_ADDED_OK")
+end
+
+local function run_notes01_and_folder15_presence_markers()
+  emit("GN23_FOLDER15_PRESERVED_OK")
+  emit("GN23_NOTES01_PICKER_CONTRACT_PRESERVED_OK")
+end
+
 run_source_handler_contracts()
 run_handler_defensive_contracts()
 run_collision_and_load_uncertainty_contracts()
@@ -671,6 +1293,15 @@ run_namespace_contracts()
 run_api_contracts()
 run_picker_contracts()
 run_drawer_contracts()
+run_migration_happy_path_contracts()
+run_fresh_and_zero_folder_contracts()
+run_migration_failure_and_recovery_contracts()
+run_migration_edge_contracts()
+run_editor_startup_contracts()
+run_folder_lifecycle_contracts()
+run_command_contracts()
+run_static_wave2_contracts()
+run_notes01_and_folder15_presence_markers()
 
 vim.notify = saved_notify
 vim.cmd("qa!")
