@@ -1,7 +1,7 @@
 local utils = require("dbee.utils")
 local common = require("dbee.ui.common")
 local diagnostics = require("dbee.ui.editor.diagnostics")
-local welcome = require("dbee.ui.editor.welcome")
+local notes_namespace = require("dbee.notes_namespace")
 local variables = require("dbee.variables")
 
 ---@return table|nil
@@ -13,7 +13,7 @@ local function get_reconnect()
   return reconnect
 end
 
----@alias namespace_id "global"|string
+---@alias namespace_id string
 
 ---@alias note_id string
 ---@alias note_details { id: note_id, name: string, file: string, bufnr: integer? }
@@ -45,6 +45,67 @@ end
 ---@field private _confirm_resolve? fun() function to call when auto-dismiss fires
 ---@field private _confirm_picker? table picker handle from vim.ui.select (if provider returns one)
 local EditorUI = {}
+
+local RETIRED_GLOBAL_NAMESPACE =
+  "namespace 'global' has been retired in Phase 23; use folder:<id> namespace via notes_namespace authority"
+
+---@param self EditorUI
+---@param namespace any
+---@return boolean
+local function is_known_local_namespace(self, namespace)
+  if type(namespace) ~= "string" or namespace == "" then
+    return false
+  end
+  if self.handler and type(self.handler._source_id_for_connection) == "function"
+      and self.handler:_source_id_for_connection(namespace) then
+    return true
+  end
+  if self.handler and type(self.handler.get_current_connection) == "function" then
+    local ok, conn = pcall(self.handler.get_current_connection, self.handler)
+    if ok and conn and tostring(conn.id or "") == namespace then
+      return true
+    end
+  end
+  return false
+end
+
+---@param self EditorUI
+---@param namespace any
+---@param opts? { from_authority?: boolean }
+---@return string
+local function validate_namespace(self, namespace, opts)
+  if type(namespace) ~= "string" or namespace == "" then
+    error("invalid namespace")
+  end
+  if namespace == "global" then
+    error(RETIRED_GLOBAL_NAMESPACE)
+  end
+  if notes_namespace.has_folder_prefix(namespace) then
+    if not notes_namespace.parse_folder_namespace(namespace) then
+      error("invalid folder namespace")
+    end
+    if not (opts and opts.from_authority == true) then
+      error("folder namespace requires notes_namespace authority")
+    end
+    return namespace
+  end
+  if
+    not is_known_local_namespace(self, namespace)
+    and (namespace:find("/", 1, true) or namespace:find("\\", 1, true) or namespace:find("..", 1, true))
+  then
+    error("invalid namespace")
+  end
+  return namespace
+end
+
+---@param namespace string
+---@return { from_authority: boolean }|nil
+local function authority_opts_for_namespace(namespace)
+  if notes_namespace.has_folder_prefix(namespace) then
+    return { from_authority = true }
+  end
+  return nil
+end
 
 ---@param handler Handler
 ---@param result ResultUI
@@ -154,7 +215,7 @@ function EditorUI:new(handler, result, opts)
     end
   end)
 
-  -- restore last-active note from previous session, or fall back to first global note
+  -- restore last-active note from previous session, or fall back to local notes.
   local restored = false
   local last = o:load_last_note()
   if last then
@@ -169,11 +230,12 @@ function EditorUI:new(handler, result, opts)
   end
 
   if not restored then
-    local global_notes = o:namespace_get_notes("global")
-    if not vim.tbl_isempty(global_notes) then
-      o.current_note_id = global_notes[1].id
-    else
-      o.current_note_id = o:create_welcome_note()
+    local conn = handler:get_current_connection()
+    if conn and conn.id then
+      local ok_notes, local_notes = pcall(o.namespace_get_notes, o, tostring(conn.id))
+      if ok_notes and not vim.tbl_isempty(local_notes) then
+        o.current_note_id = local_notes[1].id
+      end
     end
   end
 
@@ -251,7 +313,10 @@ function EditorUI:resolve_note_from_file(file)
     local namespace = rel:match("^([^/]+)")
     if namespace then
       -- load that namespace (triggers load_notes_from_disk)
-      self:namespace_get_notes(namespace)
+      local ok_load = pcall(self.namespace_get_notes, self, namespace, authority_opts_for_namespace(namespace))
+      if not ok_load then
+        return nil
+      end
       -- search again
       note = self:search_note_with_file(file)
       if note then
@@ -266,35 +331,7 @@ end
 ---@private
 ---@return note_id
 function EditorUI:create_welcome_note()
-  local note_id = self:namespace_create_note("global", "welcome")
-  local note = self:search_note(note_id)
-  if not note then
-    error("failed creating welcome note")
-  end
-
-  -- create note buffer with contents
-  local bufnr = vim.api.nvim_create_buf(false, false)
-  vim.api.nvim_buf_set_name(bufnr, note.file)
-  vim.api.nvim_buf_set_lines(bufnr, 0, -1, true, welcome.banner())
-  vim.api.nvim_buf_set_option(bufnr, "modified", false)
-
-  self.notes["global"][note_id].bufnr = bufnr
-
-  -- remove all text when first change happens to text
-  vim.api.nvim_create_autocmd({ "InsertEnter" }, {
-    once = true,
-    buffer = bufnr,
-    callback = function()
-      vim.api.nvim_buf_set_lines(bufnr, 0, -1, true, {})
-      vim.api.nvim_buf_set_option(bufnr, "modified", false)
-    end,
-  })
-
-  -- configure options and mappings on new buffer
-  common.configure_buffer_options(bufnr, self.buffer_options)
-  common.configure_buffer_mappings(bufnr, self:get_actions(), self.mappings)
-
-  return note_id
+  error(RETIRED_GLOBAL_NAMESPACE)
 end
 
 ---@private
@@ -586,7 +623,7 @@ function EditorUI:get_actions()
       if not note or namespace == "" then
         return
       end
-      local notes = self:namespace_get_notes(namespace)
+      local notes = self:namespace_get_notes(namespace, authority_opts_for_namespace(namespace))
       if #notes <= 1 then
         return
       end
@@ -613,7 +650,7 @@ function EditorUI:get_actions()
       if not note or namespace == "" then
         return
       end
-      local notes = self:namespace_get_notes(namespace)
+      local notes = self:namespace_get_notes(namespace, authority_opts_for_namespace(namespace))
       if #notes <= 1 then
         return
       end
@@ -879,8 +916,10 @@ end
 
 ---@private
 ---@param namespace string
+---@param opts? { from_authority?: boolean }
 ---@return string
-function EditorUI:dir(namespace)
+function EditorUI:dir(namespace, opts)
+  namespace = validate_namespace(self, namespace, opts)
   return self.directory .. "/" .. namespace
 end
 
@@ -940,19 +979,19 @@ function EditorUI:search_note_with_file(file)
   return nil, ""
 end
 
--- Creates a new note in namespace.
--- Errors if id or name is nil or there is a note with the same
--- name in namespace already.
+--- Creates a new note in namespace.
+--- Local connection namespaces may call directly. Valid `folder:*` namespaces
+--- require `{ from_authority = true }` from `notes_namespace`. The legacy
+--- `"global"` namespace, malformed `folder:` namespaces, and empty/path-shaped
+--- namespaces are rejected before filesystem access.
 ---@param id namespace_id
 ---@param name string
+---@param opts? { from_authority?: boolean }
 ---@return note_id
-function EditorUI:namespace_create_note(id, name)
-  local namespace = id
-  if not namespace or namespace == "" then
-    error("invalid namespace id")
-  end
+function EditorUI:namespace_create_note(id, name, opts)
+  local namespace = validate_namespace(self, id, opts)
   if not name or name == "" then
-    error("no name for global note")
+    error("no note name")
   end
 
   if not vim.endswith(name, ".sql") then
@@ -960,13 +999,13 @@ function EditorUI:namespace_create_note(id, name)
   end
 
   -- create namespace directory
-  vim.fn.mkdir(self:dir(namespace), "p")
+  vim.fn.mkdir(self:dir(namespace, opts), "p")
 
   if self:namespace_check_conflict(namespace, name) then
     error('note with this name already exists in "' .. namespace .. '" namespace')
   end
 
-  local file = self:dir(namespace) .. "/" .. name
+  local file = self:dir(namespace, opts) .. "/" .. name
   local note_id = file .. utils.random_string()
   ---@type note_details
   local s = {
@@ -984,15 +1023,13 @@ function EditorUI:namespace_create_note(id, name)
 end
 
 ---@param id namespace_id
+---@param opts? { from_authority?: boolean }
 ---@return note_details[]
-function EditorUI:namespace_get_notes(id)
-  local namespace = id
-  if not namespace or namespace == "" then
-    error("invalid namespace id")
-  end
+function EditorUI:namespace_get_notes(id, opts)
+  local namespace = validate_namespace(self, id, opts)
 
   if not self.notes[namespace] then
-    self.notes[namespace] = self:load_notes_from_disk(namespace)
+    self.notes[namespace] = self:load_notes_from_disk(namespace, opts)
   end
   local notes_list = vim.tbl_values(self.notes[namespace])
 
@@ -1005,9 +1042,11 @@ end
 -- If no notes were found, return an empty table.
 ---@private
 ---@param namespace_id namespace_id
+---@param opts? { from_authority?: boolean }
 ---@return table<note_id, note_details>
-function EditorUI:load_notes_from_disk(namespace_id)
-  local full_dir = self.directory .. "/" .. namespace_id
+function EditorUI:load_notes_from_disk(namespace_id, opts)
+  local namespace = validate_namespace(self, namespace_id, opts)
+  local full_dir = self:dir(namespace, opts)
   local ret = {}
   for _, file in pairs(vim.split(vim.fn.glob(full_dir .. "/*"), "\n")) do
     if vim.fn.filereadable(file) == 1 then
@@ -1026,8 +1065,9 @@ end
 -- Errors if there is no note with provided id in namespace.
 ---@param id namespace_id
 ---@param note_id note_id
-function EditorUI:namespace_remove_note(id, note_id)
-  local namespace = id
+---@param opts? { from_authority?: boolean }
+function EditorUI:namespace_remove_note(id, note_id, opts)
+  local namespace = validate_namespace(self, id, opts)
   if not self.notes[namespace] then
     error("invalid namespace id to remove the note from")
   end
@@ -1062,6 +1102,35 @@ function EditorUI:namespace_remove_note(id, note_id)
   self:trigger_event("note_removed", { note_id = note_id })
 end
 
+---@param folder_id string
+---@return boolean
+---@return string? err
+function EditorUI:ensure_folder_namespace(folder_id)
+  return notes_namespace.ensure_folder_namespace(self.directory, folder_id, self.handler)
+end
+
+---@private
+---@param namespace namespace_id
+function EditorUI:namespace_clear_cache(namespace)
+  self.notes[validate_namespace(self, namespace, authority_opts_for_namespace(namespace))] = nil
+end
+
+---@param folder_id string
+---@return boolean
+---@return string? err
+function EditorUI:delete_folder_namespace(folder_id)
+  local ok_delete, delete_err = notes_namespace.delete_folder_namespace(self.directory, folder_id)
+  if not ok_delete then
+    return false, delete_err
+  end
+  local ok_ns, namespace_or_err = pcall(notes_namespace.folder_namespace_id, folder_id)
+  if not ok_ns then
+    return false, tostring(namespace_or_err)
+  end
+  self:namespace_clear_cache(namespace_or_err)
+  return true
+end
+
 -- Renames an existing note.
 -- Errors if no name or id provided, there is no note with provided id or
 -- there is already an existing note with the same name in the same namespace.
@@ -1084,7 +1153,7 @@ function EditorUI:note_rename(id, name)
     error('note with this name already exists in "' .. namespace .. '" namespace')
   end
 
-  local new_file = self:dir(namespace) .. "/" .. name
+  local new_file = self:dir(namespace, authority_opts_for_namespace(namespace)) .. "/" .. name
 
   -- rename file
   if vim.fn.filereadable(note.file) == 1 then

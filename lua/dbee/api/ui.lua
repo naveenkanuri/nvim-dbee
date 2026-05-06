@@ -16,6 +16,7 @@
 ---@brief ]]
 
 local state = require("dbee.api.state")
+local notes_namespace = require("dbee.notes_namespace")
 
 local ui = {}
 
@@ -85,6 +86,22 @@ end
 ---@param note_id note_id
 function ui.editor_namespace_remove_note(id, note_id)
   state.editor():namespace_remove_note(id, note_id)
+end
+
+---@param folder_id string
+---@param name string
+---@return note_id|nil
+---@return string? err
+function ui.editor_create_note_in_folder(folder_id, name)
+  local editor = state.editor()
+  return notes_namespace.create_note_in_folder(editor, editor.directory, state.handler(), folder_id, name)
+end
+
+---@param folder_id string
+---@return boolean
+---@return string? err
+function ui.editor_delete_folder_namespace(folder_id)
+  return state.editor():delete_folder_namespace(folder_id)
 end
 
 --- Renames an existing note.
@@ -253,18 +270,65 @@ end
 ---@field current_connection { id: string, name: string }|nil
 ---@field global_notes note_details[]
 ---@field local_notes note_details[]
+---@field global_namespace_id string|nil
+---@field current_folder { id: string, name: string, source_id: string }|nil
+
+---@param error_kind string?
+local function notify_folder_lookup_error(error_kind)
+  if error_kind == "load_failed" then
+    vim.notify("dbee: folder source load failed; fix sidecar before using folder-scoped notes", vim.log.levels.WARN)
+  end
+end
+
+---@param editor EditorUI
+---@param handler Handler
+---@param conn_id string
+---@return note_details[]
+---@return string|nil
+---@return { id: string, name: string, source_id: string }|nil
+local function folder_notes_for_connection(editor, handler, conn_id)
+  local folder, error_kind = handler:get_folder_for_connection(conn_id)
+  if error_kind then
+    notify_folder_lookup_error(error_kind)
+    return {}, nil, nil
+  end
+  if not folder then
+    return {}, nil, nil
+  end
+
+  local ok_ns, namespace_or_err = pcall(notes_namespace.folder_namespace_id, folder.folder_id)
+  if not ok_ns then
+    vim.notify(tostring(namespace_or_err), vim.log.levels.ERROR)
+    return {}, nil, nil
+  end
+
+  local notes, read_err = notes_namespace.read_folder_namespace_notes(editor, folder.folder_id)
+  if not notes then
+    vim.notify(tostring(read_err), vim.log.levels.ERROR)
+    return {}, nil, nil
+  end
+
+  return notes, namespace_or_err, {
+    id = folder.folder_id,
+    name = folder.folder_name,
+    source_id = folder.source_id,
+  }
+end
 
 --- Get picker-specific note sections without changing the flat helper contract.
 ---@return NotePickerSections
 function ui.editor_get_note_picker_sections()
   local editor = state.editor()
+  local handler = state.handler()
   local sections = {
     current_connection = nil,
-    global_notes = editor:namespace_get_notes("global"),
+    global_namespace_id = nil,
+    current_folder = nil,
+    global_notes = {},
     local_notes = {},
   }
 
-  local conn = state.handler():get_current_connection()
+  local conn = handler:get_current_connection()
   if not (conn and conn.id ~= nil) then
     return sections
   end
@@ -274,43 +338,62 @@ function ui.editor_get_note_picker_sections()
     id = conn_id,
     name = conn.name or conn_id,
   }
+  local folder_notes, global_namespace_id, current_folder = folder_notes_for_connection(editor, handler, conn_id)
+  sections.global_notes = folder_notes
+  sections.global_namespace_id = global_namespace_id
+  sections.current_folder = current_folder
   sections.local_notes = editor:namespace_get_notes(conn_id)
 
   return sections
 end
 
---- Get all notes from all namespaces.
+--- Get notes for one connection's folder namespace and local namespace.
 --- Returns a flat list with namespace info included.
+---@param conn_id connection_id
 ---@return { id: note_id, name: string, namespace: namespace_id, file: string?, bufnr: integer? }[]
-function ui.editor_get_all_notes()
+function ui.editor_get_notes_for_connection(conn_id)
   local editor = state.editor()
+  local handler = state.handler()
   local all_notes = {}
 
-  -- Get global notes
-  for _, note in ipairs(editor:namespace_get_notes("global")) do
+  if not conn_id or conn_id == "" then
+    return all_notes
+  end
+
+  local folder_notes, folder_namespace = folder_notes_for_connection(editor, handler, tostring(conn_id))
+  if folder_namespace then
+    for _, note in ipairs(folder_notes) do
+      table.insert(all_notes, {
+        id = note.id,
+        name = note.name,
+        namespace = folder_namespace,
+        file = note.file,
+        bufnr = note.bufnr,
+      })
+    end
+  end
+
+  for _, note in ipairs(editor:namespace_get_notes(tostring(conn_id))) do
     table.insert(all_notes, {
       id = note.id,
       name = note.name,
-      namespace = "global",
+      namespace = tostring(conn_id),
       file = note.file,
       bufnr = note.bufnr,
     })
   end
 
-  -- Get local notes for current connection
+  return all_notes
+end
+
+--- Get all notes from the active folder namespace and current local namespace.
+--- Returns a flat list with namespace info included.
+---@return { id: note_id, name: string, namespace: namespace_id, file: string?, bufnr: integer? }[]
+function ui.editor_get_all_notes()
   local handler = state.handler()
   local conn = handler:get_current_connection()
   if conn then
-    local namespace = tostring(conn.id)
-    for _, note in ipairs(editor:namespace_get_notes(namespace)) do
-      table.insert(all_notes, {
-        id = note.id,
-        name = note.name,
-        namespace = conn.name or namespace,
-        file = note.file,
-        bufnr = note.bufnr,
-      })
-    end
+    return ui.editor_get_notes_for_connection(tostring(conn.id))
   end
 
   return all_notes

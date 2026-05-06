@@ -515,9 +515,9 @@ local function append_note_picker_section(items, title, notes, tag, empty_hint)
 end
 
 ---@param picker_handle table?
----@param namespace_id string  "global" or connection_id
----@param label string  "global" or connection display name
-local function create_note_via_prompt(picker_handle, namespace_id, label)
+---@param label string
+---@param create fun(name: string): note_id|nil, string?
+local function create_note_via_prompt(picker_handle, label, create)
   vim.ui.input({ prompt = ("New %s note name: "):format(label) }, function(name)
     if name == nil then
       return
@@ -528,13 +528,13 @@ local function create_note_via_prompt(picker_handle, namespace_id, label)
       return
     end
 
-    local ok, result = pcall(api.ui.editor_namespace_create_note, namespace_id, name)
+    local ok, result, err = pcall(create, name)
     if not ok then
       utils.log("error", "Failed to create note: " .. tostring(result))
       return
     end
     if not result then
-      utils.log("error", "Failed to create note (no id returned)")
+      utils.log("error", "Failed to create note: " .. tostring(err or "no id returned"))
       return
     end
 
@@ -559,15 +559,18 @@ function dbee.pick_notes()
   local global_notes = sections.global_notes or {}
   local local_notes = sections.local_notes or {}
   local current_connection = sections.current_connection
+  local current_folder = sections.current_folder
 
   local items = {}
 
   -- Always include hint row advertising the create keybinds.
   local hint_text
-  if current_connection then
+  if current_connection and current_folder then
     hint_text = ("<C-g> new global  ·  <C-l> new local (%s)"):format(current_connection.name)
+  elseif current_connection then
+    hint_text = ("<C-l> new local (%s)  ·  (add to folder for global notes)"):format(current_connection.name)
   else
-    hint_text = "<C-g> new global  ·  (connect to enable local notes)"
+    hint_text = "(open a connection to enable notes)"
   end
   append_note_picker_row(items, {
     kind = "hint",
@@ -575,17 +578,15 @@ function dbee.pick_notes()
     disabled = true,
   })
 
-  if #global_notes > 0 then
-    append_note_picker_section(items, "Global notes", global_notes, nil)
+  local global_empty_hint
+  if current_connection and current_folder then
+    global_empty_hint = "No global notes — press <C-g> to create"
+  elseif current_connection then
+    global_empty_hint = "Add this connection to a folder to enable global notes"
   else
-    append_note_picker_section(
-      items,
-      "Global notes",
-      global_notes,
-      nil,
-      "No global notes — press <C-g> to create"
-    )
+    global_empty_hint = "Connect to a database to enable notes"
   end
+  append_note_picker_section(items, "Global notes", global_notes, nil, #global_notes == 0 and global_empty_hint or nil)
 
   if current_connection then
     append_note_picker_section(
@@ -627,14 +628,25 @@ function dbee.pick_notes()
     end,
     actions = {
       dbee_new_global_note = function(picker_self)
-        create_note_via_prompt(picker_self, "global", "global")
+        if not current_folder then
+          vim.notify(
+            "Connection not in any folder; cannot create global note. Add to a folder first.",
+            vim.log.levels.WARN
+          )
+          return
+        end
+        create_note_via_prompt(picker_self, "global", function(name)
+          return api.ui.editor_create_note_in_folder(current_folder.id, name)
+        end)
       end,
       dbee_new_local_note = function(picker_self)
         if not current_connection then
-          utils.log("warn", "No active connection — connect first to create a local note")
+          utils.log("warn", "No active connection - connect first to create a local note")
           return
         end
-        create_note_via_prompt(picker_self, current_connection.id, current_connection.name)
+        create_note_via_prompt(picker_self, current_connection.name, function(name)
+          return api.ui.editor_namespace_create_note(current_connection.id, name)
+        end)
       end,
     },
     win = {
@@ -847,7 +859,7 @@ function dbee.pick_history()
       local query = call.query or ""
       local query_lines = vim.split(query, "\n")
       if #query_lines > 0 and query_lines[1] ~= "" then
-        local all_notes = api.ui.editor_get_all_notes()
+        local all_notes = api.ui.editor_get_notes_for_connection(item.entry.conn_id)
         for _, note in ipairs(all_notes) do
           -- Read from file on disk (works even if buffer isn't loaded)
           local file_lines = {}
