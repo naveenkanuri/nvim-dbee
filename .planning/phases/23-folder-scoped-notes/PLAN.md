@@ -108,14 +108,14 @@ Wave 1 establishes the runtime namespace decision. Wave 2 depends on those helpe
 | H | `lua/dbee/ui/drawer/init.lua` | Folder add/delete/move actions. | Add mkdirs namespace with unwind on failure; delete cascades notes with confirmation; move only changes lookup result. |
 | I | `lua/dbee/ui/drawer/convert.lua` | Folder row action decoration and retired global master node. | Row-level delete uses same note cascade path; `__master_note_global__` and `editor_namespace_nodes(editor, "global", ...)` disappear. |
 | J | `plugin/dbee.lua` / `lua/dbee.lua` / `README.md` | `:Dbee notes_migration_cleanup_backups` and `:Dbee notes_migration_inspect`. | Completion callback includes both subcommands; cleanup deletes canonical backup paths only after prompt/explicit command; inspect is pure-read for migration artifacts; README documents both commands. |
-| K | `ci/headless/check_folder_scoped_notes.lua` | New Phase 23 behavior suite. | Emits 84 behavior/migration markers plus one diagnostic perf marker. |
+| K | `ci/headless/check_folder_scoped_notes.lua` | New Phase 23 behavior suite. | Emits 90 behavior/migration markers plus one diagnostic perf marker. |
 | L | `ci/headless/check_notes_picker.lua` | Phase 19 preservation. | Emits existing NOTES01 markers plus folder-scoped cases. |
 | M | `ci/headless/check_folder_persistence.lua` / `check_drawer_folders.lua` | FOLDER15 preservation. | Existing FOLDER15 markers remain green. |
-| N | `Makefile` / `check_ux13_rollup.lua` | Rollup and locked-helper guard. | Emits `GN23_STRICT_MARKER_COUNT=88` and `GN23_ALL_PASS=true`; count check is the last rollup assertion. |
+| N | `Makefile` / `check_ux13_rollup.lua` | Rollup and locked-helper guard. | Emits `GN23_STRICT_MARKER_COUNT=94` and `GN23_ALL_PASS=true`; count check is the last rollup assertion. |
 
 ## Strict Markers
 
-`GN23_STRICT_MARKER_COUNT` target is **88**. `GN23_ALL_PASS=true` is the final rollup sentinel and is not counted in the 88 strict markers. The folder ID path guard marker was already part of r1 and is retained with stricter regex-only coverage, so the 13 r1-review additions net to +12 new marker names. Revision r2 adds five strict markers for fresh-user migration, same-filesystem staging, per-file promotion, runtime cross-source collision checks, and stale scratch-dir GC. Revision r3 adds seven strict markers for persisted promote manifests, final-path recovery validation, zero-folder backup fatality, configured notes-dir migration, re-entry guard timing, README cleanup documentation, and zero-folder backup notification. Revision r4 adds nine strict markers for the fatal migration latch, post-lock folder reload, load-uncertainty fail-closed behavior, folder-note creation authority, recovery precedence, atomic backup rename, namespace authority grep guard, read-path no-invalidate behavior, and delete cache clearing. Revision r5 adds eleven strict markers for drawer global-node removal, pre-handler migration-in-progress probing, stronger recovery validation, notes-dir bootstrap, latch ordering/helper guards, folder-cache invalidation gating, migration inspect command, editor-owned delete entry, error-kind vocabulary lock, and promote/recovery manifest correlation. Revision r6 replaces the sticky in-progress latch with a pre-register age-aware probe, drops the old lock-in-progress and latch-first-statement markers, and adds fifteen strict markers for probe placement, stale-lock aging, reserved folder prefixes, recovery ordering, reserved destination sets, single-source migration messages, latch semantics, bounded latch-bypassing inspection, namespace input validation, lexical helper order, notes_namespace public/internal split, drawer-removal user notification, inspect output schema, and namespace cache annotation. Revision r7 adds three strict markers for folder-namespace read authority, retiring the `"global"` namespace across all EditorUI paths, and documenting `register()` failure as out of Phase 23 migration-latch scope. One diagnostic marker, `GN23_MIGRATION_PERF_BUDGET_DIAGNOSTIC`, is emitted but not counted.
+`GN23_STRICT_MARKER_COUNT` target is **94**. `GN23_ALL_PASS=true` is the final rollup sentinel and is not counted in the 94 strict markers. The folder ID path guard marker was already part of r1 and is retained with stricter regex-only coverage, so the 13 r1-review additions net to +12 new marker names. Revision r2 adds five strict markers for fresh-user migration, same-filesystem staging, per-file promotion, runtime cross-source collision checks, and stale scratch-dir GC. Revision r3 adds seven strict markers for persisted promote manifests, final-path recovery validation, zero-folder backup fatality, configured notes-dir migration, re-entry guard timing, README cleanup documentation, and zero-folder backup notification. Revision r4 adds nine strict markers for the fatal migration latch, post-lock folder reload, load-uncertainty fail-closed behavior, folder-note creation authority, recovery precedence, atomic backup rename, namespace authority grep guard, read-path no-invalidate behavior, and delete cache clearing. Revision r5 adds eleven strict markers for drawer global-node removal, pre-handler migration-in-progress probing, stronger recovery validation, notes-dir bootstrap, latch ordering/helper guards, folder-cache invalidation gating, migration inspect command, editor-owned delete entry, error-kind vocabulary lock, and promote/recovery manifest correlation. Revision r6 replaces the sticky in-progress latch with a pre-register age-aware probe, drops the old lock-in-progress and latch-first-statement markers, and adds fifteen strict markers for probe placement, stale-lock aging, reserved folder prefixes, recovery ordering, reserved destination sets, single-source migration messages, latch semantics, bounded latch-bypassing inspection, namespace input validation, lexical helper order, notes_namespace public/internal split, drawer-removal user notification, inspect output schema, and namespace cache annotation. Revision r7 adds three strict markers for folder-namespace read authority, retiring the `"global"` namespace across all EditorUI paths, and documenting `register()` failure as out of Phase 23 migration-latch scope. Revision r8 authorizes impl-fix r2 drift and adds six strict markers for missing-folder fail-closed namespace creation, legacy local namespace rename, retryable post-register lock handling, all-consumers namespace authority routing, stable same-filesystem preflight signatures, and stale scratch GC before sentinel fast-exit. One diagnostic marker, `GN23_MIGRATION_PERF_BUDGET_DIAGNOSTIC`, is emitted but not counted.
 
 Behavior and migration markers:
 
@@ -207,6 +207,12 @@ Behavior and migration markers:
 86. `GN23_NOTES01_PICKER_CONTRACT_PRESERVED_OK`
 87. `GN23_LOCKED_HELPERS_UNTOUCHED_OK`
 88. `GN23_NO_GO_RPC_ADDED_OK`
+89. `GN23_FOLDER_NAMESPACE_MISSING_FOLDER_FAIL_CLOSED_OK`
+90. `GN23_LEGACY_LOCAL_NAMESPACE_RENAME_OK`
+91. `GN23_LOCK_HELD_RETRYABLE_AFTER_REGISTER_OK`
+92. `GN23_NOTES_NAMESPACE_AUTHORITY_ALL_CONSUMERS_ROUTED_OK`
+93. `GN23_PREFLIGHT_STABLE_FS_SIGNATURE_OK`
+94. `GN23_SENTINEL_FAST_EXIT_STALE_GC_OK`
 
 Diagnostic marker:
 
@@ -216,7 +222,7 @@ Owner partition:
 
 | Owner | Count | Markers |
 | --- | --- | --- |
-| `ci/headless/check_folder_scoped_notes.lua` | 84 | GN23 behavior/migration markers 1-84 plus diagnostic perf marker. |
+| `ci/headless/check_folder_scoped_notes.lua` | 90 | GN23 behavior/migration markers 1-84 and 89-94 plus diagnostic perf marker. |
 | `ci/headless/check_ux13_rollup.lua` | 4 | Preservation/guard markers 85-88 plus count/all-pass sentinels. |
 
 ## Plan-Gate r2 Concerns
