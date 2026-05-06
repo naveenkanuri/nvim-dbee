@@ -89,10 +89,10 @@ local function validate_namespace(self, namespace, opts)
     end
     return namespace
   end
-  if
-    not is_known_local_namespace(self, namespace)
-    and (namespace:find("/", 1, true) or namespace:find("\\", 1, true) or namespace:find("..", 1, true))
-  then
+  if namespace:find("\\", 1, true) or namespace:find("..", 1, true) then
+    error("invalid namespace")
+  end
+  if not is_known_local_namespace(self, namespace) and namespace:find("/", 1, true) then
     error("invalid namespace")
   end
   return namespace

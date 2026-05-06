@@ -106,9 +106,13 @@ function M.ensure_folder_namespace(notes_dir, folder_id, handler)
     if error_kind then
       return false, error_kind
     end
-    if (counts[folder_id] or 0) > 1 then
+    local count = (counts or {})[folder_id] or 0
+    if count > 1 then
       notify_duplicate_folder_id(folder_id)
       return false, "duplicate_folder_id"
+    end
+    if count ~= 1 then
+      return false, "folder_not_found"
     end
   end
 
