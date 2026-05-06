@@ -2641,6 +2641,194 @@ function Handler:source_get_folders(source_id)
 end
 
 ---@private
+---@param folder_id string
+local function notify_duplicate_folder_id(folder_id)
+  vim.notify(
+    "dbee: folder_id " .. tostring(folder_id) .. " exists in multiple sources; manual sidecar repair needed",
+    vim.log.levels.ERROR
+  )
+end
+
+---@private
+---@param source Source
+---@return boolean
+local function source_supports_folders(source)
+  return type(source.supports_folders) == "function" and source:supports_folders() == true
+end
+
+---@private
+---@param source_id source_id
+---@param folder any
+---@return boolean
+local function is_source_folder_contract_valid(source_id, folder)
+  if folder == nil then
+    return true
+  end
+  if type(folder) ~= "table" or vim.islist(folder) or folder[1] ~= nil then
+    vim.notify(
+      "dbee: source " .. tostring(source_id) .. " returned multiple folders for a connection; ignoring folder lookup",
+      vim.log.levels.ERROR
+    )
+    return false
+  end
+  if type(folder.id) ~= "string" or folder.id == "" then
+    vim.notify(
+      "dbee: source " .. tostring(source_id) .. " returned invalid folder metadata; ignoring folder lookup",
+      vim.log.levels.ERROR
+    )
+    return false
+  end
+  return true
+end
+
+---@private
+---@param conn_id connection_id
+---@return source_id|nil
+function Handler:_source_id_for_connection(conn_id)
+  if not conn_id or conn_id == "" then
+    return nil
+  end
+
+  for source_id, conn_ids in pairs(self.source_conn_lookup or {}) do
+    for _, source_conn_id in ipairs(conn_ids or {}) do
+      if source_conn_id == conn_id then
+        return source_id
+      end
+    end
+  end
+
+  return nil
+end
+
+---@return table<string, integer>
+---@return string? error_kind
+function Handler:list_all_folder_ids_across_sources()
+  local counts = {}
+  local error_kind = nil
+
+  for _, source in ipairs(self:get_sources()) do
+    local ok_supports, supports = pcall(source_supports_folders, source)
+    if not ok_supports then
+      error_kind = "load_failed"
+    elseif supports then
+      if type(source.load_folders) ~= "function" then
+        error_kind = "load_failed"
+      else
+        local ok_folders, folders = pcall(source.load_folders, source)
+        if not ok_folders then
+          error_kind = "load_failed"
+        else
+          if source._folders_load_state == "load_failed" then
+            error_kind = "load_failed"
+          end
+          if type(folders) ~= "table" then
+            error_kind = "load_failed"
+          else
+            for _, folder in ipairs(folders or {}) do
+              if type(folder) == "table" and type(folder.id) == "string" and folder.id ~= "" then
+                counts[folder.id] = (counts[folder.id] or 0) + 1
+              else
+                error_kind = "load_failed"
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  return counts, error_kind
+end
+
+---@param folder_id string
+---@return { source_id: source_id, folder_id: string, folder_name: string }|nil
+---@return string? error_kind
+function Handler:get_folder_metadata(folder_id)
+  if not folder_id or folder_id == "" then
+    return nil
+  end
+
+  local counts, error_kind = self:list_all_folder_ids_across_sources()
+  if error_kind then
+    return nil, error_kind
+  end
+  if counts[folder_id] ~= 1 then
+    return nil
+  end
+
+  for _, source in ipairs(self:get_sources()) do
+    if source_supports_folders(source) and type(source.load_folders) == "function" then
+      local source_id = source:name()
+      local ok_folders, folders = pcall(source.load_folders, source)
+      if not ok_folders or source._folders_load_state == "load_failed" then
+        return nil, "load_failed"
+      end
+      for _, folder in ipairs(folders or {}) do
+        if type(folder) == "table" and folder.id == folder_id then
+          return {
+            source_id = source_id,
+            folder_id = folder.id,
+            folder_name = folder.name or folder.id,
+          }
+        end
+      end
+    end
+  end
+
+  return nil
+end
+
+---@param conn_id connection_id
+---@return { source_id: source_id, folder_id: string, folder_name: string }|nil
+---@return string? error_kind
+function Handler:get_folder_for_connection(conn_id)
+  local source_id = self:_source_id_for_connection(conn_id)
+  if not source_id then
+    return nil
+  end
+
+  local source = self.sources[source_id]
+  if not source or not source_supports_folders(source) then
+    return nil
+  end
+  if type(source.get_folder_for_connection) ~= "function" then
+    return nil
+  end
+
+  local ok_folder, folder, source_error_kind = pcall(source.get_folder_for_connection, source, conn_id)
+  if not ok_folder then
+    return nil, "load_failed"
+  end
+  if source_error_kind ~= nil and source_error_kind ~= "load_failed" then
+    return nil, "load_failed"
+  end
+  if source_error_kind == "load_failed" then
+    return nil, "load_failed"
+  end
+  if not is_source_folder_contract_valid(source_id, folder) then
+    return nil
+  end
+  if not folder then
+    return nil
+  end
+
+  local counts, error_kind = self:list_all_folder_ids_across_sources()
+  if error_kind then
+    return nil, error_kind
+  end
+  if counts[folder.id] ~= 1 then
+    notify_duplicate_folder_id(folder.id)
+    return nil
+  end
+
+  return {
+    source_id = source_id,
+    folder_id = folder.id,
+    folder_name = folder.name or folder.id,
+  }
+end
+
+---@private
 ---@param source_id source_id
 ---@return Source
 function Handler:_require_folder_capable_source(source_id)

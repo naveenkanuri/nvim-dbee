@@ -29,6 +29,7 @@ local uv = vim.loop
 ---@field file? fun(self: Source):string function which returns a source file to edit (optional)
 ---@field supports_folders? fun(self: Source):boolean return true when source supports folder grouping (optional)
 ---@field load_folders? fun(self: Source):Folder[] return source-local folders (optional)
+---@field get_folder_for_connection? fun(self: Source, conn_id: connection_id):Folder|nil, string? return one source-local folder for a connection, or nil when ungrouped/load_failed (optional)
 ---@field add_folder? fun(self: Source, name: string):string add folder and return id (optional)
 ---@field rename_folder? fun(self: Source, folder_id: string, new_name: string) rename folder (optional)
 ---@field remove_folder? fun(self: Source, folder_id: string) remove folder (optional)
@@ -411,6 +412,31 @@ function sources.FileSource:load_folders()
   end
 
   return self._folders_cache or {}
+end
+
+---@package
+---@param conn_id connection_id
+---@return Folder|nil
+---@return string? error_kind
+function sources.FileSource:get_folder_for_connection(conn_id)
+  if not conn_id or conn_id == "" then
+    return nil
+  end
+
+  local folders = self:load_folders()
+  if self._folders_load_state == "load_failed" then
+    return nil, "load_failed"
+  end
+
+  for _, folder in ipairs(folders or {}) do
+    for _, folder_conn_id in ipairs(folder.connection_ids or {}) do
+      if folder_conn_id == conn_id then
+        return folder
+      end
+    end
+  end
+
+  return nil
 end
 
 ---@package
