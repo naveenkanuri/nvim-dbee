@@ -3,6 +3,7 @@
 ## v1.5 Backlog
 
 - **Phase 23 perf polish** — manifest single-flip + `ensure_dir` hoist + per-copy `file_size` dedup. Target P95 <=250ms on the 100 legacy notes x 10 folders fixture.
+- **Phase 23 drawer delete dispatch cleanup** — consolidate the 4-site folder delete callback fan-out so hydrated and initial drawer nodes share one editor-owned delete path.
 
 ## v1.3 Backlog
 

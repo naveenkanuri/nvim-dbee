@@ -371,23 +371,44 @@ local function run_namespace_contracts()
       end, "invalid namespace")
     end
 
-    local unsafe_handler = {
-      source_conn_lookup = { ["source-main"] = { "../escape" } },
+    for _, unsafe_id in ipairs({ "../escape", "foo/../bar", "foo\\bar" }) do
+      local unsafe_handler = {
+        source_conn_lookup = { ["source-main"] = { unsafe_id } },
+        _source_id_for_connection = function(_, conn_id)
+          return conn_id == unsafe_id and "source-main" or nil
+        end,
+        get_current_connection = function()
+          return { id = unsafe_id, name = "Unsafe", type = "postgres" }
+        end,
+        register_event_listener = function() end,
+      }
+      local unsafe_editor = EditorUI:new(unsafe_handler, make_result_stub(), { directory = dir })
+      assert_errors("unsafe known local namespace " .. unsafe_id, function()
+        unsafe_editor:namespace_create_note(unsafe_id, "bad")
+      end, "invalid namespace")
+    end
+
+    local benign_handler = {
+      source_conn_lookup = { ["source-main"] = { "with.dot" } },
       _source_id_for_connection = function(_, conn_id)
-        return conn_id == "../escape" and "source-main" or nil
+        return conn_id == "with.dot" and "source-main" or nil
       end,
       get_current_connection = function()
-        return { id = "../escape", name = "Unsafe", type = "postgres" }
+        return { id = "with.dot", name = "Benign", type = "postgres" }
       end,
       register_event_listener = function() end,
     }
-    local unsafe_editor = EditorUI:new(unsafe_handler, make_result_stub(), { directory = dir })
-    local unsafe_note_id = unsafe_editor:namespace_create_note("../escape", "safe")
-    local unsafe_note = unsafe_editor:search_note(unsafe_note_id)
-    assert_match("unsafe namespace encoded path", unsafe_note.file, notes_namespace.encode_local_namespace_path("../escape"))
-    assert_true("unsafe namespace stays under notes dir", vim.startswith(unsafe_note.file, dir .. "/"))
-    assert_eq("unsafe namespace no parent escape", vim.fn.filereadable(vim.fs.joinpath(vim.fs.dirname(dir), "escape", "safe.sql")), 0)
+    local benign_editor = EditorUI:new(benign_handler, make_result_stub(), { directory = dir })
+    local benign_note_id = benign_editor:namespace_create_note("with.dot", "safe")
+    local benign_note = benign_editor:search_note(benign_note_id)
+    assert_match("benign namespace encoded path", benign_note.file, notes_namespace.encode_local_namespace_path("with.dot"))
+    assert_true("benign namespace stays under notes dir", vim.startswith(benign_note.file, dir .. "/"))
     emit("GN23_NAMESPACE_INPUT_VALIDATION_OK")
+
+    local missing, missing_err = notes_namespace.create_note_in_folder(editor, dir, handler, "folder_Missing123", "missing")
+    assert_eq("missing folder no note", missing, nil)
+    assert_eq("missing folder error", missing_err, "folder_not_found")
+    emit("GN23_FOLDER_NAMESPACE_MISSING_FOLDER_FAIL_CLOSED_OK")
 
     local retired = "namespace 'global' has been retired in Phase 23; use folder:<id> namespace via notes_namespace authority"
     assert_errors("global create retired", function()
@@ -879,6 +900,7 @@ local function run_migration_edge_contracts()
   local root = make_temp_dir()
   local ok, err = pcall(function()
     local notes_migration = require("dbee.notes_migration")
+    local notes_namespace = require("dbee.notes_namespace")
     local corrupt = make_source(root, "corrupt.json", {
       { id = "conn-corrupt", name = "Corrupt", type = "postgres", url = "postgres://corrupt" },
     }, "not-json")
@@ -928,6 +950,10 @@ local function run_migration_edge_contracts()
 
     local completed_notes = vim.fs.joinpath(root, "completed-notes")
     vim.fn.mkdir(vim.fs.joinpath(completed_notes, ".notes-migration-v1.lock"), "p")
+    local completed_stale =
+      vim.fs.joinpath(completed_notes, ".notes-migration-v1.staging-" .. tostring(vim.fn.getpid()) .. "-old")
+    vim.fn.mkdir(completed_stale, "p")
+    set_mtime(completed_stale, os.time() - 7200)
     write_file(vim.fs.joinpath(completed_notes, ".notes-migration-v1"), "done")
     local completed_load_called = false
     local completed_handler = make_handler({
@@ -950,6 +976,8 @@ local function run_migration_edge_contracts()
     local completed_result = notes_migration.maybe_run(completed_handler, completed_notes, {})
     assert_true("sentinel fast-exit result", completed_result == true)
     assert_false("sentinel fast-exit avoids source load", completed_load_called)
+    assert_path_absent("sentinel fast-exit still reaps stale scratch", completed_stale)
+    emit("GN23_SENTINEL_FAST_EXIT_STALE_GC_OK")
 
     local stale_notes = vim.fs.joinpath(root, "stale-notes")
     vim.fn.mkdir(vim.fs.joinpath(stale_notes, ".notes-migration-v1.lock"), "p")
@@ -967,6 +995,35 @@ local function run_migration_edge_contracts()
     assert_true("future stale lock removed and retried", future_result == true)
     emit("GN23_PROBE_BEFORE_REGISTER_OK")
 
+    local legacy_local_notes = vim.fs.joinpath(root, "legacy-local-notes")
+    local legacy_raw = vim.fs.joinpath(legacy_local_notes, "with.dot")
+    local legacy_encoded = vim.fs.joinpath(legacy_local_notes, notes_namespace.encode_local_namespace_path("with.dot"))
+    vim.fn.mkdir(legacy_raw, "p")
+    write_file(vim.fs.joinpath(legacy_raw, "legacy.sql"), "select 'legacy';")
+    local legacy_local_source = make_source(root, "legacy-local.json", {
+      { id = "with.dot", name = "Legacy Local", type = "postgres", url = "postgres://legacy" },
+    }, {})
+    local legacy_local_handler = make_handler({ legacy_local_source }, "with.dot")
+    local legacy_local_result = notes_migration.maybe_run(legacy_local_handler, legacy_local_notes, {})
+    assert_true("legacy local migration result", legacy_local_result == true)
+    assert_path_absent("legacy raw namespace removed", legacy_raw)
+    assert_path_exists("legacy encoded namespace created", legacy_encoded)
+    local saved_reconnect = package.loaded["dbee.reconnect"]
+    package.loaded["dbee.reconnect"] = vim.tbl_extend("force", saved_reconnect or {}, {
+      register_connection_rewritten_listener = function() end,
+      forget_call = function() end,
+    })
+    local legacy_editor = require("dbee.ui.editor"):new(
+      legacy_local_handler,
+      make_result_stub(),
+      { directory = legacy_local_notes }
+    )
+    local legacy_notes = legacy_editor:namespace_get_notes("with.dot")
+    package.loaded["dbee.reconnect"] = saved_reconnect
+    assert_eq("legacy note still readable", #legacy_notes, 1)
+    assert_eq("legacy note name", legacy_notes[1].name, "legacy.sql")
+    emit("GN23_LEGACY_LOCAL_NAMESPACE_RENAME_OK")
+
     local scratch_notes = vim.fs.joinpath(root, "scratch-notes")
     vim.fn.mkdir(scratch_notes, "p")
     local old_staging = vim.fs.joinpath(scratch_notes, ".notes-migration-v1.staging-" .. tostring(vim.fn.getpid()) .. "-old")
@@ -980,6 +1037,26 @@ local function run_migration_edge_contracts()
     assert_path_absent("old staging gc", old_staging)
     assert_path_absent("old trash gc", old_trash)
     emit("GN23_STARTUP_STALE_DIR_GC_OK")
+
+    local stable_root, stable_notes, _, stable_handler = make_migration_fixture()
+    local saved_stable_statfs = vim.loop.fs_statfs
+    local stable_statfs_calls = 0
+    vim.loop.fs_statfs = function(path)
+      stable_statfs_calls = stable_statfs_calls + 1
+      if path:find("staging%-precheck", 1) then
+        for i = 1, 100 do
+          write_file(vim.fs.joinpath(stable_notes, "volatile-" .. tostring(i)), "x")
+        end
+        return { type = 1, bsize = 4096, frsize = 2048, blocks = 5000, files = 2039 }
+      end
+      return { type = 1, bsize = 4096, frsize = 4096, blocks = 1, files = 2000 }
+    end
+    local stable_result, stable_kind = notes_migration.maybe_run(stable_handler, stable_notes, {})
+    vim.loop.fs_statfs = saved_stable_statfs
+    assert_true("stable fs ignores volatile counters " .. tostring(stable_kind), stable_result == true)
+    assert_true("stable fs statfs called", stable_statfs_calls >= 2)
+    emit("GN23_PREFLIGHT_STABLE_FS_SIGNATURE_OK")
+    cleanup_path(stable_root)
 
     local same_root, same_notes, _, same_handler = make_migration_fixture()
     local saved_statfs = vim.loop.fs_statfs
@@ -1188,12 +1265,18 @@ local function run_command_contracts()
     vim.fn.mkdir(vim.fs.joinpath(notes_dir, "global.bak"), "p")
     vim.fn.mkdir(vim.fs.joinpath(notes_dir, "global.bak.20260102030405"), "p")
     vim.fn.mkdir(vim.fs.joinpath(notes_dir, "folder:folder_Keep123"), "p")
-    write_file(vim.fs.joinpath(notes_dir, ".notes-migration-v1.last-failure.log"), string.rep("x", 11 * 1024))
+    write_file(
+      vim.fs.joinpath(notes_dir, ".notes-migration-v1.last-failure.log"),
+      string.rep("old-failure\n", 12 * 1024) .. "NEWEST_FAILURE_TOKEN\n"
+    )
     for i = 1, 60 do
       vim.fn.mkdir(vim.fs.joinpath(notes_dir, ".notes-migration-v1.staging-" .. tostring(i) .. "-x"), "p")
     end
     vim.fn.mkdir(vim.fs.joinpath(notes_dir, ".notes-migration-v1.lock"), "p")
-    write_file(vim.fs.joinpath(notes_dir, ".notes-migration-v1.promote-manifest"), string.rep("x", 65 * 1024))
+    write_file(
+      vim.fs.joinpath(notes_dir, ".notes-migration-v1.promote-manifest"),
+      '{"expected_count":1000,"entries":[' .. string.rep('{"x":"y"},', 128 * 1024) .. "{}]}"
+    )
     write_file(vim.fs.joinpath(notes_dir, ".notes-migration-v1.recovery-needed"), vim.json.encode({
       expected_count = 1,
       migration_run_ts = "2026-01-01T00:00:00Z",
@@ -1230,8 +1313,9 @@ local function run_command_contracts()
     assert_match("inspect staging count", inspect_text, "staging_dir_count=60")
     assert_match("inspect staging truncated", inspect_text, "staging_dir_count_truncated=true")
     assert_match("inspect log truncated", inspect_text, "last_failure_log_truncated=true")
+    assert_match("inspect log newest tail", inspect_text, "NEWEST_FAILURE_TOKEN")
     assert_match("inspect bounded manifest", inspect_text, "promote_manifest_summary=")
-    assert_match("inspect bounded manifest truncation", inspect_text, "truncated")
+    assert_match("inspect bounded manifest truncation", inspect_text, "truncated_size_bytes")
     assert_path_exists("inspect did not delete lock", vim.fs.joinpath(notes_dir, ".notes-migration-v1.lock"))
     emit("GN23_NOTES_MIGRATION_INSPECT_COMMAND_OK")
     emit("GN23_INSPECT_BYPASSES_FATAL_LATCH_OK")
@@ -1341,6 +1425,58 @@ local function run_state_latch_behavior_contracts()
 
     run_abort_scenario("cross_filesystem")
     run_abort_scenario("load_failed")
+
+    for _, name in ipairs(module_names) do
+      package.loaded[name] = nil
+    end
+    package.loaded["dbee.ui.common.floats"] = { configure = function() end }
+    package.loaded["dbee.ui.drawer"] = { new = function() return {} end }
+    package.loaded["dbee.ui.editor"] = { new = function() return {} end }
+    package.loaded["dbee.ui.result"] = { new = function() return {} end }
+    package.loaded["dbee.ui.call_log"] = { new = function() return {} end }
+    package.loaded["dbee.install"] = { dir = function() return root end }
+    package.loaded["dbee.handler"] = {
+      new = function()
+        return {
+          add_helpers = function() end,
+          set_current_connection = function() end,
+        }
+      end,
+    }
+    local register_count = 0
+    package.loaded["dbee.api.__register"] = function()
+      register_count = register_count + 1
+    end
+    local maybe_run_count = 0
+    package.loaded["dbee.notes_migration"] = {
+      is_migration_in_progress = function()
+        return false
+      end,
+      maybe_run = function(_, _, latch)
+        maybe_run_count = maybe_run_count + 1
+        latch.migration_attempted = true
+        if maybe_run_count == 1 then
+          return false, "lock_held"
+        end
+        return true
+      end,
+      write_last_failure_log = function()
+        return true
+      end,
+    }
+
+    local retry_notes_dir = vim.fs.joinpath(root, "notes-lock-retry")
+    local retry_state = require("dbee.api.state")
+    retry_state.setup({ sources = {}, editor = { directory = retry_notes_dir }, extra_helpers = {} })
+    local ok_first, first_err = pcall(retry_state.handler)
+    assert_false("first lock-held setup aborts", ok_first)
+    assert_match("first lock-held retryable message", tostring(first_err), "another nvim instance is migrating notes")
+    local ok_second, retry_handler = pcall(retry_state.handler)
+    assert_true("second setup retries migration", ok_second)
+    assert_true("second setup returns handler", type(retry_handler) == "table")
+    assert_eq("register called once", register_count, 1)
+    assert_eq("maybe_run retried", maybe_run_count, 2)
+    emit("GN23_LOCK_HELD_RETRYABLE_AFTER_REGISTER_OK")
     restore_modules()
   end)
   cleanup_path(root)
