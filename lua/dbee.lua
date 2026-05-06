@@ -1892,6 +1892,221 @@ function dbee.wallet_cache_clear()
   api.core.oracle_wallet_cache_clear()
 end
 
+local function notes_migration_notes_dir()
+  local ok_cfg, cfg = pcall(api.current_config)
+  cfg = ok_cfg and cfg or {}
+  return (cfg.editor and cfg.editor.directory) or (vim.fn.stdpath("state") .. "/dbee/notes")
+end
+
+local function migration_child_path(notes_dir, name)
+  if notes_dir:sub(-1) == "/" then
+    return notes_dir .. name
+  end
+  return notes_dir .. "/" .. name
+end
+
+local function migration_stat(path)
+  return (vim.uv or vim.loop).fs_stat(path)
+end
+
+local function migration_scandir(notes_dir)
+  local handle = (vim.uv or vim.loop).fs_scandir(notes_dir)
+  if not handle then
+    return {}
+  end
+  local names = {}
+  while true do
+    local name = (vim.uv or vim.loop).fs_scandir_next(handle)
+    if not name then
+      break
+    end
+    names[#names + 1] = name
+  end
+  return names
+end
+
+local function json_line_value(value)
+  if value == nil then
+    return "nil"
+  end
+  if type(value) == "table" or type(value) == "string" then
+    return vim.json.encode(value)
+  end
+  return tostring(value)
+end
+
+local function read_json_summary(path)
+  local file = io.open(path, "r")
+  if not file then
+    return nil
+  end
+  local content = file:read("*a")
+  file:close()
+  local ok, decoded = pcall(vim.json.decode, content)
+  if not ok or type(decoded) ~= "table" then
+    return { decode_error = true, size_bytes = #(content or "") }
+  end
+  local summary = {}
+  for _, key in ipairs({
+    "expected_count",
+    "promote_complete",
+    "migration_run_ts",
+    "reserved_dst_uniqueness_assertion",
+    "timestamp",
+    "backup_path",
+    "global_deleted",
+  }) do
+    if decoded[key] ~= nil then
+      summary[key] = decoded[key]
+    end
+  end
+  if type(decoded.entries) == "table" then
+    summary.entries_count = #decoded.entries
+  end
+  if type(decoded.final_paths) == "table" then
+    summary.final_paths_count = #decoded.final_paths
+  end
+  if type(decoded.folder_ids) == "table" then
+    summary.folder_ids = decoded.folder_ids
+  end
+  return summary
+end
+
+local function migration_dirs_with_prefix(notes_dir, prefix)
+  local dirs = {}
+  for _, name in ipairs(migration_scandir(notes_dir)) do
+    if name:sub(1, #prefix) == prefix then
+      local path = migration_child_path(notes_dir, name)
+      local st = migration_stat(path)
+      if st and st.type == "directory" then
+        dirs[#dirs + 1] = { path = path, mtime = st.mtime and st.mtime.sec or 0 }
+      end
+    end
+  end
+  table.sort(dirs, function(a, b)
+    return a.mtime > b.mtime
+  end)
+  local out = {}
+  local file_counts = {}
+  for i = 1, math.min(#dirs, 50) do
+    out[#out + 1] = dirs[i].path
+    local count = 0
+    local handle = (vim.uv or vim.loop).fs_scandir(dirs[i].path)
+    while handle and count < 100 do
+      local name = (vim.uv or vim.loop).fs_scandir_next(handle)
+      if not name then
+        break
+      end
+      count = count + 1
+    end
+    file_counts[dirs[i].path] = count
+  end
+  return out, #dirs, #dirs > 50, file_counts
+end
+
+local function migration_failure_excerpt(path)
+  local st = migration_stat(path)
+  if not st then
+    return 0, false, ""
+  end
+  local limit = 10 * 1024
+  local file = io.open(path, "r")
+  if not file then
+    return st.size or 0, false, ""
+  end
+  local excerpt = file:read(limit) or ""
+  file:close()
+  local truncated = (st.size or 0) > limit
+  if truncated then
+    excerpt = excerpt .. "... [truncated]"
+  end
+  return st.size or 0, truncated, excerpt
+end
+
+---Delete Phase 23 legacy global-note backups.
+---@return integer deleted_count
+function dbee.notes_migration_cleanup_backups()
+  local notes_dir = notes_migration_notes_dir()
+  local deleted = 0
+  for _, name in ipairs(migration_scandir(notes_dir)) do
+    if name:match("^global%.bak$") or name:match("^global%.bak%.%d%d%d%d%d%d%d%d%d%d%d%d%d%d$") then
+      local ok = vim.fn.delete(migration_child_path(notes_dir, name), "rf") == 0
+      if ok then
+        deleted = deleted + 1
+      end
+    end
+  end
+  if deleted == 0 then
+    vim.notify("dbee: no Phase 23 global note backups found", vim.log.levels.INFO)
+  else
+    vim.notify("dbee: removed " .. tostring(deleted) .. " Phase 23 global note backup path(s)", vim.log.levels.INFO)
+  end
+  return deleted
+end
+
+---Inspect Phase 23 migration artifacts without mutating them.
+---@return string[] lines
+function dbee.notes_migration_inspect()
+  local notes_dir = notes_migration_notes_dir()
+  local lock = migration_child_path(notes_dir, ".notes-migration-v1.lock")
+  local sentinel = migration_child_path(notes_dir, ".notes-migration-v1")
+  local recovery = migration_child_path(notes_dir, ".notes-migration-v1.recovery-needed")
+  local promote = migration_child_path(notes_dir, ".notes-migration-v1.promote-manifest")
+  local failure_log = migration_child_path(notes_dir, ".notes-migration-v1.last-failure.log")
+  local lock_stat = migration_stat(lock)
+  local staging_dirs, staging_count, staging_truncated, staging_file_counts =
+    migration_dirs_with_prefix(notes_dir, ".notes-migration-v1.staging-")
+  local trash_dirs, trash_count, trash_truncated = migration_dirs_with_prefix(notes_dir, ".notes-migration-v1.trash-")
+  local log_size, log_truncated, log_excerpt = migration_failure_excerpt(failure_log)
+
+  local lines = {
+    "notes_dir=" .. notes_dir,
+    "lock_present=" .. tostring(lock_stat ~= nil),
+    "lock_mtime_age_seconds=" .. tostring(lock_stat and lock_stat.mtime and (os.time() - lock_stat.mtime.sec) or -1),
+    "sentinel_present=" .. tostring(migration_stat(sentinel) ~= nil),
+    "sentinel_path=" .. (migration_stat(sentinel) and sentinel or "nil"),
+    "staging_dir_count=" .. tostring(staging_count),
+    "staging_dir_count_truncated=" .. tostring(staging_truncated),
+    "staging_dirs=" .. json_line_value(staging_dirs),
+    "staging_file_counts=" .. json_line_value(staging_file_counts),
+    "trash_dir_count=" .. tostring(trash_count),
+    "trash_dir_count_truncated=" .. tostring(trash_truncated),
+    "trash_dirs=" .. json_line_value(trash_dirs),
+    "recovery_needed_present=" .. tostring(migration_stat(recovery) ~= nil),
+    "recovery_needed_summary=" .. json_line_value(read_json_summary(recovery)),
+    "promote_manifest_present=" .. tostring(migration_stat(promote) ~= nil),
+    "promote_manifest_summary=" .. json_line_value(read_json_summary(promote)),
+    "last_failure_log_size_bytes=" .. tostring(log_size),
+    "last_failure_log_truncated=" .. tostring(log_truncated),
+    "last_failure_log_excerpt=" .. json_line_value(log_excerpt),
+  }
+
+  local joined = table.concat(lines, "\n")
+  if #joined > 20 * 1024 then
+    joined = joined:sub(1, 20 * 1024) .. "\noutput_truncated=true"
+    lines = vim.split(joined, "\n", { plain = true })
+  end
+
+  local artifact_present = lock_stat
+    or migration_stat(sentinel)
+    or staging_count > 0
+    or trash_count > 0
+    or migration_stat(recovery)
+    or migration_stat(promote)
+    or log_size > 0
+  if not artifact_present then
+    vim.notify("dbee: no Phase 23 notes migration artifacts found", vim.log.levels.INFO)
+  end
+
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].filetype = "dbee-notes-migration-inspect"
+  vim.bo[buf].bufhidden = "wipe"
+  vim.bo[buf].modifiable = false
+  vim.api.nvim_set_current_buf(buf)
+  return lines
+end
+
 ---Supported install commands.
 ---@alias install_command
 ---| '"wget"'

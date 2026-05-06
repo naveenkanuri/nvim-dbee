@@ -59,6 +59,12 @@ local commands = {
     require("dbee").wallet_cache_clear()
     vim.notify("DBee Oracle wallet cache cleared", vim.log.levels.INFO)
   end,
+  notes_migration_cleanup_backups = function()
+    require("dbee").notes_migration_cleanup_backups()
+  end,
+  notes_migration_inspect = function()
+    require("dbee").notes_migration_inspect()
+  end,
 }
 
 ---@param args string args in form of Dbee arg1 arg2 ...

@@ -433,6 +433,27 @@ require("dbee").setup({
 To clear the managed wallet cache, run `:DBeeWalletCacheClear`,
 `:Dbee wallet_cache_clear`, or `require("dbee").wallet_cache_clear()`.
 
+#### Phase 23 Notes Migration
+
+DBee now stores shared notes per folder. The old drawer-level global notes node is gone; use the
+notes picker (`:lua require("dbee").pick_notes()`) and press `<C-g>` while the current connection is
+inside a folder to create a folder-scoped shared note. Local notes are still created with `<C-l>`.
+
+On first launch after the change, legacy `notes/global/` files are cloned into each existing folder
+namespace and the original directory is backed up as `global.bak` or `global.bak.YYYYMMDDHHMMSS`.
+
+To inspect migration state without changing files, run `:Dbee notes_migration_inspect` or:
+
+```lua
+require("dbee").notes_migration_inspect()
+```
+
+To delete only Phase 23 legacy global-note backups, run `:Dbee notes_migration_cleanup_backups` or:
+
+```lua
+require("dbee").notes_migration_cleanup_backups()
+```
+
 #### Secrets
 
 If you don't want to have secrets laying around your disk in plain text, you can use the special
