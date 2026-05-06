@@ -31,10 +31,20 @@ m.setup_called = false
 m.config = {}
 m.migration_attempted = false
 m.migration_fatal_failed = false
+m.migration_complete = false
 
-local function _assert_migration_ok()
+local function _assert_migration_ok(opts)
   if m.migration_fatal_failed then
     error("dbee migration failed; restart nvim to retry. See notes/.notes-migration-v1.last-failure.log for details.")
+  end
+  if
+    m.core_loaded
+    and not m.migration_complete
+    and not (opts and opts.allow_incomplete_retry == true)
+  then
+    error(
+      "dbee migration not yet complete; close the other nvim instance and retry. See notes/.notes-migration-v1.last-failure.log for details."
+    )
   end
 end
 
@@ -76,9 +86,9 @@ local function setup_handler()
     _throw_migration_in_progress()
   end
 
-  _assert_migration_ok()
+  _assert_migration_ok({ allow_incomplete_retry = true })
 
-  if m.core_loaded then
+  if m.core_loaded and m.migration_complete then
     return
   end
 
@@ -86,29 +96,31 @@ local function setup_handler()
     error("setup() has not been called yet")
   end
 
-  -- register remote plugin and mark core_loaded immediately. RegisterPlugin
-  -- can only run once per session; if a later setup step throws, a retry
-  -- must NOT call register() again ("Plugin '0' is already registered").
-  register()
-  m.core_loaded = true
+  if not m.core_loaded then
+    -- register remote plugin and mark core_loaded immediately. RegisterPlugin
+    -- can only run once per session; if a later setup step throws, a retry
+    -- must NOT call register() again ("Plugin '0' is already registered").
+    register()
+    m.core_loaded = true
 
-  -- add install binary to path
-  local pathsep = ":"
-  if vim.fn.has("win32") == 1 then
-    pathsep = ";"
-  end
-  vim.env.PATH = install.dir() .. pathsep .. vim.env.PATH
+    -- add install binary to path
+    local pathsep = ":"
+    if vim.fn.has("win32") == 1 then
+      pathsep = ";"
+    end
+    vim.env.PATH = install.dir() .. pathsep .. vim.env.PATH
 
-  sync_oracle_wallet_auto_extract()
+    sync_oracle_wallet_auto_extract()
 
-  m.handler = Handler:new(m.config.sources, {
-    before_source_load = sync_oracle_wallet_auto_extract,
-  })
-  m.handler:add_helpers(m.config.extra_helpers)
+    m.handler = Handler:new(m.config.sources, {
+      before_source_load = sync_oracle_wallet_auto_extract,
+    })
+    m.handler:add_helpers(m.config.extra_helpers)
 
-  -- activate default connection if present
-  if m.config.default_connection then
-    pcall(m.handler.set_current_connection, m.handler, m.config.default_connection)
+    -- activate default connection if present
+    if m.config.default_connection then
+      pcall(m.handler.set_current_connection, m.handler, m.config.default_connection)
+    end
   end
 
   local ok_migration, migration_result, migration_error_kind = pcall(notes_migration.maybe_run, m.handler, notes_dir, m)
@@ -118,6 +130,7 @@ local function setup_handler()
     error(migration_result)
   end
   if migration_result == false and migration_error_kind == "lock_held" then
+    m.migration_attempted = false
     _throw_migration_in_progress()
   end
   if migration_result == false then
@@ -125,6 +138,9 @@ local function setup_handler()
     m.migration_fatal_failed = true
     write_migration_failure_log(notes_dir, err)
     _throw_migration_aborted(err)
+  end
+  if migration_result == true then
+    m.migration_complete = true
   end
 end
 
@@ -180,8 +196,9 @@ end
 
 ---@return Handler
 function M.handler()
-  _assert_migration_ok()
+  _assert_migration_ok({ allow_incomplete_retry = true })
   setup_handler()
+  _assert_migration_ok()
   return m.handler
 end
 

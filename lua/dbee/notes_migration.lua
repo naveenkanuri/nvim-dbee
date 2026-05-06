@@ -155,7 +155,14 @@ local function read_file(path, limit)
   if not file then
     return nil
   end
-  local content = limit and file:read(limit) or file:read("*a")
+  local content
+  if limit then
+    local size = file:seek("end") or 0
+    file:seek("set", math.max(size - limit, 0))
+    content = file:read("*a")
+  else
+    content = file:read("*a")
+  end
   file:close()
   return content
 end
@@ -263,6 +270,119 @@ end
 
 local function ensure_dir(path)
   return vim.fn.mkdir(path, "p") ~= 0
+end
+
+local function normalize_path(path)
+  return vim.fs.normalize(path):gsub("/+$", "")
+end
+
+local function path_under(path, root)
+  path = normalize_path(path)
+  root = normalize_path(root)
+  return path == root or vim.startswith(path, root .. "/")
+end
+
+local function local_namespace_rejected_for_raw_migration(namespace)
+  return namespace:find("\\", 1, true) ~= nil or namespace:find("..", 1, true) ~= nil
+end
+
+local function remove_empty_parent_dirs(notes_dir, path)
+  local root = normalize_path(notes_dir)
+  local current = normalize_path(path)
+  while current ~= root and path_under(current, root) do
+    local ok_rmdir = uv.fs_rmdir(current)
+    if not ok_rmdir then
+      break
+    end
+    current = normalize_path(dirname(current))
+  end
+end
+
+local function known_local_connection_ids(handler)
+  local ids = {}
+  local seen = {}
+  for _, conn_ids in pairs((handler and handler.source_conn_lookup) or {}) do
+    for _, conn_id in ipairs(conn_ids or {}) do
+      if type(conn_id) == "string" and conn_id ~= "" and not seen[conn_id] then
+        seen[conn_id] = true
+        ids[#ids + 1] = conn_id
+      end
+    end
+  end
+  table.sort(ids)
+  return ids
+end
+
+local function plan_legacy_local_namespace_renames(handler, notes_dir)
+  local renames = {}
+  for _, conn_id in ipairs(known_local_connection_ids(handler)) do
+    if not local_namespace_rejected_for_raw_migration(conn_id) then
+      local encoded_name = notes_namespace.encode_local_namespace_path(conn_id)
+      if encoded_name ~= conn_id then
+        local raw_path = path_join(notes_dir, conn_id)
+        local encoded_path = path_join(notes_dir, encoded_name)
+        if path_under(raw_path, notes_dir) and path_under(encoded_path, notes_dir) then
+          if is_dir(raw_path) then
+            if exists(encoded_path) then
+              vim.notify(
+                "dbee: legacy local note namespace conflict; inspect notes/.notes-migration-v1.last-failure.log",
+                vim.log.levels.ERROR
+              )
+              return nil, "legacy_local_namespace_conflict"
+            end
+            renames[#renames + 1] = {
+              conn_id = conn_id,
+              raw_path = raw_path,
+              encoded_path = encoded_path,
+              encoded_name = encoded_name,
+            }
+          end
+        end
+      end
+    end
+  end
+  table.sort(renames, function(a, b)
+    return #a.raw_path > #b.raw_path
+  end)
+  return renames
+end
+
+local function apply_legacy_local_namespace_renames(handler, notes_dir)
+  local renames, plan_err = plan_legacy_local_namespace_renames(handler, notes_dir)
+  if not renames then
+    return nil, plan_err
+  end
+
+  local applied = {}
+  for _, rename in ipairs(renames) do
+    if is_dir(rename.raw_path) then
+      if exists(rename.encoded_path) then
+        vim.notify(
+          "dbee: legacy local note namespace conflict; inspect notes/.notes-migration-v1.last-failure.log",
+          vim.log.levels.ERROR
+        )
+        return nil, "legacy_local_namespace_conflict"
+      end
+      local ok_rename, rename_err = uv.fs_rename(rename.raw_path, rename.encoded_path)
+      if not ok_rename then
+        if not is_dir(rename.raw_path) and is_dir(rename.encoded_path) then
+          applied[#applied + 1] = rename
+        else
+          if is_exdev(rename_err) then
+            vim.notify(CROSS_FS_NOTIFY, vim.log.levels.ERROR)
+            return nil, "EXDEV"
+          end
+          return nil, tostring(rename_err)
+        end
+      else
+        remove_empty_parent_dirs(notes_dir, dirname(rename.raw_path))
+        applied[#applied + 1] = rename
+      end
+    elseif is_dir(rename.encoded_path) then
+      applied[#applied + 1] = rename
+    end
+  end
+  return applied
 end
 
 local function stat_age_seconds(path)
@@ -437,9 +557,6 @@ local function fs_signature(info)
   return table.concat({
     tostring(info.type or ""),
     tostring(info.bsize or ""),
-    tostring(info.frsize or ""),
-    tostring(info.blocks or ""),
-    tostring(info.files or ""),
   }, ":")
 end
 
@@ -550,6 +667,14 @@ local function validate_promote_manifest(manifest, require_staging_absent)
     end
     if not basename_matches_planned(tostring(entry.src_basename or ""), basename(entry.planned_dst or "")) then
       return false, "planned destination basename mismatch"
+    end
+  end
+  for _, rename in ipairs(manifest.legacy_local_renames or {}) do
+    if type(rename.raw_path) ~= "string" or type(rename.encoded_path) ~= "string" then
+      return false, "legacy local rename malformed"
+    end
+    if exists(rename.raw_path) or not is_dir(rename.encoded_path) then
+      return false, "legacy local rename validation failed"
     end
   end
   return true
@@ -800,7 +925,7 @@ local function verify_staging(entries, expected_count)
   return true
 end
 
-local function promote_staging(notes_dir, staging_dir, entries, folder_ids, migration_run_ts)
+local function promote_staging(notes_dir, staging_dir, entries, folder_ids, migration_run_ts, legacy_local_renames)
   local promote_rollback_paths = {}
   local manifest = {
     expected_count = #entries,
@@ -808,6 +933,7 @@ local function promote_staging(notes_dir, staging_dir, entries, folder_ids, migr
     migration_run_ts = migration_run_ts,
     reserved_dst_uniqueness_assertion = true,
     folder_ids = vim.deepcopy(folder_ids),
+    legacy_local_renames = vim.deepcopy(legacy_local_renames or {}),
     entries = entries,
   }
 
@@ -870,7 +996,7 @@ local function migrate_zero_folder_global(notes_dir)
   )
 end
 
-local function run_fresh_migration(handler, notes_dir)
+local function run_fresh_migration(handler, notes_dir, legacy_local_renames)
   local folder_ids, folder_err = refresh_folder_snapshot_under_lock(handler)
   if not folder_ids then
     return false, folder_err
@@ -914,7 +1040,8 @@ local function run_fresh_migration(handler, notes_dir)
   end
 
   local migration_run_ts = now_iso()
-  local manifest, promote_err = promote_staging(notes_dir, staging_dir, entries, folder_ids, migration_run_ts)
+  local manifest, promote_err =
+    promote_staging(notes_dir, staging_dir, entries, folder_ids, migration_run_ts, legacy_local_renames)
   if not manifest then
     return false, promote_err
   end
@@ -951,16 +1078,21 @@ function M.maybe_run(handler, notes_dir, m)
   if m.migration_attempted then return end
   m.migration_attempted = true
 
-  if exists(sentinel_path(notes_dir)) then
-    return true
-  end
-
   if vim.fn.mkdir(notes_dir, "p") == 0 then
     vim.notify("dbee: cannot create notes directory: " .. tostring(notes_dir) .. "; check permissions", vim.log.levels.ERROR)
     error("cannot create notes directory: " .. tostring(notes_dir))
   end
 
   gc_stale_scratch_dirs(notes_dir)
+
+  local legacy_local_renames, legacy_local_err = apply_legacy_local_namespace_renames(handler, notes_dir)
+  if not legacy_local_renames then
+    return false, legacy_local_err
+  end
+
+  if exists(sentinel_path(notes_dir)) then
+    return true
+  end
 
   local ok_probe, probe_err = prelock_probe_sources(handler)
   if not ok_probe then
@@ -980,7 +1112,7 @@ function M.maybe_run(handler, notes_dir, m)
     if artifact_result ~= nil then
       return artifact_result, artifact_err
     end
-    return run_fresh_migration(handler, notes_dir)
+    return run_fresh_migration(handler, notes_dir, legacy_local_renames)
   end)
 
   remove_lock(lock_or_err)
