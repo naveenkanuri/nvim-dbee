@@ -141,7 +141,9 @@ func (c *postgresDriver) ListDatabases() (current string, available []string, er
 		if err != nil {
 			return "", nil, err
 		}
-		current = row[0].(string)
+		if v, ok := row[0].(string); ok {
+			current = v
+		}
 		break
 	}
 
@@ -157,8 +159,9 @@ func (c *postgresDriver) ListDatabases() (current string, available []string, er
 			return "", nil, err
 		}
 
-		// We know for a fact there is 1 string field (see query above)
-		available = append(available, row[0].(string))
+		if v, ok := row[0].(string); ok {
+			available = append(available, v)
+		}
 	}
 
 	return current, available, nil

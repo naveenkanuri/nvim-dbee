@@ -97,7 +97,9 @@ func (r *redshiftDriver) ListDatabases() (current string, available []string, er
 		if err != nil {
 			return "", nil, err
 		}
-		current = row[0].(string)
+		if v, ok := row[0].(string); ok {
+			current = v
+		}
 		break
 	}
 
@@ -113,7 +115,9 @@ func (r *redshiftDriver) ListDatabases() (current string, available []string, er
 			return "", nil, err
 		}
 
-		available = append(available, row[0].(string))
+		if v, ok := row[0].(string); ok {
+			available = append(available, v)
+		}
 	}
 
 	return current, available, nil

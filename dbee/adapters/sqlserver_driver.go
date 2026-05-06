@@ -143,8 +143,9 @@ func (c *sqlServerDriver) ListDatabases() (current string, available []string, e
 			return "", nil, err
 		}
 
-		// We know for a fact there is 1 string field (see query above)
-		available = append(available, row[0].(string))
+		if v, ok := row[0].(string); ok {
+			available = append(available, v)
+		}
 	}
 
 	return current, available, nil

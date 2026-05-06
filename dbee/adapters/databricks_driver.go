@@ -86,6 +86,7 @@ func (d *databricksDriver) ListDatabases() (current string, available []string, 
 	if err != nil {
 		return "", nil, err
 	}
+	defer rows.Close()
 
 	for rows.HasNext() {
 		row, err := rows.Next()

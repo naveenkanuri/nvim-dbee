@@ -84,6 +84,7 @@ func (c *clickhouseDriver) ListDatabases() (current string, available []string, 
 	if err != nil {
 		return "", nil, err
 	}
+	defer rows.Close()
 
 	for rows.HasNext() {
 		row, err := rows.Next()
@@ -92,8 +93,12 @@ func (c *clickhouseDriver) ListDatabases() (current string, available []string, 
 		}
 
 		// We know for a fact there are 2 string fields (see query above)
-		current = row[0].(string)
-		available = append(available, row[1].(string))
+		if v, ok := row[0].(string); ok {
+			current = v
+		}
+		if v, ok := row[1].(string); ok {
+			available = append(available, v)
+		}
 	}
 
 	return current, available, nil

@@ -31,6 +31,7 @@ local function encode_node_segment(parts)
 end
 
 DATABASE_SUFFIX = ID_SEP .. encode_node_segment({ "__database__" })
+M.DATABASE_SUFFIX = DATABASE_SUFFIX
 
 ---@param parent_id string
 ---@param struct { name: string, schema?: string, type: string }
