@@ -931,17 +931,7 @@ end
 ---@param refresh fun() function that refreshes the tree
 ---@return DrawerUINode[]
 function M.editor_nodes(editor, current_connection_id, refresh)
-  local nodes = {
-    NuiTree.Node({
-      id = "__master_note_global__",
-      name = "global notes",
-      type = "note",
-    }, editor_namespace_nodes(editor, "global", refresh)),
-  }
-
-  if utils.once("editor_global_expand") then
-    nodes[1]:expand()
-  end
+  local nodes = {}
 
   if current_connection_id then
     table.insert(
@@ -953,7 +943,7 @@ function M.editor_nodes(editor, current_connection_id, refresh)
       }, editor_namespace_nodes(editor, current_connection_id, refresh))
     )
     if utils.once("editor_local_expand") then
-      nodes[2]:expand()
+      nodes[1]:expand()
     end
   end
 
