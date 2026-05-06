@@ -44,6 +44,7 @@ The notes picker keeps the Phase 19 UX contract, but the "Global notes" section 
 - Migration sentinel is `notes/.notes-migration-v1`, not phase-numbered.
 - Migration scratch paths are version-coupled, not phase-coupled: `.notes-migration-v1.lock`, `.notes-migration-v1.staging-<pid>-<random>`, `.notes-migration-v1.trash-<pid>-<random>`, `.notes-migration-v1.promote-manifest`, and `.notes-migration-v1.recovery-needed`.
 - Migration must abort before any notes data filesystem mutation if any folder-capable source is in `load_failed` state or duplicate folder IDs exist across sources.
+- Migration failure is fatal for the current process: `m.migration_fatal_failed` blocks UI/editor/drawer/public accessors until restart.
 - Empty folder lists under `loaded_ok` are valid fresh-user states. If no legacy `global/` exists, write the sentinel as a no-op; if legacy `global/` contains notes but no folders exist, backup creation is mandatory before deleting `global/` and writing the sentinel.
 - Local notes stay `namespace_id = connection_id`.
 - Folder rename does not move note directories.
@@ -83,13 +84,13 @@ Wave 1 establishes the runtime namespace decision. Wave 2 depends on those helpe
 | GN-08/GN-09 | Waves 1, 3 | Duplicate/manual folder membership never creates a union. |
 | GN-10 | Waves 2, 3 | Post-migration folder creation creates an empty namespace only. |
 | GN-11 | Waves 1, 3 | Picker reads only current folder namespace plus local notes. |
-| GN-12/GN-13 | Waves 2, 3 | Migration lock/sentinel/backup behavior is covered. |
+| GN-12/GN-13 | Waves 2, 3 | Migration lock/sentinel/fatal-latch/backup behavior is covered. |
 | GN-14 | Waves 2, 3 | Editor startup never recreates `notes/global/welcome.sql`. |
-| GN-15 | Waves 2, 3 | Malformed folder IDs cannot escape the notes directory. |
+| GN-15 | Waves 1, 2, 3 | Malformed folder IDs cannot escape the notes directory, and all folder namespace construction routes through `notes_namespace`. |
 | GN-16 | Waves 2, 3 | Folder delete stages and restores on handler failure. |
 | GN-17 | Wave 3 | Locked helper git diff guard passes. |
 | GN-18 | This plan | Execution targets `lua/dbee/sources.lua`, not nonexistent `lua/dbee/sources/file.lua`. |
-| GN-19 | Waves 1, 2, 3 | Duplicate folder IDs across folder-capable sources abort migration and fail closed at runtime lookup, namespace creation, and folder delete. |
+| GN-19 | Waves 1, 2, 3 | Duplicate folder IDs or uncertain folder loads across folder-capable sources abort migration and fail closed at runtime lookup, namespace creation, and folder delete. |
 | GN-20 | Waves 2, 3 | Migration staging/trash directories are same-filesystem siblings of final namespaces; cross-filesystem rename is unsupported and aborts before destructive work. |
 
 ## Touchpoint Matrix
@@ -99,21 +100,21 @@ Wave 1 establishes the runtime namespace decision. Wave 2 depends on those helpe
 | A | `lua/dbee/sources.lua` | Optional `get_folder_for_connection(conn_id)` Source method and FileSource implementation. | Returns one normalized folder or nil; no union semantics. |
 | B | `lua/dbee/handler/init.lua` | Lua facade for active connection folder lookup. | Uses existing sources/source lookup, no `vim.fn.Dbee*` endpoint. |
 | C | `lua/dbee/api/ui.lua` | Picker section builder. | Global notes come from folder namespace or `{}`. Local notes unchanged. |
-| D | `lua/dbee.lua` | Picker create action. | `<C-g>` creates in folder namespace or emits exact no-folder error. |
-| E | `lua/dbee/notes_namespace.lua` | Folder namespace helper and lifecycle filesystem operations. | Validates folder IDs, checks runtime collisions, owns ensure/delete/list helpers. |
-| F | `lua/dbee/notes_migration.lua` / `lua/dbee/api/state.lua` | One-time migration helper and lazy-handler bootstrap hook. | Runs after `Handler:new()` loads sources and before first UI/editor creation. |
+| D | `lua/dbee.lua` | Picker create action. | `<C-g>` creates through folder namespace authority or emits exact no-folder error; local create remains local. |
+| E | `lua/dbee/notes_namespace.lua` | Folder namespace helper and lifecycle filesystem operations. | Validates folder IDs, checks runtime collisions/load uncertainty, owns ensure/delete/create/list helpers. |
+| F | `lua/dbee/notes_migration.lua` / `lua/dbee/api/state.lua` | One-time migration helper and lazy-handler bootstrap hook. | Runs after `Handler:new()` and before first UI/editor creation; fatal latch blocks accessors on migration exception. |
 | G | `lua/dbee/ui/editor/init.lua` | Startup default note selection and namespace wrapper delegation. | No automatic `global` welcome recreation; EditorUI delegates lifecycle helpers to `notes_namespace`. |
 | H | `lua/dbee/ui/drawer/init.lua` | Folder add/delete/move actions. | Add mkdirs namespace with unwind on failure; delete cascades notes with confirmation; move only changes lookup result. |
 | I | `lua/dbee/ui/drawer/convert.lua` | Folder row action decoration. | Row-level delete uses same note cascade path. |
 | J | `plugin/dbee.lua` / `lua/dbee.lua` / `README.md` | `:Dbee notes_migration_cleanup`. | Completion callback includes the subcommand; deletes canonical backup paths only after prompt/explicit command; README documents the command. |
-| K | `ci/headless/check_folder_scoped_notes.lua` | New Phase 23 behavior suite. | Emits 48 behavior/migration markers. |
+| K | `ci/headless/check_folder_scoped_notes.lua` | New Phase 23 behavior suite. | Emits 57 behavior/migration markers plus one diagnostic perf marker. |
 | L | `ci/headless/check_notes_picker.lua` | Phase 19 preservation. | Emits existing NOTES01 markers plus folder-scoped cases. |
 | M | `ci/headless/check_folder_persistence.lua` / `check_drawer_folders.lua` | FOLDER15 preservation. | Existing FOLDER15 markers remain green. |
-| N | `Makefile` / `check_ux13_rollup.lua` | Rollup and locked-helper guard. | Emits `GN23_STRICT_MARKER_COUNT=52` and `GN23_ALL_PASS=true`; count check is the last rollup assertion. |
+| N | `Makefile` / `check_ux13_rollup.lua` | Rollup and locked-helper guard. | Emits `GN23_STRICT_MARKER_COUNT=61` and `GN23_ALL_PASS=true`; count check is the last rollup assertion. |
 
 ## Strict Markers
 
-`GN23_STRICT_MARKER_COUNT` target is **52**. `GN23_ALL_PASS=true` is the final rollup sentinel and is not counted in the 52 strict markers. `GN23_FOLDER_ID_PATH_GUARD_OK` was already part of r1 and is retained with stricter regex-only coverage, so the 13 r1-review additions net to +12 new marker names. Revision r2 adds five strict markers for fresh-user migration, same-filesystem staging, per-file promotion, runtime cross-source collision checks, and stale scratch-dir GC. Revision r3 adds seven strict markers for persisted promote manifests, final-path recovery validation, zero-folder backup fatality, configured notes-dir migration, re-entry guard timing, README cleanup documentation, and zero-folder backup notification.
+`GN23_STRICT_MARKER_COUNT` target is **61**. `GN23_ALL_PASS=true` is the final rollup sentinel and is not counted in the 61 strict markers. `GN23_FOLDER_ID_PATH_GUARD_OK` was already part of r1 and is retained with stricter regex-only coverage, so the 13 r1-review additions net to +12 new marker names. Revision r2 adds five strict markers for fresh-user migration, same-filesystem staging, per-file promotion, runtime cross-source collision checks, and stale scratch-dir GC. Revision r3 adds seven strict markers for persisted promote manifests, final-path recovery validation, zero-folder backup fatality, configured notes-dir migration, re-entry guard timing, README cleanup documentation, and zero-folder backup notification. Revision r4 adds nine strict markers for the fatal migration latch, post-lock folder reload, load-uncertainty fail-closed behavior, folder-note creation authority, recovery precedence, atomic backup rename, namespace authority grep guard, read-path no-invalidate behavior, and delete cache clearing. One diagnostic marker, `GN23_MIGRATION_PERF_BUDGET_DIAGNOSTIC`, is emitted but not counted.
 
 Behavior and migration markers:
 
@@ -135,7 +136,7 @@ Behavior and migration markers:
 16. `GN23_MIGRATION_BACKUP_CREATED_OK`
 17. `GN23_GLOBAL_DIR_DELETED_OK`
 18. `GN23_MIGRATION_PARTIAL_FAILURE_ROLLBACK_OK`
-19. `GN23_MIGRATION_PER_FILE_PROMOTE_OK`
+19. `GN23_MIGRATION_PROMOTE_MANIFEST_PRE_RECORD_OK`
 20. `GN23_NEW_FOLDER_NAMESPACE_EMPTY_OK`
 21. `GN23_RENAME_FOLDER_NO_NAMESPACE_MOVE_OK`
 22. `GN23_DELETE_FOLDER_NAMESPACE_CASCADE_OK`
@@ -165,22 +166,35 @@ Behavior and migration markers:
 46. `GN23_REENTRY_GUARD_FAIL_FAST_OK`
 47. `GN23_README_MIGRATION_CLEANUP_DOCUMENTED_OK`
 48. `GN23_ZERO_FOLDER_BACKUP_NOTIFY_OK`
-49. `GN23_FOLDER15_PRESERVED_OK`
-50. `GN23_NOTES01_PICKER_CONTRACT_PRESERVED_OK`
-51. `GN23_LOCKED_HELPERS_UNTOUCHED_OK`
-52. `GN23_NO_GO_RPC_ADDED_OK`
+49. `GN23_MIGRATION_FATAL_LATCH_BLOCKS_UI_OK`
+50. `GN23_FOLDER_RELOAD_UNDER_LOCK_OK`
+51. `GN23_FOLDER_LOAD_UNCERTAINTY_FAIL_CLOSED_OK`
+52. `GN23_FOLDER_NOTE_CREATE_ROUTED_THROUGH_AUTHORITY_OK`
+53. `GN23_RECOVERY_MANIFEST_PRECEDENCE_OK`
+54. `GN23_BACKUP_ATOMIC_RENAME_OK`
+55. `GN23_FOLDER_NAMESPACE_AUTHORITY_GREP_GUARD_OK`
+56. `GN23_FOLDER_READ_PATH_NO_INVALIDATE_OK`
+57. `GN23_FOLDER_DELETE_NAMESPACE_CACHE_CLEAR_OK`
+58. `GN23_FOLDER15_PRESERVED_OK`
+59. `GN23_NOTES01_PICKER_CONTRACT_PRESERVED_OK`
+60. `GN23_LOCKED_HELPERS_UNTOUCHED_OK`
+61. `GN23_NO_GO_RPC_ADDED_OK`
+
+Diagnostic marker:
+
+- `GN23_MIGRATION_PERF_BUDGET_DIAGNOSTIC` reports the 100 legacy notes x 10 folders migration timing budget but does not contribute to `GN23_STRICT_MARKER_COUNT`.
 
 Owner partition:
 
 | Owner | Count | Markers |
 | --- | --- | --- |
-| `ci/headless/check_folder_scoped_notes.lua` | 48 | GN23 behavior/migration markers 1-48. |
-| `ci/headless/check_ux13_rollup.lua` | 4 | Preservation/guard markers 49-52 plus count/all-pass sentinels. |
+| `ci/headless/check_folder_scoped_notes.lua` | 57 | GN23 behavior/migration markers 1-57 plus diagnostic perf marker. |
+| `ci/headless/check_ux13_rollup.lua` | 4 | Preservation/guard markers 58-61 plus count/all-pass sentinels. |
 
 ## Plan-Gate r2 Concerns
 
 - Migration must run from `lua/dbee/api/state.lua` at the end of `setup_handler()`, after `Handler:new()` returns and before the first caller can create `EditorUI`.
-- Migration atomicity must use load preconditions, duplicate-folder-id guard, same-filesystem preflight, `vim.loop.fs_mkdir(path, 448)` lock acquisition, post-lock sentinel recheck, staged clone verification, per-file promotion with persisted promote-manifest, rollback of only migration-created files, and final-path recovery-manifest handling.
+- Migration atomicity must use load preconditions, load-uncertainty fail-closed checks, duplicate-folder-id guard, same-filesystem preflight, `vim.loop.fs_mkdir(path, 448)` lock acquisition, post-lock sentinel/recovery recheck, post-lock folder reload, staged clone verification, pre-recorded promote-manifest promotion, rollback of only migration-created files, final-path recovery-manifest handling, and fatal-process latch blocking after migration exceptions.
 - Fresh user state is not an error: `loaded_ok` with zero folders writes the sentinel as no-op when `global/` is absent, or backs up/deletes `global/` if legacy notes exist but no folders can receive clones; backup failure is fatal in this zero-folder branch because no clones exist.
 - Concurrent nvim instances: folder snapshot happens only after lock acquisition and post-lock sentinel recheck; folders created after that snapshot are intentionally not seeded.
 - Folder deletion: both drawer delete surfaces route through one notes namespace lifecycle helper, not direct filesystem work in convert/model.
@@ -189,6 +203,9 @@ Owner partition:
 - Editor startup must not recreate `notes/global/`; empty buffers remain empty with nil `current_note_id`.
 - Path safety: `^folder_[A-Za-z0-9]+$` is the sole folder ID gate for every `folder:<id>` namespace construction path.
 - Runtime collision safety: lookup, namespace creation, and folder delete fail closed when a folder ID appears in more than one folder-capable source.
+- Runtime folder load uncertainty is also fail-closed at lookup, ensure, delete, and migration.
+- Folder-scoped note creation routes through `notes_namespace` authority; raw `EditorUI:namespace_create_note("folder:<id>")` is blocked without an authority flag.
+- Promote manifest uses a pre-recorded manifest with two atomic writes total, not per-rename rewrite/read-back.
 - Prompt path drift: implementation must target `lua/dbee/sources.lua`.
 
 <deferred>
