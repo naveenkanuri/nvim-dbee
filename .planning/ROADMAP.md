@@ -381,7 +381,7 @@ Phase 13 -> Phase 14 -> Phase 15. Phase 16 is conditional at Phase 15 ship.
 
 **Date opened:** 2026-05-04
 **Goal:** Extend rich-table-metadata X.1 (Oracle, shipped) to PostgreSQL; restore notes UX; surface metadata in LSP completion; add reverse FK references; close pending Oracle bind-name + cache cleanup work.
-**Phase ordering (post-Phase-17 SHIP, renumbered 2026-05-05):** Phase 17 (Postgres rich-meta, SHIPPED) → Phase 18 (DB nesting UX) → Phase 19 (notes-create-via-snacks fix, SHIPPED) → Phase 20 (live-PG smoke test) → Phase 21 (LSP completion annotations + FK reverse refs) → Phase 22 (X.3 stub adapters + perf/cache cleanup + Oracle bind audit).
+**Phase ordering (post-Phase-18 SHIP):** Phase 17 (Postgres rich-meta, SHIPPED) → Phase 18 (DB nesting UX, SHIPPED) → Phase 19 (notes-create-via-snacks fix, SHIPPED) → Phase 23 (folder-scoped global notes, IN PROGRESS — jumped queue per user request 2026-05-05) → Phase 20 (live-PG smoke test) → Phase 21 (LSP completion annotations + FK reverse refs) → Phase 22 (X.3 stub adapters + perf/cache cleanup + Oracle bind audit).
 
 ### Phase 17: Rich Table Metadata X.2 — PostgreSQL Adapter (SHIPPED)
 **Depends on**: Phase 16 (Oracle X.1 architecture, shipped + validated)
@@ -390,18 +390,12 @@ Phase 13 -> Phase 14 -> Phase 15. Phase 16 is conditional at Phase 15 ship.
 **Success Criteria**: ALL met. 35/35 RICH_PG_* strict markers green; RICH_PG_ALL_PASS=true; RICH16/ARCH14/FOLDER15/LSP12 rollups preserved.
 **Plans**: 6 wave plans + CONTEXT + 2 RESEARCH at `.planning/phases/17-rich-table-metadata-postgres/`.
 
-### Phase 18: DB Nesting UX — schemas under current selected database
+### Phase 18: DB Nesting UX — schemas under current selected database (SHIPPED)
 **Depends on**: Phase 17 (SHIPPED)
-**Requirements**: TBD by discuss-phase (cross-adapter UX design)
-**Status**: Discuss + research IN PROGRESS (Codex thread). User-requested 2026-05-05 PM after Phase 17 testing — schemas should nest UNDER the database node (DBeaver-style), not as siblings of the database info node.
-**Open questions for discuss**:
-  1. Cross-adapter implications — Oracle (PDB), MySQL (DB == schema), SQLite (single file), ClickHouse, Mongo, DuckDB.
-  2. Single-DB connection edge case — collapse DB node if redundant?
-  3. Where does `database_switch_node` live after nesting?
-  4. Phase 14 schema_filter_authority (LOCKED) compatibility.
-  5. System-schema collapse (`pg_catalog`/`information_schema`).
-  6. Existing user expanded-state cache backward-compat.
-**Plans**: TBD after discuss-lock.
+**Requirements**: DBEE-FEAT-06 (DBeaver-style hierarchy for adapters with real DB tier)
+**Status**: SHIPPED 2026-05-06 `db822e5`. 8 commits + 1 amendment. User-verified live PG16 — DB node renders, schemas nest under it, system schemas as ordinary rows.
+**Success Criteria**: ALL met. 34/34 DB18_* strict markers (29 behavior + 5 preservation); DB18_ALL_PASS=true; ARCH14/FOLDER15/RICH16/RICH_PG/LSP12/DRAW01 preservation gates GREEN.
+**Plans**: PLAN.md + 18-01..18-03-PLAN.md + 18-CONTEXT.md at `.planning/phases/18-db-nesting/`.
 
 ### Phase 19: Notes-Create-Via-Snacks-Picker (SHIPPED)
 **Depends on**: none (independent UX fix)
@@ -425,13 +419,32 @@ Phase 13 -> Phase 14 -> Phase 15. Phase 16 is conditional at Phase 15 ship.
 **Status**: Backlog. May be split or expanded based on live testing. (Was Phase 19 pre-2026-05-05 renumbering.)
 **Plans**: TBD.
 
-## v1.4 Progress
+### Phase 23: Folder-Scoped Global Notes
+**Depends on**: Phase 15 (FOLDER15 connection folders, shipped), Phase 19 (notes-create-via-snacks-picker, shipped)
+**Requirements**: Re-scope global notes from installation-wide to per-folder. Connections inherit notes from their folder; connections not in any folder show empty global picker.
+**Status**: Discuss + research + plan IN PROGRESS 2026-05-06 (jumped queue per user request).
+**Locked decisions** (pre-research):
+  - GN-LOCKED-1 (Fork 1a): No-folder connection → empty global picker. Installation-wide global REMOVED.
+  - GN-LOCKED-2 (Fork 2a): Namespace = directory. `notes/folder:<folder_id>/<note>.sql`. Stable folder_id (rename = no file moves).
+  - GN-LOCKED-3 (Fork 3): One-time migration clones existing `notes/global/*.sql` into BOTH current folder namespaces. Original `global/` deleted post-clone.
+  - GN-LOCKED-4: Local notes (per-connection) unchanged.
+  - GN-LOCKED-5: Folder ops cascade (create=mkdir, delete=rmdir+confirm, rename=no-op since folder_id stable, conn move = picker namespace switch only).
+  - GN-LOCKED-6: Phase 19 picker contract preserved. `<C-g>` errors if connection not in any folder.
+**Open questions** (resolve in research/plan):
+  1. Folder-lookup-for-connection API location (Source vs drawer-cache vs Handler RPC)
+  2. Multi-folder membership constraint validation
+  3. Migration concurrency safety
+  4. Migration backup retention
+  5. Folder created post-migration → empty (no clone of legacy global)
+  6. namespace_id naming (`folder:<id>` colon separator)
+**Plans**: TBD by combined discuss+research+plan kickoff.
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 17. Rich Table Metadata X.2 (Postgres) | 6/6 | SHIPPED | 2026-05-05 |
-| 18. DB Nesting UX | 0/TBD | Discuss + research IN PROGRESS | - |
+| 18. DB Nesting UX | 3/3 | SHIPPED | 2026-05-06 |
 | 19. Notes-Create-Via-Snacks Picker | 1/1 | SHIPPED | 2026-05-05 |
 | 20. Live-PG Smoke Test | 0/TBD | Backlog | - |
 | 21. LSP Completion Annotations + FK Reverse | 0/TBD | Pending | - |
 | 22. X.3 stubs + perf/cache cleanup + Oracle bind audit | 0/TBD | Backlog | - |
+| 23. Folder-Scoped Global Notes | 0/TBD | Discuss + research + plan IN PROGRESS | - |
