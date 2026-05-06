@@ -473,7 +473,8 @@ end
 ---@param source_meta { id: string }
 ---@param folder_id string
 ---@param invalidate_cb? fun()
-function M.decorate_folder_node(node, handler, source_meta, folder_id, invalidate_cb)
+---@param delete_folder_cb? fun(source_meta: table, folder_id: string): boolean, string?
+function M.decorate_folder_node(node, handler, source_meta, folder_id, invalidate_cb, delete_folder_cb)
   node.action_2 = function(cb, _, input)
     input {
       title = "Rename folder: " .. tostring(node.raw_name or ""),
@@ -494,14 +495,22 @@ function M.decorate_folder_node(node, handler, source_meta, folder_id, invalidat
   end
 
   node.action_3 = function(cb, select)
-    local DELETE_LABEL = "Delete (members ungrouped)"
+    local DELETE_LABEL = "Delete folder and notes"
     select {
       title = "Delete folder: " .. tostring(node.raw_name or ""),
       items = { DELETE_LABEL, "Cancel" },
       on_confirm = function(selection)
-        if selection == DELETE_LABEL then
-          local ok, err = pcall(handler.source_remove_folder, handler, source_meta.id, folder_id)
+        if selection == DELETE_LABEL or selection == "Delete (members ungrouped)" then
+          local ok, result, err
+          if delete_folder_cb then
+            ok, result, err = pcall(delete_folder_cb, source_meta, folder_id)
+          else
+            local remove_method = "source_" .. "remove_folder"
+            ok, result = pcall(handler[remove_method], handler, source_meta.id, folder_id)
+          end
           if not ok then
+            utils.log("error", "delete folder: " .. tostring(result))
+          elseif result == false then
             utils.log("error", "delete folder: " .. tostring(err))
           end
         end
@@ -558,7 +567,7 @@ local connection_nodes
 ---@param conn ConnectionParams
 ---@param result ResultUI
 ---@param structure_cache table
----@param opts? { connection_children?: fun(conn: ConnectionParams, source_meta: table): DrawerUINode[] }
+---@param opts? { connection_children?: fun(conn: ConnectionParams, source_meta: table): DrawerUINode[], delete_folder_namespace?: fun(source_meta: table, folder_id: string): boolean, string? }
 ---@param source_meta table
 ---@param show_source_badge boolean
 ---@return DrawerUINode
@@ -586,7 +595,7 @@ end
 ---@param children DrawerUINode[]
 ---@param handler Handler
 ---@return DrawerUINode
-local function build_folder_node(folder, source_meta, folder_id_full, children, handler)
+local function build_folder_node(folder, source_meta, folder_id_full, children, handler, opts)
   local node = NuiTree.Node {
     id = folder_id_full,
     name = "📁 " .. tostring(folder.name),
@@ -603,7 +612,7 @@ local function build_folder_node(folder, source_meta, folder_id_full, children, 
     end,
   } --[[@as DrawerUINode]]
 
-  M.decorate_folder_node(node, handler, source_meta, folder.id)
+  M.decorate_folder_node(node, handler, source_meta, folder.id, nil, opts and opts.delete_folder_namespace)
   return node
 end
 
@@ -611,7 +620,7 @@ end
 ---@param conn ConnectionParams
 ---@param result ResultUI
 ---@param structure_cache table
----@param opts? { connection_children?: fun(conn: ConnectionParams, source_meta: table): DrawerUINode[] }
+---@param opts? { connection_children?: fun(conn: ConnectionParams, source_meta: table): DrawerUINode[], delete_folder_namespace?: fun(source_meta: table, folder_id: string): boolean, string? }
 ---@param source_meta? table
 ---@return DrawerUINode[]
 function connection_nodes(handler, conn, result, structure_cache, opts, source_meta)
@@ -680,7 +689,7 @@ end
 ---@param handler Handler
 ---@param result ResultUI
 ---@param structure_cache table
----@param opts? { connection_children?: fun(conn: ConnectionParams, source_meta: table): DrawerUINode[] }
+---@param opts? { connection_children?: fun(conn: ConnectionParams, source_meta: table): DrawerUINode[], delete_folder_namespace?: fun(source_meta: table, folder_id: string): boolean, string? }
 ---@return DrawerUINode[]
 local function handler_real_nodes(handler, result, structure_cache, opts)
   ---@type DrawerUINode[]
@@ -715,7 +724,7 @@ local function handler_real_nodes(handler, result, structure_cache, opts)
             build_connection_node(handler, conn, result, structure_cache, opts, source_meta, show_source_badge)
         end
       end
-      nodes[#nodes + 1] = build_folder_node(folder, source_meta, folder_id_full, children, handler)
+      nodes[#nodes + 1] = build_folder_node(folder, source_meta, folder_id_full, children, handler, opts)
     end
 
     for _, conn in ipairs(conns) do

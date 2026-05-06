@@ -1041,6 +1041,13 @@ local function searchable_node_to_tree_node(ui, node, inherited_conn_id, childre
   elseif node.type == "folder" and node.source_meta and node.folder_id then
     convert.decorate_folder_node(tree_node, ui.handler, node.source_meta, node.folder_id, function()
       invalidate_authoritative_caches(ui)
+    end, function(source_meta, folder_id)
+      if ui.editor and type(ui.editor.delete_folder_namespace) == "function" then
+        return ui.editor:delete_folder_namespace(source_meta.id, folder_id)
+      end
+      local remove_method = "source_" .. "remove_folder"
+      ui.handler[remove_method](ui.handler, source_meta.id, folder_id)
+      return true
     end)
   elseif SEARCHABLE_TYPES[node.type] then
     local struct_meta = node.struct_meta or {
@@ -3601,6 +3608,42 @@ function DrawerUI:get_actions()
     end
   end
 
+  local function ensure_folder_namespace_or_unwind(source_id, folder_id, orphan_message)
+    if self.editor and type(self.editor.ensure_folder_namespace) == "function" then
+      local ok_ensure, ensure_err = self.editor:ensure_folder_namespace(folder_id)
+      if ok_ensure then
+        return
+      end
+      local ok_unwind, unwind_err = pcall(handler.source_remove_folder, handler, source_id, folder_id)
+      if not ok_unwind then
+        vim.notify(
+          orphan_message .. " " .. tostring(folder_id) .. " orphaned in source — manual cleanup needed",
+          vim.log.levels.ERROR
+        )
+        error(tostring(ensure_err) .. "; unwind failed: " .. tostring(unwind_err))
+      end
+      error(tostring(ensure_err))
+    end
+  end
+
+  local function add_folder_with_namespace(source_id, name, orphan_prefix)
+    local folder_id = handler:source_add_folder(source_id, name)
+    ensure_folder_namespace_or_unwind(source_id, folder_id, orphan_prefix)
+    return folder_id
+  end
+
+  local function delete_folder_via_editor(source_id, folder_id)
+    if self.editor and type(self.editor.delete_folder_namespace) == "function" then
+      local ok_delete, delete_err = self.editor:delete_folder_namespace(source_id, folder_id)
+      if not ok_delete then
+        error(delete_err)
+      end
+      return
+    end
+    local remove_method = "source_" .. "remove_folder"
+    handler[remove_method](handler, source_id, folder_id)
+  end
+
   local function collapse_node(node)
     if node:collapse() then
       self.tree:render()
@@ -4016,11 +4059,11 @@ function DrawerUI:get_actions()
               title = "New folder name",
               default = "",
               on_confirm = function(name)
-                if name and name ~= "" then
-                  _guarded_folder_mutation("add folder", function()
-                    handler:source_add_folder(source_meta.id, name)
-                  end, on_done)
-                else
+	                if name and name ~= "" then
+	                  _guarded_folder_mutation("add folder", function()
+	                    add_folder_with_namespace(source_meta.id, name, "dbee: add folder failed; folder")
+	                  end, on_done)
+	                else
                   on_done()
                 end
               end,
@@ -4085,14 +4128,14 @@ function DrawerUI:get_actions()
             return
           end
 
-          local DELETE_LABEL = "Delete (members ungrouped)"
+          local DELETE_LABEL = "Delete folder and notes"
           select {
             title = "Delete folder: " .. tostring(node.raw_name or ""),
             items = { DELETE_LABEL, "Cancel" },
             on_confirm = function(selection)
-              if selection == DELETE_LABEL then
+              if selection == DELETE_LABEL or selection == "Delete (members ungrouped)" then
                 _guarded_folder_mutation("delete folder", function()
-                  handler:source_remove_folder(node.source_meta.id, node.folder_id)
+                  delete_folder_via_editor(node.source_meta.id, node.folder_id)
                 end, on_done)
               else
                 on_done()
@@ -4184,11 +4227,12 @@ function DrawerUI:get_actions()
                   title = "New folder name",
                   default = "",
                   on_confirm = function(new_name)
-                    if new_name and new_name ~= "" then
-                      _guarded_folder_mutation("create+move", function()
-                        local id = handler:source_add_folder(source_id, new_name)
-                        handler:source_move_connection(source_id, conn_id, id)
-                      end, on_done)
+	                    if new_name and new_name ~= "" then
+	                      _guarded_folder_mutation("create+move", function()
+	                        local id =
+	                          add_folder_with_namespace(source_id, new_name, "dbee: add folder failed; folder")
+	                        handler:source_move_connection(source_id, conn_id, id)
+	                      end, on_done)
                     else
                       on_done()
                     end
@@ -4321,10 +4365,10 @@ function DrawerUI:get_actions()
                   title = "New folder name",
                   default = "",
                   on_confirm = function(new_name)
-                    if new_name and new_name ~= "" then
-                      _guarded_folder_mutation("create+move " .. #conn_ids, function()
-                        local id = handler:source_add_folder(source_id, new_name)
-                        handler:source_move_connections(source_id, conn_ids, id)
+	                    if new_name and new_name ~= "" then
+	                      _guarded_folder_mutation("create+move " .. #conn_ids, function()
+	                        local id = add_folder_with_namespace(source_id, new_name, "dbee: bulk add failed; folder")
+	                        handler:source_move_connections(source_id, conn_ids, id)
                         if skipped > 0 then
                           utils.log("info", string.format("Moved %d connection(s); skipped %d non-connection row(s)", #conn_ids, skipped))
                         end
@@ -4911,6 +4955,14 @@ function DrawerUI:refresh()
       disable_help = self.disable_help,
       connection_children = function(conn)
         return build_connection_children(self, conn)
+      end,
+      delete_folder_namespace = function(source_meta, folder_id)
+        if self.editor and type(self.editor.delete_folder_namespace) == "function" then
+          return self.editor:delete_folder_namespace(source_meta.id, folder_id)
+        end
+        local remove_method = "source_" .. "remove_folder"
+        self.handler[remove_method](self.handler, source_meta.id, folder_id)
+        return true
       end,
     }
   )

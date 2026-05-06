@@ -97,11 +97,12 @@ function ui.editor_create_note_in_folder(folder_id, name)
   return notes_namespace.create_note_in_folder(editor, editor.directory, state.handler(), folder_id, name)
 end
 
+---@param source_id string
 ---@param folder_id string
 ---@return boolean
 ---@return string? err
-function ui.editor_delete_folder_namespace(folder_id)
-  return state.editor():delete_folder_namespace(folder_id)
+function ui.editor_delete_folder_namespace(source_id, folder_id)
+  return state.editor():delete_folder_namespace(source_id, folder_id)
 end
 
 --- Renames an existing note.
