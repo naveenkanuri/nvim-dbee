@@ -107,6 +107,19 @@ local function authority_opts_for_namespace(namespace)
   return nil
 end
 
+---@param path string
+---@param prefix string
+---@return boolean
+local function path_under(path, prefix)
+  return path == prefix or vim.startswith(path, prefix .. "/")
+end
+
+---@param dir_name string
+---@return boolean
+local function is_global_backup_namespace(dir_name)
+  return dir_name == "global.bak" or dir_name:match("^global%.bak%.%d%d%d%d%d%d%d%d%d%d%d%d%d%d$") ~= nil
+end
+
 ---@param handler Handler
 ---@param result ResultUI
 ---@param opts? editor_config
@@ -215,7 +228,8 @@ function EditorUI:new(handler, result, opts)
     end
   end)
 
-  -- restore last-active note from previous session, or fall back to local notes.
+  -- Restore last-active note from previous session, then choose a folder note
+  -- without recreating the retired global namespace.
   local restored = false
   local last = o:load_last_note()
   if last then
@@ -230,13 +244,7 @@ function EditorUI:new(handler, result, opts)
   end
 
   if not restored then
-    local conn = handler:get_current_connection()
-    if conn and conn.id then
-      local ok_notes, local_notes = pcall(o.namespace_get_notes, o, tostring(conn.id))
-      if ok_notes and not vim.tbl_isempty(local_notes) then
-        o.current_note_id = local_notes[1].id
-      end
-    end
+    o.current_note_id = o:select_default_note_id()
   end
 
   return o
@@ -299,6 +307,18 @@ function EditorUI:resolve_note_from_file(file)
   if vim.fn.filereadable(file) ~= 1 then
     return nil
   end
+  if path_under(file, self.directory .. "/global") then
+    return nil
+  end
+  local rel_for_backup = nil
+  local prefix = self.directory .. "/"
+  if vim.startswith(file, prefix) then
+    rel_for_backup = file:sub(#prefix + 1)
+  end
+  local backup_namespace = rel_for_backup and rel_for_backup:match("^([^/]+)")
+  if backup_namespace and is_global_backup_namespace(backup_namespace) then
+    return nil
+  end
 
   -- check already-loaded namespaces
   local note = self:search_note_with_file(file)
@@ -307,7 +327,6 @@ function EditorUI:resolve_note_from_file(file)
   end
 
   -- derive namespace from path: strip directory prefix, take first component
-  local prefix = self.directory .. "/"
   if vim.startswith(file, prefix) then
     local rel = file:sub(#prefix + 1)
     local namespace = rel:match("^([^/]+)")
@@ -321,6 +340,33 @@ function EditorUI:resolve_note_from_file(file)
       note = self:search_note_with_file(file)
       if note then
         return note.id
+      end
+    end
+  end
+
+  return nil
+end
+
+---@private
+---@return note_id?
+function EditorUI:select_default_note_id()
+  local ok_conn, conn = pcall(self.handler.get_current_connection, self.handler)
+  if ok_conn and conn and conn.id and type(self.handler.get_folder_for_connection) == "function" then
+    local ok_folder, folder = pcall(self.handler.get_folder_for_connection, self.handler, conn.id)
+    if ok_folder and folder and folder.folder_id then
+      local notes = notes_namespace.read_folder_namespace_notes(self, folder.folder_id)
+      if type(notes) == "table" and #notes > 0 then
+        return notes[1].id
+      end
+    end
+  end
+
+  for _, namespace in ipairs(notes_namespace.list_existing_folder_namespaces(self.directory)) do
+    local folder_id = notes_namespace.parse_folder_namespace(namespace)
+    if folder_id then
+      local notes = notes_namespace.read_folder_namespace_notes(self, folder_id)
+      if type(notes) == "table" and #notes > 0 then
+        return notes[1].id
       end
     end
   end
@@ -982,8 +1028,11 @@ end
 --- Creates a new note in namespace.
 --- Local connection namespaces may call directly. Valid `folder:*` namespaces
 --- require `{ from_authority = true }` from `notes_namespace`. The legacy
---- `"global"` namespace, malformed `folder:` namespaces, and empty/path-shaped
---- namespaces are rejected before filesystem access.
+--- `"global"` namespace is retired and rejected, malformed `folder:` prefixes
+--- are always rejected, and empty/path-separator/`..` namespaces are rejected
+--- before filesystem access. The same runtime guard applies to
+--- namespace_get_notes, namespace_remove_note, load_notes_from_disk, and
+--- internal helpers that resolve `notes_dir/<ns>/...`.
 ---@param id namespace_id
 ---@param name string
 ---@param opts? { from_authority?: boolean }
@@ -1115,11 +1164,12 @@ function EditorUI:namespace_clear_cache(namespace)
   self.notes[validate_namespace(self, namespace, authority_opts_for_namespace(namespace))] = nil
 end
 
+---@param source_id string
 ---@param folder_id string
 ---@return boolean
 ---@return string? err
-function EditorUI:delete_folder_namespace(folder_id)
-  local ok_delete, delete_err = notes_namespace.delete_folder_namespace(self.directory, folder_id)
+function EditorUI:delete_folder_namespace(source_id, folder_id)
+  local ok_delete, delete_err = notes_namespace.delete_folder_namespace(self.directory, folder_id, source_id, self.handler)
   if not ok_delete then
     return false, delete_err
   end

@@ -170,19 +170,111 @@ function M.list_existing_folder_namespaces(notes_dir)
   return namespaces
 end
 
+---@private
+---@param folder_id string
+local function notify_delete_duplicate_folder_id(folder_id)
+  vim.notify(
+    "dbee: folder_id " .. tostring(folder_id) .. " duplicated across sources; refusing delete to prevent shared-namespace data loss",
+    vim.log.levels.ERROR
+  )
+end
+
+---@private
+local function migration_trash_dir(notes_dir)
+  return notes_dir
+    .. "/.notes-migration-v1.trash-"
+    .. tostring(vim.fn.getpid())
+    .. "-"
+    .. tostring(os.time())
+    .. "-"
+    .. tostring(math.random(100000, 999999))
+end
+
+---@private
+---@param err any
+---@return boolean
+local function is_exdev(err)
+  return tostring(err or ""):find("EXDEV", 1, true) ~= nil
+end
+
 ---@param notes_dir string
 ---@param folder_id string
+---@param source_id string
+---@param handler Handler
 ---@return boolean
 ---@return string? err
-function M.delete_folder_namespace(notes_dir, folder_id)
+function M.delete_folder_namespace(notes_dir, folder_id, source_id, handler)
   local ok_dir, dir_or_err = pcall(M.folder_namespace_dir, notes_dir, folder_id)
   if not ok_dir then
     return false, tostring(dir_or_err)
   end
-  if vim.fn.isdirectory(dir_or_err) ~= 1 then
-    return true
+
+  if not handler or type(handler.list_all_folder_ids_across_sources) ~= "function" then
+    return false, "missing_handler"
   end
-  return M.recursive_rmdir(dir_or_err)
+  local counts, error_kind = handler:list_all_folder_ids_across_sources()
+  if error_kind then
+    vim.notify("dbee: folder delete aborted — folder source load failed; fix sidecar before retrying", vim.log.levels.WARN)
+    return false, error_kind
+  end
+  local count = counts[folder_id] or 0
+  if count > 1 then
+    notify_delete_duplicate_folder_id(folder_id)
+    return false, "duplicate_folder_id"
+  end
+  if count ~= 1 then
+    return false, "folder_not_found"
+  end
+
+  local trash_root = nil
+  local staged_dir = nil
+  local staged = false
+  if vim.fn.isdirectory(dir_or_err) == 1 then
+    trash_root = migration_trash_dir(notes_dir)
+    staged_dir = trash_root .. "/" .. M.folder_namespace_id(folder_id)
+    local mkdir_ok = vim.fn.mkdir(trash_root, "p")
+    if mkdir_ok == 0 then
+      return false, "trash_mkdir_failed"
+    end
+    local ok_rename, rename_err = vim.loop.fs_rename(dir_or_err, staged_dir)
+    if not ok_rename then
+      if is_exdev(rename_err) then
+        vim.notify(
+          "dbee: migration aborted — cross-filesystem rename detected; not supported. Move notes/ off bind mounts and retry, OR set editor.directory in setup() to a same-filesystem path and retry.",
+          vim.log.levels.ERROR
+        )
+        M.recursive_rmdir(trash_root)
+        return false, "EXDEV"
+      end
+      M.recursive_rmdir(trash_root)
+      return false, tostring(rename_err)
+    end
+    staged = true
+  end
+
+  local ok_remove, remove_err = pcall(handler.source_remove_folder, handler, source_id, folder_id)
+  if not ok_remove then
+    if staged then
+      vim.fn.mkdir(vim.fs.dirname(dir_or_err), "p")
+      local ok_restore, restore_err = vim.loop.fs_rename(staged_dir, dir_or_err)
+      if not ok_restore then
+        vim.notify(
+          "dbee: folder delete failed and notes restore failed for "
+            .. tostring(folder_id)
+            .. ": "
+            .. tostring(restore_err),
+          vim.log.levels.ERROR
+        )
+      end
+      M.recursive_rmdir(trash_root)
+    end
+    return false, tostring(remove_err)
+  end
+
+  if staged then
+    M.recursive_rmdir(trash_root)
+  end
+  return true
 end
 
 return M

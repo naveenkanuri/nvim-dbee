@@ -5,7 +5,17 @@ local ResultUI = require("dbee.ui.result")
 local CallLogUI = require("dbee.ui.call_log")
 local Handler = require("dbee.handler")
 local install = require("dbee.install")
+local notes_migration = require("dbee.notes_migration")
 local register = require("dbee.api.__register")
+
+-- Phase 23 migration notes:
+-- setup_handler() performs a pure-read pre-register probe for an active
+-- `.notes-migration-v1.lock` before any core-loaded early return or
+-- RegisterPlugin call. Fatal migration failures are held by
+-- _assert_migration_ok(); retryable in-progress probes do not set any flag.
+-- RegisterPlugin failure is out of Phase 23 migration-latch scope: the
+-- pre-existing register-once landmine below means users restart nvim after a
+-- register-fail.
 
 -- public and private module objects
 local M = {}
@@ -19,6 +29,41 @@ m.ui_loaded = false
 m.setup_called = false
 ---@type Config
 m.config = {}
+m.migration_attempted = false
+m.migration_fatal_failed = false
+
+local function _assert_migration_ok()
+  if m.migration_fatal_failed then
+    error("dbee migration failed; restart nvim to retry. See notes/.notes-migration-v1.last-failure.log for details.")
+  end
+end
+
+local function _throw_migration_in_progress()
+  error("another nvim instance is migrating notes; close that instance and retry, or restart all nvim instances")
+end
+
+local function resolve_notes_dir()
+  return (m.config.editor and m.config.editor.directory) or (vim.fn.stdpath("state") .. "/dbee/notes")
+end
+
+local function write_migration_failure_log(notes_dir, err)
+  if type(notes_dir) ~= "string" or notes_dir == "" then
+    return
+  end
+  pcall(vim.fn.mkdir, notes_dir, "p")
+  local path = notes_dir .. "/.notes-migration-v1.last-failure.log"
+  local file = io.open(path, "w")
+  if not file then
+    return
+  end
+  file:write("error=" .. tostring(err) .. "\n")
+  file:write("traceback=" .. debug.traceback("", 2) .. "\n")
+  file:write("sentinel=" .. notes_dir .. "/.notes-migration-v1\n")
+  file:write("lock=" .. notes_dir .. "/.notes-migration-v1.lock\n")
+  file:write("promote_manifest=" .. notes_dir .. "/.notes-migration-v1.promote-manifest\n")
+  file:write("recovery_needed=" .. notes_dir .. "/.notes-migration-v1.recovery-needed\n")
+  file:close()
+end
 
 local function oracle_wallet_auto_extract_enabled()
   local oracle = m.config.oracle or {}
@@ -33,6 +78,13 @@ local function sync_oracle_wallet_auto_extract()
 end
 
 local function setup_handler()
+  local notes_dir = resolve_notes_dir()
+  if notes_migration.is_migration_in_progress(notes_dir) then
+    _throw_migration_in_progress()
+  end
+
+  _assert_migration_ok()
+
   if m.core_loaded then
     return
   end
@@ -65,9 +117,24 @@ local function setup_handler()
   if m.config.default_connection then
     pcall(m.handler.set_current_connection, m.handler, m.config.default_connection)
   end
+
+  local ok_migration, migration_result, migration_error_kind = pcall(notes_migration.maybe_run, m.handler, notes_dir, m)
+  if not ok_migration then
+    m.migration_fatal_failed = true
+    write_migration_failure_log(notes_dir, migration_result)
+    error(migration_result)
+  end
+  if migration_result == false and migration_error_kind == "lock_held" then
+    local err = "notes migration lock was acquired by another process after register"
+    m.migration_fatal_failed = true
+    write_migration_failure_log(notes_dir, err)
+    error(err)
+  end
 end
 
 local function setup_ui()
+  _assert_migration_ok()
+
   if m.ui_loaded then
     return
   end
@@ -117,30 +184,35 @@ end
 
 ---@return Handler
 function M.handler()
+  _assert_migration_ok()
   setup_handler()
   return m.handler
 end
 
 ---@return EditorUI
 function M.editor()
+  _assert_migration_ok()
   setup_ui()
   return m.editor
 end
 
 ---@return CallLogUI
 function M.call_log()
+  _assert_migration_ok()
   setup_ui()
   return m.call_log
 end
 
 ---@return DrawerUI
 function M.drawer()
+  _assert_migration_ok()
   setup_ui()
   return m.drawer
 end
 
 ---@return ResultUI
 function M.result()
+  _assert_migration_ok()
   setup_ui()
   return m.result
 end
