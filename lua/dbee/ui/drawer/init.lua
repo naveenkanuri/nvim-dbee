@@ -1045,6 +1045,8 @@ local function searchable_node_to_tree_node(ui, node, inherited_conn_id, childre
       if ui.editor and type(ui.editor.delete_folder_namespace) == "function" then
         return ui.editor:delete_folder_namespace(source_meta.id, folder_id)
       end
+      -- editor delete is preferred (Phase 23); fallback retained for tests
+      -- that stub editor without delete_folder_namespace.
       local remove_method = "source_" .. "remove_folder"
       ui.handler[remove_method](ui.handler, source_meta.id, folder_id)
       return true
@@ -3614,6 +3616,8 @@ function DrawerUI:get_actions()
       if ok_ensure then
         return
       end
+      -- editor delete is preferred (Phase 23); fallback retained for tests
+      -- that stub editor without delete_folder_namespace.
       local ok_unwind, unwind_err = pcall(handler.source_remove_folder, handler, source_id, folder_id)
       if not ok_unwind then
         vim.notify(
@@ -3640,6 +3644,8 @@ function DrawerUI:get_actions()
       end
       return
     end
+    -- editor delete is preferred (Phase 23); fallback retained for tests
+    -- that stub editor without delete_folder_namespace.
     local remove_method = "source_" .. "remove_folder"
     handler[remove_method](handler, source_id, folder_id)
   end
@@ -4941,6 +4947,16 @@ function DrawerUI:refresh()
   local exp = expansion.get(self.tree)
   local current_conn_id = (self.handler:get_current_connection() or {}).id
   self.current_conn_id = current_conn_id
+  local function delete_folder_namespace(source_meta, folder_id)
+    if self.editor and type(self.editor.delete_folder_namespace) == "function" then
+      return self.editor:delete_folder_namespace(source_meta.id, folder_id)
+    end
+    -- editor delete is preferred (Phase 23); fallback retained for tests
+    -- that stub editor without delete_folder_namespace.
+    local remove_method = "source_" .. "remove_folder"
+    self.handler[remove_method](self.handler, source_meta.id, folder_id)
+    return true
+  end
 
   local render_model, coverage = drawer_model.build_tree_from_struct_cache(
     self.handler,
@@ -4956,14 +4972,7 @@ function DrawerUI:refresh()
       connection_children = function(conn)
         return build_connection_children(self, conn)
       end,
-      delete_folder_namespace = function(source_meta, folder_id)
-        if self.editor and type(self.editor.delete_folder_namespace) == "function" then
-          return self.editor:delete_folder_namespace(source_meta.id, folder_id)
-        end
-        local remove_method = "source_" .. "remove_folder"
-        self.handler[remove_method](self.handler, source_meta.id, folder_id)
-        return true
-      end,
+      delete_folder_namespace = delete_folder_namespace,
     }
   )
   self.filter_total_connections = coverage.total_connections
@@ -4997,7 +5006,7 @@ function DrawerUI:refresh()
       if model_node.type == "folder" and model_node.source_meta and model_node.folder_id then
         convert.decorate_folder_node(node, self.handler, model_node.source_meta, model_node.folder_id, function()
           invalidate_authoritative_caches(self)
-        end)
+        end, delete_folder_namespace)
       end
 
       if children and #children > 0 then

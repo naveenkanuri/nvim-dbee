@@ -3,7 +3,8 @@ local M = {}
 -- Public exports:
 -- validate_folder_id, has_folder_prefix, is_folder_namespace, parse_folder_namespace,
 -- folder_namespace_id, folder_namespace_dir, ensure_folder_namespace,
--- read_folder_namespace_notes, create_note_in_folder.
+-- read_folder_namespace_notes, create_note_in_folder, encode_local_namespace_path,
+-- decode_local_namespace_path.
 --
 -- Internal exports:
 -- delete_folder_namespace, list_existing_folder_namespaces, recursive_rmdir.
@@ -56,6 +57,28 @@ function M.folder_namespace_dir(notes_dir, folder_id)
     error("invalid notes_dir")
   end
   return notes_dir .. "/" .. M.folder_namespace_id(folder_id)
+end
+
+---@param namespace string
+---@return string
+function M.encode_local_namespace_path(namespace)
+  if type(namespace) ~= "string" or namespace == "" then
+    error("invalid namespace")
+  end
+  return (namespace:gsub("[^A-Za-z0-9_-]", function(char)
+    return string.format("%%%02X", string.byte(char))
+  end))
+end
+
+---@param path_component string
+---@return string
+function M.decode_local_namespace_path(path_component)
+  if type(path_component) ~= "string" or path_component == "" then
+    error("invalid namespace path")
+  end
+  return (path_component:gsub("%%(%x%x)", function(hex)
+    return string.char(tonumber(hex, 16))
+  end))
 end
 
 ---@private

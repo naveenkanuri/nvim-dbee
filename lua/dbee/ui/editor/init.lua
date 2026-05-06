@@ -331,6 +331,12 @@ function EditorUI:resolve_note_from_file(file)
     local rel = file:sub(#prefix + 1)
     local namespace = rel:match("^([^/]+)")
     if namespace then
+      if not notes_namespace.has_folder_prefix(namespace) then
+        local ok_decode, decoded = pcall(notes_namespace.decode_local_namespace_path, namespace)
+        if ok_decode and is_known_local_namespace(self, decoded) then
+          namespace = decoded
+        end
+      end
       -- load that namespace (triggers load_notes_from_disk)
       local ok_load = pcall(self.namespace_get_notes, self, namespace, authority_opts_for_namespace(namespace))
       if not ok_load then
@@ -966,7 +972,11 @@ end
 ---@return string
 function EditorUI:dir(namespace, opts)
   namespace = validate_namespace(self, namespace, opts)
-  return self.directory .. "/" .. namespace
+  local dir_name = namespace
+  if not notes_namespace.has_folder_prefix(namespace) then
+    dir_name = notes_namespace.encode_local_namespace_path(namespace)
+  end
+  return self.directory .. "/" .. dir_name
 end
 
 ---@private

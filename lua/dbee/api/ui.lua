@@ -66,6 +66,7 @@ end
 --- Creates a new note in namespace.
 --- Errors if id or name is nil or there is a note with the same
 --- name in namespace already.
+---@deprecated Use editor_create_note_in_folder for global notes; this wrapper now rejects "global" and unauthorized "folder:*" namespaces.
 ---@param id namespace_id
 ---@param name string
 ---@return note_id
@@ -74,6 +75,7 @@ function ui.editor_namespace_create_note(id, name)
 end
 
 --- Get notes of a specified namespace.
+---@deprecated Use editor_create_note_in_folder and editor_get_note_picker_sections for global notes; this wrapper now rejects "global" and unauthorized "folder:*" namespaces.
 ---@param id namespace_id
 ---@return note_details[]
 function ui.editor_namespace_get_notes(id)
@@ -82,6 +84,7 @@ end
 
 --- Removes an existing note.
 --- Errors if there is no note with provided id in namespace.
+---@deprecated Use folder-scoped editor APIs for global notes; this wrapper now rejects "global" and unauthorized "folder:*" namespaces.
 ---@param id namespace_id
 ---@param note_id note_id
 function ui.editor_namespace_remove_note(id, note_id)
@@ -397,7 +400,7 @@ function ui.editor_get_all_notes()
     return ui.editor_get_notes_for_connection(tostring(conn.id))
   end
 
-  return all_notes
+  return {}
 end
 
 --- Find the note associated with a call ID.

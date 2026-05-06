@@ -2704,31 +2704,30 @@ end
 ---@return string? error_kind
 function Handler:list_all_folder_ids_across_sources()
   local counts = {}
-  local error_kind = nil
 
   for _, source in ipairs(self:get_sources()) do
     local ok_supports, supports = pcall(source_supports_folders, source)
     if not ok_supports then
-      error_kind = "load_failed"
+      return nil, "load_failed"
     elseif supports then
       if type(source.load_folders) ~= "function" then
-        error_kind = "load_failed"
+        return nil, "load_failed"
       else
         local ok_folders, folders = pcall(source.load_folders, source)
         if not ok_folders then
-          error_kind = "load_failed"
+          return nil, "load_failed"
         else
           if source._folders_load_state == "load_failed" then
-            error_kind = "load_failed"
+            return nil, "load_failed"
           end
           if type(folders) ~= "table" then
-            error_kind = "load_failed"
+            return nil, "load_failed"
           else
             for _, folder in ipairs(folders or {}) do
               if type(folder) == "table" and type(folder.id) == "string" and folder.id ~= "" then
                 counts[folder.id] = (counts[folder.id] or 0) + 1
               else
-                error_kind = "load_failed"
+                return nil, "load_failed"
               end
             end
           end
@@ -2737,7 +2736,7 @@ function Handler:list_all_folder_ids_across_sources()
     end
   end
 
-  return counts, error_kind
+  return counts, nil
 end
 
 ---@param folder_id string

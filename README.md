@@ -438,6 +438,8 @@ To clear the managed wallet cache, run `:DBeeWalletCacheClear`,
 DBee now stores shared notes per folder. The old drawer-level global notes node is gone; use the
 notes picker (`:lua require("dbee").pick_notes()`) and press `<C-g>` while the current connection is
 inside a folder to create a folder-scoped shared note. Local notes are still created with `<C-l>`.
+Legacy namespace API wrappers reject `"global"` and raw `folder:*` namespaces; use the folder-scoped
+picker/API paths for shared notes.
 
 On first launch after the change, legacy `notes/global/` files are cloned into each existing folder
 namespace and the original directory is backed up as `global.bak` or `global.bak.YYYYMMDDHHMMSS`.

@@ -505,6 +505,8 @@ function M.decorate_folder_node(node, handler, source_meta, folder_id, invalidat
           if delete_folder_cb then
             ok, result, err = pcall(delete_folder_cb, source_meta, folder_id)
           else
+            -- editor delete is preferred (Phase 23); fallback retained for tests
+            -- that stub editor without delete_folder_namespace.
             local remove_method = "source_" .. "remove_folder"
             ok, result = pcall(handler[remove_method], handler, source_meta.id, folder_id)
           end
