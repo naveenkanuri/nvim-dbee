@@ -40,21 +40,30 @@ Line anchors below are the implementation baseline as of 2026-05-07 and must be 
 
 ## Locked Decisions
 
-1. Cache version baseline is v4. No v5 bump unless implementation changes serialized disk-cache shape.
-2. Reverse-FK index is derived in memory from already-loaded `Column.ForeignKeys`; it is never serialized.
-3. Reverse-FK indexing uses both `reverse_fk_refs_by_target_key` and `reverse_fk_refs_by_source_key`; source-table eviction must be O(refs-for-source), not O(total refs).
-4. Reverse-FK freshness and mutation identity are split: `reverse_fk_cache_epoch` equals cache epoch for freshness checks, while `reverse_fk_index_generation` increments on every reverse-index mutation and is used by resolve memo keys.
-5. Disk-loaded v4 caches rebuild column completion indexes synchronously but defer reverse-FK index rebuild out of startup.
-6. Reverse-FK keys are fold-aware through `schema_name_canonical.canonical(..., quoted=true, self.fold_id)` on writer and reader. Display fields keep exact adapter-provided text.
-7. Reverse-FK reads route through `epoch_authority.read_with_freshness`, then `_fresh_lsp_scope()`, and filter returned refs to the current authority scope.
-8. Reverse-FK docs are bounded: 50 refs per target, 1000 refs per source as a backstop, 50k refs total, with visible truncation and a once-per-overflow warning.
-9. `_drop_column_index(key)` is the sole per-source derived-index eviction hub.
-10. Column completion labels remain the raw column name so `insertText`, `data.column`, and resolve metadata keep working.
-11. LSP 3.17 clients get `labelDetails.detail`; older clients get a compatible `detail` string.
-12. Reverse-FK docs are added through `completionItem/resolve`, not eager completion item documentation.
-13. Completion and resolve request paths stay cache-only and perform no sync or async DB metadata work.
-14. Annotation strings and reverse-doc strings are in-memory only and must not appear in `_save_columns_to_disk` payloads.
-15. The three locked helpers are imported and used but not edited:
+`PLAN.md` Design Forks table is canonical. This section mirrors the resolved forks in summary form for execution context.
+
+1. Annotation surface is hybrid: raw `label`, modern `labelDetails.detail`, legacy-compatible `detail`.
+2. Composite FK popup rendering uses `target_table.(a,b)` for multi-column target tuples.
+3. Multiple FK markers render all distinct refs, space-joined, deduped by constraint plus target tuple.
+4. Null marker direction is `null` only when `Nullable == true`; PK suppresses `null`.
+5. Default-expression popup marker is deferred; existing docs can still show `Default`.
+6. Table completion items remain unchanged; Phase 21 annotates column completion only.
+7. Reverse-FK index is eager in memory for live metadata paths, derived from loaded columns, epoch-keyed, and never serialized.
+8. Reverse-FK indexing uses both `reverse_fk_refs_by_target_key` and `reverse_fk_refs_by_source_key`; source-table eviction is O(refs-for-source), not O(total refs).
+9. Reverse-FK lifecycle uses existing `_store_columns`, `_drop_column_index`, `_rebuild_column_indexes`, and `_reset_indexes`; there is no `_post_load_index`.
+10. Disk-loaded v4 caches rebuild column completion indexes synchronously but defer reverse-FK index rebuild out of startup.
+11. Reverse-FK docs are added through `completionItem/resolve`, not eager completion docs or hover changes.
+12. Reverse-FK keys are fold-aware through `schema_name_canonical.canonical(..., quoted=true, self.fold_id)` on writer and reader; display fields keep exact adapter text.
+13. Reverse-FK overflow caps are per-target 50 refs, per-source 1000-ref backstop, and total 50k refs with visible truncation and once-per-overflow warning.
+14. Reverse-FK overflow bookkeeping uses `{ refs, dropped_count, dropped_sources }`, where dropped source entries retain counts and dropped ref summaries for deterministic promotion.
+15. Reverse-FK ordering sorts on read by `(src_schema, src_table, src_col, constraint, ordinal, ref_id)`; `ref_id` is the stable tiebreaker.
+16. Reverse-FK resolve transfer is single ownership: cache returns owned refs and `resolve.metadata_for` assigns them without a second deep copy.
+17. Resolve memo invalidation uses `reverse_fk_index_generation`, not cache epoch, alongside existing generation/root-epoch guards.
+18. Cache version baseline is v4. No v5 bump unless implementation changes serialized disk-cache shape.
+19. Unsupported rich metadata fields omit annotations silently.
+20. Test adapter breadth is Postgres-style and Oracle-style Lua fixtures plus core Go regression; no live DB.
+21. Completion and resolve request paths stay cache-only and perform no sync or async DB metadata work.
+22. The three locked helpers are imported and used but not edited:
    - `lua/dbee/schema_filter_authority.lua`
    - `lua/dbee/schema_name_canonical.lua`
    - `lua/dbee/lsp/epoch_authority.lua`
@@ -64,9 +73,11 @@ Line anchors below are the implementation baseline as of 2026-05-07 and must be 
 - There is no existing `_post_load_index` hook. The practical hook is the existing column-index lifecycle: `_store_columns`, `_drop_column_index`, `_rebuild_column_indexes`, and `_reset_indexes`.
 - Reverse-FK docs can only reference FKs from source tables whose columns are already loaded into the schema cache. This preserves the no-DB-work LSP contract.
 - The deferred disk-load path may return no reverse-FK docs on the first resolve while scheduling in-memory rebuild; subsequent resolve after build completion must return docs without DB calls.
+- Deferred reverse-FK build is singleflight: the first dirty resolve flips `reverse_fk_index_building` synchronously before `vim.schedule`, later resolves do not schedule duplicates, and stale build results are discarded on cache-epoch mismatch.
 - Cross-schema FK targets do not require the target table to be cached during index construction; resolve docs still require the caller to have resolved target column metadata.
 - Composite FK pairing precedence is arrays+valid ordinal, exact `SourceColumn` index in `SourceColumns`, shorthand pair, then skip malformed refs with diagnostics.
 - Composite PK ordinals are never fabricated. Multiple PK columns with ordinal 0/nil render `[PK]` rather than misleading `[PK1]`.
 - Annotation fast-path is `#markers == 0`; unannotated column items have `labelDetails == nil`.
+- Annotation marker arrays are append-only and cannot use fixed numeric marker assignments.
 - Unsupported rich metadata adapters produce nil/empty rich fields. Phase 21 treats nil/empty values as unknown/absent and silently omits annotations.
 - Default-expression annotations are deferred from the popup marker surface. Existing hover/resolve docs can still show `Default` because `object_docs.lua` already formats it.
