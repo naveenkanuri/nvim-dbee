@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -176,8 +177,109 @@ func TestOracleQueryWithBindsPassesNamedArgs(t *testing.T) {
 	require.Equal(t, "ALICE", args[1].Value)
 }
 
+func assertOracleBindValidationError(t *testing.T, err error, name string) {
+	t.Helper()
+	require.Error(t, err)
+	msg := err.Error()
+	require.Contains(t, msg, "oracle bind validation")
+	require.Contains(t, msg, name)
+	require.Contains(t, msg, "p_"+name)
+}
+
+func runUnsafeBindMatrix(t *testing.T) bool {
+	t.Helper()
+
+	allowed := []string{
+		"id", "name", "p_schema", "p_table", "p_line", "p_status", "A$B", "A#B",
+		"my_table", "order_status", "line_count", "table_id", "schema_owner", "date_created",
+	}
+	for _, name := range allowed {
+		require.NoError(t, validateOracleBindName(name), "expected %q to be allowed", name)
+		args, err := oracleNamedArgs(map[string]string{name: "value"})
+		require.NoError(t, err)
+		require.Len(t, args, 1)
+		arg, ok := args[0].(sql.NamedArg)
+		require.True(t, ok)
+		require.Equal(t, name, arg.Name)
+		require.Equal(t, "value", arg.Value)
+	}
+
+	rejected := []string{
+		"table", "schema", "line", "status", "date", "user", "level", "group",
+		"order", "rowid", "number", "rownum", "sysdate", "whenever",
+		"column_value", "nested_table_id", "1", "bad-name", "",
+	}
+	for _, name := range rejected {
+		require.Error(t, validateOracleBindName(name), "expected %q to be rejected", name)
+	}
+
+	_, err := oracleNamedArgs(map[string]string{
+		"table": "x",
+		"date":  "y",
+		"id":    "z",
+	})
+	require.Error(t, err)
+	joined := err.Error()
+	require.Contains(t, joined, `"table"`)
+	require.Contains(t, joined, "p_table")
+	require.Contains(t, joined, `"date"`)
+	require.Contains(t, joined, "p_date")
+	require.NotContains(t, joined, `"id"`)
+
+	return !t.Failed()
+}
+
+func TestOracleNamedArgs(t *testing.T) {
+	runUnsafeBindMatrix(t)
+}
+
+func TestOracleBindNameTable(t *testing.T) {
+	runUnsafeBindMatrix(t)
+}
+
+func TestOracleBindNameDate(t *testing.T) {
+	runUnsafeBindMatrix(t)
+}
+
+func TestOracleBindNameWhenever(t *testing.T) {
+	runUnsafeBindMatrix(t)
+}
+
+func TestOracleBindNamePlainQueryErrorSurface(t *testing.T) {
+	oracleQueryCtxRegisterOnce.Do(func() {
+		sql.Register(oracleQueryCtxDriverName, oracleQueryCtxDriver{})
+	})
+	oracleQueryCtxState.reset()
+
+	db, err := sql.Open(oracleQueryCtxDriverName, "oracle-query-ctx-test")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+
+	d := &oracleDriver{
+		c:  builders.NewClient(db),
+		db: db,
+	}
+
+	result, err := d.QueryWithBinds(context.Background(), "SELECT :table FROM dual", map[string]string{"table": "x"})
+	require.Nil(t, result)
+	assertOracleBindValidationError(t, err, "table")
+	require.Nil(t, oracleQueryCtxState.get())
+}
+
+func TestOracleBindNamePLSQLValidationBeforeDBMSOutput(t *testing.T) {
+	state := newSessTestState()
+	d := newSessTestDriver(t, state)
+
+	result, err := d.QueryWithBinds(context.Background(), "BEGIN :table := 1; END;", map[string]string{"table": "x"})
+	require.Nil(t, result)
+	assertOracleBindValidationError(t, err, "table")
+	require.Empty(t, state.getQueryConnIDs())
+}
+
 func TestOracleNamedArgsTypedLiterals(t *testing.T) {
-	args := oracleNamedArgs(map[string]string{
+	args, err := oracleNamedArgs(map[string]string{
 		"aliasBool":   "boolean:false",
 		"aliasFloat":  "number:2.5",
 		"aliasInt":    "integer:7",
@@ -202,6 +304,7 @@ func TestOracleNamedArgsTypedLiterals(t *testing.T) {
 		"tz":          "timestamp:2026-02-10 15:04:05+05:30",
 	})
 
+	require.NoError(t, err)
 	require.Len(t, args, 22)
 
 	valuesByName := map[string]any{}
@@ -245,4 +348,17 @@ func TestOracleNamedArgsTypedLiterals(t *testing.T) {
 	tzVal, ok := valuesByName["tz"].(time.Time)
 	require.True(t, ok)
 	require.Equal(t, "2026-02-10T15:04:05+05:30", tzVal.Format(time.RFC3339))
+}
+
+func TestOracleNamedArgsAggregatesInvalidBindNames(t *testing.T) {
+	_, err := oracleNamedArgs(map[string]string{
+		"table": "x",
+		"date":  "y",
+		"user":  "z",
+	})
+	require.Error(t, err)
+	msg := err.Error()
+	for _, want := range []string{`"date"`, `"table"`, `"user"`, "p_date", "p_table", "p_user"} {
+		require.True(t, strings.Contains(msg, want), "expected %q in %q", want, msg)
+	}
 }
