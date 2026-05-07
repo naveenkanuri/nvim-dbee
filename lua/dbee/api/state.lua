@@ -117,9 +117,25 @@ local function setup_handler()
     })
     m.handler:add_helpers(m.config.extra_helpers)
 
-    -- activate default connection if present
-    if m.config.default_connection then
-      pcall(m.handler.set_current_connection, m.handler, m.config.default_connection)
+    -- activate the last-used connection across nvim restarts; fall back to
+    -- the user's `default_connection` when no persisted choice exists or the
+    -- persisted id no longer maps to a known connection.
+    do
+      local last_connection = require("dbee.last_connection")
+      local target = nil
+      local persisted = last_connection.read()
+      if persisted then
+        local ok_params, params = pcall(m.handler.connection_get_params, m.handler, persisted)
+        if ok_params and params then
+          target = persisted
+        end
+      end
+      if not target and m.config.default_connection then
+        target = m.config.default_connection
+      end
+      if target then
+        pcall(m.handler.set_current_connection, m.handler, target)
+      end
     end
   end
 

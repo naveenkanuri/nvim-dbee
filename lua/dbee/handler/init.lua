@@ -3056,6 +3056,11 @@ end
 ---@param id connection_id
 function Handler:set_current_connection(id)
   vim.fn.DbeeSetCurrentConnection(id)
+  -- Persist the active connection so the next nvim session restores it.
+  -- Best-effort: never let a state-file failure block the connection switch.
+  pcall(function()
+    require("dbee.last_connection").write(id)
+  end)
 end
 
 function Handler:connection_clear_current()
