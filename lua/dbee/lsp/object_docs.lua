@@ -78,6 +78,54 @@ local function join_lines(lines)
   return table.concat(lines, "\n")
 end
 
+---@param value any
+---@param markdown boolean
+---@return string
+local function display_identifier(value, markdown)
+  local text = tostring(value or "")
+  if not markdown then
+    return text
+  end
+  if text:match("^[%w_%.]+$") then
+    return text
+  end
+  if text:find("[\\%*_%{%}%[%]%(%)#%+%-!|`]") then
+    return inline_code(text)
+  end
+  return text
+end
+
+---@param refs table[]?
+---@param markdown boolean
+---@return string[]?
+local function format_referenced_by(refs, markdown)
+  if type(refs) ~= "table" or (#refs == 0 and (tonumber(refs._truncated_count) or 0) == 0) then
+    return nil
+  end
+
+  local lines = { "", "Referenced by:" }
+  local limit = math.min(#refs, 50)
+  for i = 1, limit do
+    local ref = refs[i]
+    local qualified = table.concat({
+      tostring(ref.src_schema or "_default"),
+      tostring(ref.src_table or ""),
+      tostring(ref.src_col or ""),
+    }, ".")
+    local line = "  - " .. display_identifier(qualified, markdown)
+    if ref.constraint and ref.constraint ~= "" then
+      line = line .. "  (constraint: " .. display_identifier(ref.constraint, markdown) .. ")"
+    end
+    lines[#lines + 1] = line
+  end
+
+  local truncated = tonumber(refs._truncated_count) or 0
+  if truncated > 0 then
+    lines[#lines + 1] = "Referenced by: (truncated, +" .. tostring(truncated) .. " more)"
+  end
+  return lines
+end
+
 ---@param metadata table
 ---@param markdown boolean
 ---@return string
@@ -183,6 +231,12 @@ local function format_column(metadata, markdown)
   if metadata.foreign_key ~= nil then
     lines[#lines + 1] = "Foreign key: " .. tostring(metadata.foreign_key)
   end
+  local referenced_by = format_referenced_by(metadata.referenced_by, markdown)
+  if referenced_by then
+    for _, line in ipairs(referenced_by) do
+      lines[#lines + 1] = line
+    end
+  end
   return join_lines(lines)
 end
 
@@ -227,10 +281,10 @@ function M.format_hover(metadata, opts)
 end
 
 ---@param metadata table
----@param _item table?
+---@param item table?
 ---@param opts? table
 ---@return table
-function M.format_resolve(metadata, _item, opts)
+function M.format_resolve(metadata, item, opts)
   opts = opts or {}
   local kind = supports_markdown(opts.client_capabilities, "completion") and "markdown" or "plaintext"
   local detail
@@ -239,7 +293,7 @@ function M.format_resolve(metadata, _item, opts)
   elseif metadata.kind == "table" then
     detail = tostring(metadata.table_type or "table")
   elseif metadata.kind == "column" then
-    detail = tostring(metadata.type or "column")
+    detail = item and item.detail or tostring(metadata.type or "column")
   end
   return {
     documentation = M.markup(format_value(metadata, { kind = kind }), opts.client_capabilities, nil, "completion"),

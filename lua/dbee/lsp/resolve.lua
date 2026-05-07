@@ -49,8 +49,9 @@ end
 
 ---@param data table
 ---@param markdown_kind string
+---@param reverse_fk_generation integer?
 ---@return string
-local function memo_key(data, markdown_kind)
+local function memo_key(data, markdown_kind, reverse_fk_generation)
   return table.concat({
     tostring(data.kind or ""),
     tostring(data.schema_exact or data.schema or ""),
@@ -60,6 +61,7 @@ local function memo_key(data, markdown_kind)
     tostring(data.table_quoted == true),
     tostring(data.column_quoted == true),
     tostring(data.cache_generation or ""),
+    tostring(reverse_fk_generation or 0),
     tostring(markdown_kind or "markdown"),
   }, "|")
 end
@@ -123,6 +125,14 @@ local function metadata_for(cache, data)
         column_quoted = data.column_quoted,
       }
     )
+    if meta and type(cache.get_reverse_fk_refs) == "function" then
+      local refs = cache:get_reverse_fk_refs(meta.schema, meta.table, meta.column, {
+        source = "completionItem/resolve",
+      })
+      if type(refs) == "table" and (#refs > 0 or (tonumber(refs._truncated_count) or 0) > 0) then
+        meta.referenced_by = refs
+      end
+    end
     return meta
   end
   return nil
@@ -182,15 +192,16 @@ function M.handle(item, cache, opts)
     return incomplete(item, "stale_generation")
   end
 
+  local kind = markdown_kind(opts.client_capabilities)
+  local reverse_fk_generation = type(cache.reverse_fk_generation) == "function" and cache:reverse_fk_generation() or 0
+  local key = memo_key(data, kind, reverse_fk_generation)
+  if memo[key] then
+    return apply_rendered(item, memo[key])
+  end
+
   local metadata = metadata_for(cache, data)
   if not metadata then
     return incomplete(item, "metadata_missing")
-  end
-
-  local kind = markdown_kind(opts.client_capabilities)
-  local key = memo_key(data, kind)
-  if memo[key] then
-    return apply_rendered(item, memo[key])
   end
 
   local rendered = docs.format_resolve(metadata, item, {

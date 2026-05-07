@@ -45,6 +45,10 @@ local SCHEMA_CACHE_VERSION = 4
 local MATERIALIZATIONS = { "table", "view", "materialized_view" }
 local SCHEMA_TABLE_PREVIEW_LIMIT = 20
 local WORKSPACE_SYMBOL_LIMIT = 200
+local REVERSE_FK_KEY_SEP = "\31"
+local REVERSE_FK_PER_TARGET_REF_CAP = 50
+local REVERSE_FK_PER_SOURCE_REF_CAP = 1000
+local REVERSE_FK_TOTAL_REF_CAP = 50000
 
 local CompletionItemKind = {
   Field = 5,
@@ -110,6 +114,95 @@ local function table_completion_item(schema, name, table_type)
     insertText = name,
     sortText = "0_" .. name,
   }
+end
+
+---@param value any
+---@return boolean
+local function non_empty_array(value)
+  return type(value) == "table" and #value > 0
+end
+
+---@param ref table
+---@return string[]
+local function rich_fk_target_columns(ref)
+  if type(ref) ~= "table" then
+    return {}
+  end
+  if non_empty_array(ref.target_columns) then
+    return ref.target_columns
+  end
+  if type(ref.target_column) == "string" and ref.target_column ~= "" then
+    return { ref.target_column }
+  end
+  return {}
+end
+
+---@param ref table
+---@return string?
+local function rich_fk_marker(ref)
+  if type(ref) ~= "table" or type(ref.target_table) ~= "string" or ref.target_table == "" then
+    return nil
+  end
+  local target_columns = rich_fk_target_columns(ref)
+  if #target_columns == 0 then
+    return nil
+  end
+  if #target_columns == 1 then
+    return "[FK→" .. ref.target_table .. "." .. target_columns[1] .. "]"
+  end
+  return "[FK→" .. ref.target_table .. ".(" .. table.concat(target_columns, ",") .. ")]"
+end
+
+---@param col table
+---@param pk_count integer
+---@return string[]
+local function column_annotation_markers(col, pk_count)
+  local markers = {}
+  local is_pk = col.primary_key == true
+  if is_pk then
+    local ordinal = tonumber(col.primary_key_ordinal) or 0
+    if pk_count >= 2 and ordinal > 0 then
+      markers[#markers + 1] = "[PK" .. tostring(ordinal) .. "]"
+    else
+      markers[#markers + 1] = "[PK]"
+    end
+  end
+
+  if non_empty_array(col.foreign_keys) then
+    local seen = {}
+    for _, ref in ipairs(col.foreign_keys) do
+      local marker = rich_fk_marker(ref)
+      if marker then
+        local target_columns = rich_fk_target_columns(ref)
+        local dedupe_key = table.concat({
+          tostring(ref.constraint_name or ""),
+          tostring(ref.target_table or ""),
+          table.concat(target_columns, "\30"),
+        }, "\29")
+        if not seen[dedupe_key] then
+          seen[dedupe_key] = true
+          markers[#markers + 1] = marker
+        end
+      end
+    end
+  end
+
+  if col.nullable == true and not is_pk then
+    markers[#markers + 1] = "null"
+  end
+
+  return markers
+end
+
+---@param col table
+---@param markers string[]
+---@return string
+local function column_completion_detail(col, markers)
+  local typ = tostring(col.type or "column")
+  if #markers == 0 then
+    return typ
+  end
+  return typ .. " " .. table.concat(markers, " ")
 end
 
 ---@param items lsp.CompletionItem[]
@@ -179,6 +272,20 @@ function SchemaCache:new(handler, conn_id)
     all_table_item_source_by_label = {},
     all_table_item_ambiguous_by_label = {},
     column_items_by_key = {},
+    reverse_fk_refs_by_target_key = {},
+    reverse_fk_refs_by_source_key = {},
+    reverse_fk_cache_epoch = 0,
+    reverse_fk_index_generation = 0,
+    reverse_fk_index_size = 0,
+    reverse_fk_index_overflow = false,
+    reverse_fk_overflow_warned = false,
+    reverse_fk_index_dirty = false,
+    reverse_fk_index_building = false,
+    reverse_fk_next_ref_id = 0,
+    reverse_fk_deferred_build_invocations = 0,
+    reverse_fk_malformed_ref_count = 0,
+    reverse_fk_canonical_calls = 0,
+    reverse_fk_cap_check_ns = 0,
     schema_lookup_exact = {},
     schema_lookup = {},
     table_lookup_exact_by_schema = {},
@@ -735,6 +842,7 @@ function SchemaCache:_reset_indexes()
   self.table_lookup_by_schema = {}
   self.table_lookup_exact_global = {}
   self.table_lookup_global = {}
+  self:_reset_reverse_fk_state()
 end
 
 ---@private
@@ -909,9 +1017,418 @@ function SchemaCache:_upsert_table_index(schema, name, table_type, opts)
 end
 
 ---@private
+---@param _reason string?
+function SchemaCache:_bump_reverse_fk_index_generation(_reason)
+  self.reverse_fk_index_generation = (self.reverse_fk_index_generation or 0) + 1
+end
+
+---@private
+---@param opts? { dirty?: boolean, cache_epoch?: integer, increment?: boolean }
+function SchemaCache:_reset_reverse_fk_state(opts)
+  opts = opts or {}
+  self.reverse_fk_refs_by_target_key = {}
+  self.reverse_fk_refs_by_source_key = {}
+  self.reverse_fk_cache_epoch = tonumber(opts.cache_epoch) or 0
+  self.reverse_fk_index_size = 0
+  self.reverse_fk_index_overflow = false
+  self.reverse_fk_overflow_warned = false
+  self.reverse_fk_index_dirty = opts.dirty == true
+  self.reverse_fk_index_building = false
+  self.reverse_fk_next_ref_id = 0
+  self.reverse_fk_malformed_ref_count = 0
+  self.reverse_fk_canonical_calls = 0
+  self.reverse_fk_cap_check_ns = 0
+  if opts.increment ~= false then
+    self:_bump_reverse_fk_index_generation("_reset_reverse_fk_state")
+  end
+end
+
+---@private
+---@param value string?
+---@return string
+function SchemaCache:_reverse_fk_canonical(value)
+  self.reverse_fk_canonical_calls = (self.reverse_fk_canonical_calls or 0) + 1
+  return schema_name_canonical.canonical(value, true, self.fold_id).canonical
+end
+
+---@private
+---@param schema string?
+---@param table_name string?
+---@param column_name string?
+---@return string
+function SchemaCache:_reverse_fk_target_key(schema, table_name, column_name)
+  return table.concat({
+    self:_reverse_fk_canonical(schema),
+    self:_reverse_fk_canonical(table_name),
+    self:_reverse_fk_canonical(column_name),
+  }, REVERSE_FK_KEY_SEP)
+end
+
+---@private
+---@param schema string
+---@param table_name string
+---@return string
+function SchemaCache:_reverse_fk_source_key(schema, table_name)
+  return table_key(schema, table_name)
+end
+
+---@private
+---@param values any
+---@param needle string?
+---@return integer?
+local function index_in_array(values, needle)
+  if type(values) ~= "table" or type(needle) ~= "string" then
+    return nil
+  end
+  for index, value in ipairs(values) do
+    if value == needle then
+      return index
+    end
+  end
+  return nil
+end
+
+---@private
+---@param ref table
+---@param col table
+---@return string? source_column
+---@return string? target_column
+function SchemaCache:_reverse_fk_pair_from_ref(ref, col)
+  if type(ref) ~= "table" then
+    self.reverse_fk_malformed_ref_count = (self.reverse_fk_malformed_ref_count or 0) + 1
+    return nil, nil
+  end
+
+  local source_columns = non_empty_array(ref.source_columns) and ref.source_columns or nil
+  local target_columns = non_empty_array(ref.target_columns) and ref.target_columns or nil
+  local ordinal = tonumber(ref.source_ordinal) or 0
+  if source_columns and target_columns and ordinal > 0 and source_columns[ordinal] and target_columns[ordinal] then
+    return source_columns[ordinal], target_columns[ordinal]
+  end
+
+  local source_column = type(ref.source_column) == "string" and ref.source_column or col.name
+  local source_index = index_in_array(source_columns, source_column)
+  if source_index and target_columns and target_columns[source_index] then
+    return source_column, target_columns[source_index]
+  end
+
+  if type(source_column) == "string" and source_column ~= ""
+    and type(ref.target_column) == "string" and ref.target_column ~= ""
+  then
+    return source_column, ref.target_column
+  end
+
+  self.reverse_fk_malformed_ref_count = (self.reverse_fk_malformed_ref_count or 0) + 1
+  return nil, nil
+end
+
+---@private
+---@return integer
+function SchemaCache:_next_reverse_fk_ref_id()
+  self.reverse_fk_next_ref_id = (self.reverse_fk_next_ref_id or 0) + 1
+  return self.reverse_fk_next_ref_id
+end
+
+---@private
+---@param target_key string
+---@return table
+function SchemaCache:_ensure_reverse_fk_target_bucket(target_key)
+  local bucket = self.reverse_fk_refs_by_target_key[target_key]
+  if not bucket then
+    bucket = {
+      refs = {},
+      dropped_count = 0,
+      dropped_sources = {},
+    }
+    self.reverse_fk_refs_by_target_key[target_key] = bucket
+  end
+  return bucket
+end
+
+---@private
+function SchemaCache:_notify_reverse_fk_overflow()
+  self.reverse_fk_index_overflow = true
+  if self.reverse_fk_overflow_warned == true then
+    return
+  end
+  self.reverse_fk_overflow_warned = true
+  vim.notify("dbee-lsp: reverse-FK index overflow; some referenced-by docs truncated", vim.log.levels.WARN)
+end
+
+---@private
+---@return boolean
+function SchemaCache:_reverse_fk_cap_allows_insert(source_key)
+  local uv = vim.uv or vim.loop
+  local start = uv and uv.hrtime and uv.hrtime() or nil
+  local source_refs = self.reverse_fk_refs_by_source_key[source_key] or {}
+  local allowed = #source_refs < REVERSE_FK_PER_SOURCE_REF_CAP
+    and (self.reverse_fk_index_size or 0) < REVERSE_FK_TOTAL_REF_CAP
+  if start then
+    self.reverse_fk_cap_check_ns = (self.reverse_fk_cap_check_ns or 0) + ((uv.hrtime() or start) - start)
+  end
+  return allowed
+end
+
+---@private
+---@param source_key string
+---@param ref_id integer
+---@param visible boolean
+function SchemaCache:_mark_reverse_fk_source_contribution(source_key, ref_id, visible)
+  for _, contribution in ipairs(self.reverse_fk_refs_by_source_key[source_key] or {}) do
+    if contribution.ref_id == ref_id then
+      contribution.visible = visible == true
+      contribution.dropped = visible ~= true
+      return
+    end
+  end
+end
+
+---@private
+---@param refs table[]
+---@param ref_id integer
+---@return boolean
+local function remove_reverse_ref_by_id(refs, ref_id)
+  for index = #refs, 1, -1 do
+    if refs[index].ref_id == ref_id then
+      table.remove(refs, index)
+      return true
+    end
+  end
+  return false
+end
+
+---@private
+---@param bucket table
+---@param target_key string
+function SchemaCache:_promote_reverse_fk_dropped_refs(bucket, target_key)
+  while #bucket.refs < REVERSE_FK_PER_TARGET_REF_CAP and (bucket.dropped_count or 0) > 0 do
+    local source_keys = vim.tbl_keys(bucket.dropped_sources or {})
+    table.sort(source_keys)
+    local promoted = false
+    for _, source_key in ipairs(source_keys) do
+      local dropped = bucket.dropped_sources[source_key]
+      while dropped and #bucket.refs < REVERSE_FK_PER_TARGET_REF_CAP and #dropped.refs > 0 do
+        local ref = table.remove(dropped.refs, 1)
+        dropped.count = math.max(0, (dropped.count or 1) - 1)
+        bucket.dropped_count = math.max(0, (bucket.dropped_count or 1) - 1)
+        bucket.refs[#bucket.refs + 1] = ref
+        self:_mark_reverse_fk_source_contribution(source_key, ref.ref_id, true)
+        promoted = true
+      end
+      if dropped and ((dropped.count or 0) == 0 or #dropped.refs == 0) then
+        bucket.dropped_sources[source_key] = nil
+      end
+      if #bucket.refs >= REVERSE_FK_PER_TARGET_REF_CAP then
+        break
+      end
+    end
+    if not promoted then
+      break
+    end
+  end
+
+  if #bucket.refs == 0 and (bucket.dropped_count or 0) == 0 then
+    self.reverse_fk_refs_by_target_key[target_key] = nil
+  end
+end
+
+---@private
+function SchemaCache:_recompute_reverse_fk_overflow()
+  local overflow = false
+  for _, bucket in pairs(self.reverse_fk_refs_by_target_key or {}) do
+    if (bucket.dropped_count or 0) > 0 then
+      overflow = true
+      break
+    end
+  end
+  self.reverse_fk_index_overflow = overflow
+  if not overflow then
+    self.reverse_fk_overflow_warned = false
+  end
+end
+
+---@private
+---@param source_key string
+---@return boolean removed
+function SchemaCache:_drop_reverse_fk_refs_for_source(source_key)
+  local contributions = self.reverse_fk_refs_by_source_key[source_key]
+  if not contributions or #contributions == 0 then
+    self.reverse_fk_refs_by_source_key[source_key] = nil
+    return false
+  end
+
+  for _, contribution in ipairs(contributions) do
+    local bucket = self.reverse_fk_refs_by_target_key[contribution.target_key]
+    if bucket then
+      if contribution.visible then
+        if remove_reverse_ref_by_id(bucket.refs, contribution.ref_id) then
+          self.reverse_fk_index_size = math.max(0, (self.reverse_fk_index_size or 1) - 1)
+        end
+      else
+        local dropped = bucket.dropped_sources and bucket.dropped_sources[source_key]
+        if dropped and remove_reverse_ref_by_id(dropped.refs, contribution.ref_id) then
+          dropped.count = math.max(0, (dropped.count or 1) - 1)
+          bucket.dropped_count = math.max(0, (bucket.dropped_count or 1) - 1)
+          self.reverse_fk_index_size = math.max(0, (self.reverse_fk_index_size or 1) - 1)
+          if dropped.count == 0 or #dropped.refs == 0 then
+            bucket.dropped_sources[source_key] = nil
+          end
+        end
+      end
+      self:_promote_reverse_fk_dropped_refs(bucket, contribution.target_key)
+    end
+  end
+
+  self.reverse_fk_refs_by_source_key[source_key] = nil
+  self:_recompute_reverse_fk_overflow()
+  self:_bump_reverse_fk_index_generation("reverse_fk_source_drop")
+  return true
+end
+
+---@private
+---@param schema string
+---@param table_name string
+---@param col table
+---@param seen? table<string, boolean>
+function SchemaCache:_add_reverse_fk_refs_for_column(schema, table_name, col, seen)
+  if not non_empty_array(col.foreign_keys) then
+    return
+  end
+  local source_key = self:_reverse_fk_source_key(schema, table_name)
+  local source_refs = self.reverse_fk_refs_by_source_key[source_key]
+  if not source_refs then
+    source_refs = {}
+    self.reverse_fk_refs_by_source_key[source_key] = source_refs
+  end
+
+  for _, fk in ipairs(col.foreign_keys) do
+    local source_column, target_column = self:_reverse_fk_pair_from_ref(fk, col)
+    local target_table = type(fk.target_table) == "string" and fk.target_table or nil
+    if not source_column or not target_column or not target_table or target_table == "" then
+      self.reverse_fk_malformed_ref_count = (self.reverse_fk_malformed_ref_count or 0) + 1
+      goto continue
+    end
+
+    local target_schema = type(fk.target_schema) == "string" and fk.target_schema or schema
+    local target_key = self:_reverse_fk_target_key(target_schema, target_table, target_column)
+    local dedupe_key = table.concat({
+      source_key,
+      target_key,
+      tostring(source_column),
+      tostring(target_column),
+      tostring(fk.constraint_name or ""),
+      tostring(fk.source_ordinal or ""),
+    }, REVERSE_FK_KEY_SEP)
+    if seen and seen[dedupe_key] then
+      goto continue
+    end
+    if seen then
+      seen[dedupe_key] = true
+    end
+
+    if not self:_reverse_fk_cap_allows_insert(source_key) then
+      self:_notify_reverse_fk_overflow()
+      goto continue
+    end
+
+    local ref = {
+      ref_id = self:_next_reverse_fk_ref_id(),
+      src_schema = type(fk.source_schema) == "string" and fk.source_schema or schema,
+      src_table = type(fk.source_table) == "string" and fk.source_table or table_name,
+      src_col = source_column,
+      constraint = fk.constraint_name,
+      ordinal = tonumber(fk.source_ordinal) or 0,
+      target_schema = target_schema,
+      target_table = target_table,
+      target_col = target_column,
+      source_columns = fk.source_columns,
+      target_columns = fk.target_columns,
+    }
+    local bucket = self:_ensure_reverse_fk_target_bucket(target_key)
+    local visible = #bucket.refs < REVERSE_FK_PER_TARGET_REF_CAP
+    if visible then
+      bucket.refs[#bucket.refs + 1] = ref
+    else
+      bucket.dropped_count = (bucket.dropped_count or 0) + 1
+      bucket.dropped_sources[source_key] = bucket.dropped_sources[source_key] or {
+        count = 0,
+        refs = {},
+      }
+      local dropped = bucket.dropped_sources[source_key]
+      dropped.count = (dropped.count or 0) + 1
+      dropped.refs[#dropped.refs + 1] = ref
+      self:_notify_reverse_fk_overflow()
+    end
+    source_refs[#source_refs + 1] = {
+      target_key = target_key,
+      ref_id = ref.ref_id,
+      visible = visible,
+      dropped = not visible,
+    }
+    self.reverse_fk_index_size = (self.reverse_fk_index_size or 0) + 1
+
+    ::continue::
+  end
+end
+
+---@private
+---@param schema string
+---@param table_name string
+---@param cols table[]
+function SchemaCache:_refresh_reverse_fk_refs_for_table(schema, table_name, cols)
+  local source_key = self:_reverse_fk_source_key(schema, table_name)
+  self:_drop_reverse_fk_refs_for_source(source_key)
+  local seen = {}
+  for _, col in ipairs(cols or {}) do
+    self:_add_reverse_fk_refs_for_column(schema, table_name, col, seen)
+  end
+  self.reverse_fk_cache_epoch = epoch_authority.cache_epoch(self)
+  self.reverse_fk_index_dirty = false
+  self.reverse_fk_index_building = false
+  self:_recompute_reverse_fk_overflow()
+  self:_bump_reverse_fk_index_generation("_refresh_reverse_fk_refs_for_table")
+end
+
+---@private
+---@param opts? { captured_epoch?: integer }
+function SchemaCache:_rebuild_reverse_fk_index_from_columns(opts)
+  opts = opts or {}
+  self:_reset_reverse_fk_state({
+    cache_epoch = tonumber(opts.captured_epoch) or epoch_authority.cache_epoch(self),
+    increment = false,
+  })
+  local keys = vim.tbl_keys(self.columns or {})
+  table.sort(keys)
+  for _, key in ipairs(keys) do
+    local schema, table_name = key:match("^(.-)%.(.+)$")
+    if schema and table_name then
+      local seen = {}
+      for _, col in ipairs(self.columns[key] or {}) do
+        self:_add_reverse_fk_refs_for_column(schema, table_name, col, seen)
+      end
+    end
+  end
+  self.reverse_fk_cache_epoch = tonumber(opts.captured_epoch) or epoch_authority.cache_epoch(self)
+  self.reverse_fk_index_dirty = false
+  self.reverse_fk_index_building = false
+  self:_recompute_reverse_fk_overflow()
+  self:_bump_reverse_fk_index_generation("_rebuild_reverse_fk_index_from_columns")
+end
+
+---@private
+---@param source string?
+function SchemaCache:_mark_reverse_fk_index_dirty(source)
+  self.reverse_fk_index_dirty = true
+  self.reverse_fk_index_building = false
+  self.reverse_fk_cache_epoch = epoch_authority.cache_epoch(self)
+  self:_bump_reverse_fk_index_generation(source or "_mark_reverse_fk_index_dirty")
+end
+
+---@private
 ---@param key string
 function SchemaCache:_drop_column_index(key)
   self.column_items_by_key[key] = nil
+  self:_drop_reverse_fk_refs_for_source(key)
 end
 
 ---@private
@@ -959,7 +1476,7 @@ end
 ---@private
 ---@param key string
 ---@param cols Column[]
----@param opts? { root_epoch?: integer }
+---@param opts? { root_epoch?: integer, defer_reverse_fk?: boolean }
 ---@return boolean applied
 function SchemaCache:_store_columns(key, cols, opts)
   if opts and opts.root_epoch ~= nil
@@ -974,6 +1491,11 @@ function SchemaCache:_store_columns(key, cols, opts)
   local schema, name = key:match("^(.-)%.(.+)$")
   if schema and name then
     self:_update_column_index(schema, name)
+    if opts and opts.defer_reverse_fk == true then
+      self:_mark_reverse_fk_index_dirty("_store_columns_defer_reverse_fk")
+    else
+      self:_refresh_reverse_fk_refs_for_table(schema, name, cols)
+    end
   end
 
   self:_evict_columns_if_needed()
@@ -1197,12 +1719,23 @@ function SchemaCache:_update_column_index(schema, table_name)
     return
   end
 
+  local pk_count = 0
+  for _, col in ipairs(cols) do
+    if col.primary_key == true then
+      pk_count = pk_count + 1
+    end
+  end
+
   local items = {}
   for _, col in ipairs(cols) do
+    local markers = column_annotation_markers(col, pk_count)
+    local has_markers = #markers > 0
+    local markers_text = has_markers and table.concat(markers, " ") or nil
     items[#items + 1] = {
       label = col.name,
       kind = CompletionItemKind.Field,
-      detail = col.type,
+      labelDetails = has_markers and { detail = " " .. markers_text } or nil,
+      detail = column_completion_detail(col, markers),
       insertText = col.name,
       sortText = "0_" .. col.name,
     }
@@ -1214,13 +1747,25 @@ function SchemaCache:_update_column_index(schema, table_name)
 end
 
 ---@private
-function SchemaCache:_rebuild_column_indexes()
+---@param opts? { reverse_fk?: boolean, reverse_fk_dirty?: boolean }
+function SchemaCache:_rebuild_column_indexes(opts)
+  opts = opts or {}
   self.column_items_by_key = {}
-  for key, _ in pairs(self.columns) do
+  local keys = vim.tbl_keys(self.columns or {})
+  table.sort(keys)
+  for _, key in ipairs(keys) do
     local schema, name = key:match("^(.-)%.(.+)$")
     if schema and name then
       self:_update_column_index(schema, name)
     end
+  end
+  if opts.reverse_fk == false then
+    self:_reset_reverse_fk_state({
+      dirty = opts.reverse_fk_dirty == true,
+      cache_epoch = epoch_authority.cache_epoch(self),
+    })
+  else
+    self:_rebuild_reverse_fk_index_from_columns()
   end
 end
 
@@ -1425,8 +1970,9 @@ end
 ---@private
 ---@param path string
 ---@param prefix string
+---@param opts? { defer_reverse_fk?: boolean }
 ---@return boolean
-function SchemaCache:_load_column_file(path, prefix)
+function SchemaCache:_load_column_file(path, prefix, opts)
   local f = io.open(path, "r")
   if not f then
     return false
@@ -1478,13 +2024,17 @@ function SchemaCache:_load_column_file(path, prefix)
 
   local fname = vim.fn.fnamemodify(path, ":t:r")
   local key = fname:sub(#prefix + 1)
-  return self:_store_columns(key, cols, { root_epoch = root_epoch })
+  return self:_store_columns(key, cols, {
+    root_epoch = root_epoch,
+    defer_reverse_fk = opts and opts.defer_reverse_fk == true,
+  })
 end
 
 ---@private
 ---@param files table[]
 ---@param start_index integer
-function SchemaCache:_schedule_deferred_column_work(files, start_index)
+---@param opts? { defer_reverse_fk?: boolean }
+function SchemaCache:_schedule_deferred_column_work(files, start_index, opts)
   if start_index > #files then
     return
   end
@@ -1508,7 +2058,7 @@ function SchemaCache:_schedule_deferred_column_work(files, start_index)
     for i = index, last do
       local entry = files[i]
       if not self:_prune_if_old(entry.path, entry.stat, now) then
-        self:_load_column_file(entry.path, prefix)
+        self:_load_column_file(entry.path, prefix, opts)
       end
     end
     index = last + 1
@@ -1524,7 +2074,8 @@ end
 
 ---@private
 ---@param seen_paths? table<string, boolean>
-function SchemaCache:_schedule_deferred_column_scan(seen_paths)
+---@param opts? { defer_reverse_fk?: boolean }
+function SchemaCache:_schedule_deferred_column_scan(seen_paths, opts)
   seen_paths = seen_paths or {}
   local generation = self.disk_work_generation or 0
   local prefix = self.conn_id .. "_cols_"
@@ -1617,7 +2168,7 @@ function SchemaCache:_schedule_deferred_column_scan(seen_paths)
       self.deferred_column_files_scheduled = (self.deferred_column_files_scheduled or 0) + 1
       local stat = self:_file_stat(path)
       if not self:_prune_if_old(path, stat, now) then
-        self:_load_column_file(path, prefix)
+        self:_load_column_file(path, prefix, opts)
       end
       self.deferred_column_files_processed = (self.deferred_column_files_processed or 0) + 1
       processed = processed + 1
@@ -1948,7 +2499,7 @@ function SchemaCache:load_from_disk()
 
   self:_rebuild_structure_indexes()
   self:_load_columns_from_disk()
-  self:_rebuild_column_indexes()
+  self:_rebuild_column_indexes({ reverse_fk = false, reverse_fk_dirty = true })
   return true
 end
 
@@ -1990,13 +2541,13 @@ function SchemaCache:_load_columns_from_disk()
     local entry = files[i]
     seen_paths[entry.path] = true
     if not self:_prune_if_old(entry.path, entry.stat, now) then
-      if self:_load_column_file(entry.path, prefix) then
+      if self:_load_column_file(entry.path, prefix, { defer_reverse_fk = true }) then
         self.sync_column_files_loaded = self.sync_column_files_loaded + 1
       end
     end
   end
 
-  self:_schedule_deferred_column_scan(seen_paths)
+  self:_schedule_deferred_column_scan(seen_paths, { defer_reverse_fk = true })
 end
 
 --- Schedule column disk pruning without running from completion handlers.
@@ -2120,6 +2671,7 @@ function SchemaCache:get_stats()
     deferred_column_files_processed = self.deferred_column_files_processed or 0,
     deferred_dir_advances_per_tick = self.deferred_dir_advances_per_tick or 0,
     total_deferred_dir_advances = self.total_deferred_dir_advances or 0,
+    deferred_disk_work_scheduled = self.deferred_disk_work_scheduled == true,
     deferred_disk_work_drained = self.deferred_disk_work_drained == true,
     disk_work_generation = self.disk_work_generation or 0,
     deferred_disk_work_canceled = self.deferred_disk_work_canceled or 0,
@@ -2131,6 +2683,21 @@ function SchemaCache:get_stats()
     pending_delete_sync_scanned = self.pending_delete_sync_scanned or 0,
     pending_delete_deferred_scanned = self.pending_delete_deferred_scanned or 0,
     pending_delete_deferred_drain_count = self.pending_delete_deferred_drain_count or 0,
+    reverse_fk_index_size = self.reverse_fk_index_size or 0,
+    reverse_fk_cache_epoch = self.reverse_fk_cache_epoch or 0,
+    reverse_fk_index_generation = self.reverse_fk_index_generation or 0,
+    reverse_fk_index_dirty = self.reverse_fk_index_dirty == true,
+    reverse_fk_index_building = self.reverse_fk_index_building == true,
+    reverse_fk_index_overflow = self.reverse_fk_index_overflow == true,
+    reverse_fk_target_bucket_count = vim.tbl_count(self.reverse_fk_refs_by_target_key or {}),
+    reverse_fk_source_bucket_count = vim.tbl_count(self.reverse_fk_refs_by_source_key or {}),
+    reverse_fk_per_target_ref_cap = REVERSE_FK_PER_TARGET_REF_CAP,
+    reverse_fk_per_source_ref_cap = REVERSE_FK_PER_SOURCE_REF_CAP,
+    reverse_fk_total_ref_cap = REVERSE_FK_TOTAL_REF_CAP,
+    reverse_fk_deferred_build_invocations = self.reverse_fk_deferred_build_invocations or 0,
+    reverse_fk_malformed_ref_count = self.reverse_fk_malformed_ref_count or 0,
+    reverse_fk_canonical_calls = self.reverse_fk_canonical_calls or 0,
+    reverse_fk_cap_check_ns = self.reverse_fk_cap_check_ns or 0,
   }
 end
 
@@ -2244,6 +2811,11 @@ function SchemaCache:generation()
 end
 
 ---@return integer
+function SchemaCache:reverse_fk_generation()
+  return self.reverse_fk_index_generation or 0
+end
+
+---@return integer
 function SchemaCache:metadata_root_epoch()
   return self.metadata_root_epoch_value or 0
 end
@@ -2344,6 +2916,35 @@ function SchemaCache:_fresh_lsp_scope()
     return schema_filter_authority.legacy_implicit_all(), nil
   end
   return authority.scope, nil
+end
+
+---@private
+---@param captured_epoch integer
+function SchemaCache:_schedule_reverse_fk_deferred_build(captured_epoch)
+  if self.reverse_fk_index_building == true then
+    return
+  end
+  self.reverse_fk_index_building = true
+  vim.schedule(function()
+    self.reverse_fk_deferred_build_invocations = (self.reverse_fk_deferred_build_invocations or 0) + 1
+    local check = epoch_authority.check_fresh(self, self.handler, self.conn_id)
+    if not check.fresh or check.cache_epoch ~= captured_epoch then
+      self.reverse_fk_index_dirty = true
+      self.reverse_fk_index_building = false
+      self:_bump_reverse_fk_index_generation("_reverse_fk_deferred_build_epoch_mismatch")
+      return
+    end
+
+    self:_rebuild_reverse_fk_index_from_columns({ captured_epoch = captured_epoch })
+
+    local post_check = epoch_authority.check_fresh(self, self.handler, self.conn_id)
+    if not post_check.fresh or post_check.cache_epoch ~= captured_epoch then
+      self:_reset_reverse_fk_state({
+        dirty = true,
+        cache_epoch = captured_epoch,
+      })
+    end
+  end)
 end
 
 ---@param schema string
@@ -2550,6 +3151,93 @@ function SchemaCache:get_column_metadata(schema, table_name, column_name, opts)
   meta.column = col.name
   meta.type = col.type
   return meta
+end
+
+---@private
+---@param a table
+---@param b table
+---@return boolean
+local function reverse_fk_ref_less(a, b)
+  local fields = {
+    "src_schema",
+    "src_table",
+    "src_col",
+    "constraint",
+    "ordinal",
+    "ref_id",
+  }
+  for _, field in ipairs(fields) do
+    local av = a[field]
+    local bv = b[field]
+    if av ~= bv then
+      if field == "ordinal" or field == "ref_id" then
+        return (tonumber(av) or 0) < (tonumber(bv) or 0)
+      end
+      return tostring(av or "") < tostring(bv or "")
+    end
+  end
+  return false
+end
+
+---@private
+---@param ref table
+---@return table
+local function copy_reverse_fk_ref(ref)
+  return {
+    ref_id = ref.ref_id,
+    src_schema = ref.src_schema,
+    src_table = ref.src_table,
+    src_col = ref.src_col,
+    constraint = ref.constraint,
+    ordinal = ref.ordinal,
+    target_schema = ref.target_schema,
+    target_table = ref.target_table,
+    target_col = ref.target_col,
+    source_columns = ref.source_columns,
+    target_columns = ref.target_columns,
+  }
+end
+
+---@param schema string
+---@param table_name string
+---@param column_name string
+---@param _opts? table
+---@return table[]
+function SchemaCache:get_reverse_fk_refs(schema, table_name, column_name, _opts)
+  return epoch_authority.read_with_freshness(self, self.handler, self.conn_id, function(check)
+    local scope, reason = self:_fresh_lsp_scope()
+    if not scope or reason == "authority_unavailable" or reason == "stale_root_epoch" then
+      return {}
+    end
+
+    if self.reverse_fk_index_dirty == true then
+      self:_schedule_reverse_fk_deferred_build(check.cache_epoch)
+      return {}
+    end
+
+    if self.reverse_fk_cache_epoch ~= check.cache_epoch then
+      return {}
+    end
+
+    local target_key = self:_reverse_fk_target_key(schema, table_name, column_name)
+    local bucket = self.reverse_fk_refs_by_target_key[target_key]
+    if not bucket then
+      return {}
+    end
+
+    local refs = {}
+    for _, ref in ipairs(bucket.refs or {}) do
+      if self:schema_in_current_scope(ref.src_schema, scope) then
+        refs[#refs + 1] = copy_reverse_fk_ref(ref)
+      end
+    end
+    table.sort(refs, reverse_fk_ref_less)
+    if (bucket.dropped_count or 0) > 0 then
+      refs._truncated_count = bucket.dropped_count
+      refs._overflow = true
+    end
+    return refs
+  end) or {}
 end
 
 --- Get all schema names.

@@ -12,6 +12,7 @@ local schema_name_canonical = require("dbee.schema_name_canonical")
 local utils = require("dbee.utils")
 
 local connection_wizard = nil
+local drawer_listener_seq = 0
 
 local function get_connection_wizard()
   if not connection_wizard then
@@ -2265,6 +2266,7 @@ end
 ---@return DrawerUI
 function DrawerUI:new(handler, editor, result, opts)
   opts = opts or {}
+  drawer_listener_seq = drawer_listener_seq + 1
 
   if not handler then
     error("no Handler provided to Drawer")
@@ -2300,7 +2302,7 @@ function DrawerUI:new(handler, editor, result, opts)
     pending_generated_calls = {},
     _manual_refresh_conns = {},
     _replay_container_expansions = {},
-    _reconnect_listener_id = "drawer:" .. tostring({}),
+    _reconnect_listener_id = "drawer:" .. tostring(drawer_listener_seq),
     _connection_invalidated_consumer_id = "drawer",
     _pending_connection_invalidations = {},
     _connection_invalidation_flush_scheduled = false,

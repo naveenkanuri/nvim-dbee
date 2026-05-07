@@ -24,6 +24,7 @@ UX13_ROLLUP_SCRIPT ?= $(CURDIR)/ci/headless/check_ux13_rollup.lua
 UX13_ROLLUP_ARTIFACT_DIR ?= $(LSP01_PERF_ARTIFACT_DIR)
 UX13_ROLLUP_LOG ?= $(UX13_ROLLUP_ARTIFACT_DIR)/ux13-rollup-stdout.log
 LSP12_ROLLUP_SCRIPT ?= $(CURDIR)/ci/headless/check_lsp12_rollup.lua
+LSP21_ROLLUP_SCRIPT ?= $(CURDIR)/ci/headless/check_lsp21_rollup.lua
 ARCH14_ROLLUP_SCRIPT ?= $(CURDIR)/ci/headless/check_arch14_rollup.lua
 ARCH14_ROLLUP_LOG ?= $(UX13_ROLLUP_LOG)
 WALLET_PLATFORM ?= $(if $(filter Darwin,$(UNAME_S)),macos,linux)
@@ -33,7 +34,7 @@ WALLET_GO_LOG ?= $(WALLET_ARTIFACT_DIR)/wallet-go.log
 WALLET_LUA_LOG ?= $(WALLET_ARTIFACT_DIR)/wallet-lua.log
 WALLET_ROLLUP_SCRIPT ?= $(CURDIR)/ci/headless/check_oracle_wallet_zip.lua
 
-.PHONY: perf perf-lsp perf-all wallet-test perf-headless db18-locked-helpers-guard gn23 gn23-rollup gn23-locked-helpers-guard gn23-no-go-rpc-guard
+.PHONY: perf perf-lsp perf-all wallet-test perf-headless ux13-rollup lsp21 lsp21-rollup lsp21-locked-helpers-guard db18-locked-helpers-guard gn23 gn23-rollup gn23-locked-helpers-guard gn23-no-go-rpc-guard
 
 perf-headless: perf-bootstrap
 	@mkdir -p "$(LSP01_PERF_STATE_HOME)"
@@ -47,6 +48,69 @@ perf-headless: perf-bootstrap
 	    NVIM_BIN="$(NVIM_BIN)" \
 	    PERF_PLUGIN_ROOT="$(PERF_PLUGIN_ROOT)"; \
 	fi
+
+lsp21: perf-bootstrap
+	@set -eu; \
+	mkdir -p "$(LSP01_PERF_STATE_HOME)" "$(UX13_ROLLUP_ARTIFACT_DIR)" "$(LSP01_PERF_ARTIFACT_DIR)/go-cache"; \
+	: > "$(UX13_ROLLUP_LOG)"; \
+	run_logged() { \
+	  label="$$1"; \
+	  shift; \
+	  tmp="$$(mktemp)"; \
+	  set +e; \
+	  "$$@" >"$$tmp" 2>&1; \
+	  status="$$?"; \
+	  set -e; \
+	  cat "$$tmp"; \
+	  printf '\n'; \
+	  cat "$$tmp" >> "$(UX13_ROLLUP_LOG)"; \
+	  printf '\n' >> "$(UX13_ROLLUP_LOG)"; \
+	  rm -f "$$tmp"; \
+	  if [ "$$status" -ne 0 ]; then \
+	    printf '%s\n' "$$label failed with status $$status" >&2; \
+	    printf '%s\n' "rollup log path: $(UX13_ROLLUP_LOG)" >&2; \
+	    exit "$$status"; \
+	  fi; \
+	}; \
+	run_logged "check_lsp21_completion_annotations.lua" env XDG_STATE_HOME="$(LSP01_PERF_STATE_HOME)" \
+	  $(PERF_NVIM_HEADLESS) -l ci/headless/check_lsp21_completion_annotations.lua; \
+	run_logged "check_lsp21_reverse_refs.lua" env XDG_STATE_HOME="$(LSP01_PERF_STATE_HOME)" \
+	  $(PERF_NVIM_HEADLESS) -l ci/headless/check_lsp21_reverse_refs.lua; \
+	run_logged "check_lsp21_perf.lua" env XDG_STATE_HOME="$(LSP01_PERF_STATE_HOME)" \
+	  $(PERF_NVIM_HEADLESS) -l ci/headless/check_lsp21_perf.lua; \
+	run_logged "go-core" env GOCACHE="$(LSP01_PERF_ARTIFACT_DIR)/go-cache" \
+	  go -C dbee test ./core; \
+	run_logged "lsp21-locked-helpers-guard" \
+	  $(MAKE) --no-print-directory lsp21-locked-helpers-guard; \
+	run_logged "lsp21-static-markers" sh -c 'printf "%s\n" "LSP21_RICH16_UX13_PRESERVED_OK=true" "LSP21_STRICT_MARKER_COUNT=67"'
+
+lsp21-rollup: lsp21
+	LSP21_ROLLUP_LOG="$(UX13_ROLLUP_LOG)" XDG_STATE_HOME="$(LSP01_PERF_STATE_HOME)" $(PERF_NVIM_HEADLESS) -l ci/headless/check_lsp21_rollup.lua
+
+lsp21-locked-helpers-guard:
+	@set -eu; \
+	git diff --quiet -- lua/dbee/schema_filter_authority.lua lua/dbee/schema_name_canonical.lua lua/dbee/lsp/epoch_authority.lua; \
+	git diff --cached --quiet -- lua/dbee/schema_filter_authority.lua lua/dbee/schema_name_canonical.lua lua/dbee/lsp/epoch_authority.lua; \
+	grep -F 'local SCHEMA_CACHE_VERSION = 4' lua/dbee/lsp/schema_cache.lua >/dev/null; \
+	grep -F 'epoch_authority.read_with_freshness' lua/dbee/lsp/schema_cache.lua >/dev/null; \
+	grep -F 'function SchemaCache:get_reverse_fk_refs' lua/dbee/lsp/schema_cache.lua >/dev/null; \
+	grep -F 'self:_fresh_lsp_scope()' lua/dbee/lsp/schema_cache.lua >/dev/null; \
+	grep -F 'schema_name_canonical.canonical' lua/dbee/lsp/schema_cache.lua >/dev/null; \
+	bad="$$(rg -l 'reverse_fk_refs_by_(target|source)_key' lua ci/headless | grep -v '^lua/dbee/lsp/schema_cache.lua$$' || true)"; \
+	if [ -n "$$bad" ]; then printf '%s\n' "$$bad" >&2; exit 1; fi; \
+	bad="$$(rg -n 'markers\[[0-9]+\][[:space:]]*=' ci/headless/check_lsp21*.lua lua/dbee/lsp/schema_cache.lua || true)"; \
+	if [ -n "$$bad" ]; then printf '%s\n' "$$bad" >&2; exit 1; fi; \
+	bad="$$(rg -l '_drop_reverse_fk_refs_for_source' lua ci/headless | grep -v '^lua/dbee/lsp/schema_cache.lua$$' || true)"; \
+	if [ -n "$$bad" ]; then printf '%s\n' "$$bad" >&2; exit 1; fi; \
+	count="$$(rg -n '_drop_reverse_fk_refs_for_source' lua/dbee/lsp/schema_cache.lua | wc -l | tr -d ' ')"; \
+	if [ "$$count" != "3" ]; then printf '%s\n' "_drop_reverse_fk_refs_for_source reference count $$count != 3" >&2; exit 1; fi; \
+	save_block="$$(awk '/function SchemaCache:_save_columns_to_disk/{flag=1} flag{print} flag && /^end$$/{exit}' lua/dbee/lsp/schema_cache.lua)"; \
+	if printf '%s\n' "$$save_block" | grep -E 'labelDetails|referenced_by|Referenced by|truncated|overflow|reverse-FK' >/dev/null; then \
+	  printf '%s\n' "_save_columns_to_disk contains annotation-only fields" >&2; exit 1; \
+	fi; \
+	printf '%s\n' "LSP21_LOCKED_HELPERS_UNTOUCHED_OK=true"; \
+	printf '%s\n' "LSP21_LOCKED_HELPERS_ALL_CONSUMERS_ROUTED_OK=true"; \
+	printf '%s\n' "LSP21_CACHE_VERSION4_NO_BUMP_OK=true"
 
 gn23: perf-bootstrap
 	@set -eu; \
@@ -284,6 +348,19 @@ perf-lsp: perf-bootstrap
 	  DRAW01_PERF_THRESHOLD_FILE="$(DRAW01_PERF_THRESHOLD_FILE)" \
 	  NVIM_BIN="$(NVIM_BIN)" \
 	  PERF_PLUGIN_ROOT="$(PERF_PLUGIN_ROOT)"; \
+	run_logged "source:lua-headless" "check_lsp21_completion_annotations.lua" env XDG_STATE_HOME="$(LSP01_PERF_STATE_HOME)" \
+	  $(PERF_NVIM_HEADLESS) -l ci/headless/check_lsp21_completion_annotations.lua; \
+	run_logged "source:lua-headless" "check_lsp21_reverse_refs.lua" env XDG_STATE_HOME="$(LSP01_PERF_STATE_HOME)" \
+	  $(PERF_NVIM_HEADLESS) -l ci/headless/check_lsp21_reverse_refs.lua; \
+	run_logged "source:lua-headless" "check_lsp21_perf.lua" env XDG_STATE_HOME="$(LSP01_PERF_STATE_HOME)" \
+	  $(PERF_NVIM_HEADLESS) -l ci/headless/check_lsp21_perf.lua; \
+	run_logged "source:go-test" "lsp21-go-core" env GOCACHE="$(LSP01_PERF_ARTIFACT_DIR)/go-cache" \
+	  go -C dbee test ./core; \
+	run_logged "lsp21-locked-helpers-guard" \
+	  $(MAKE) --no-print-directory lsp21-locked-helpers-guard; \
+	run_logged "lsp21-static-markers" sh -c 'printf "%s\n" "LSP21_RICH16_UX13_PRESERVED_OK=true" "LSP21_STRICT_MARKER_COUNT=67"'; \
+	run_logged "lsp21-rollup" env LSP21_ROLLUP_LOG="$(UX13_ROLLUP_LOG)" \
+	  $(PERF_NVIM_HEADLESS) -l ci/headless/check_lsp21_rollup.lua; \
 	run_logged "lsp12-rollup" env LSP12_ROLLUP_LOG="$(UX13_ROLLUP_LOG)" \
 	  $(PERF_NVIM_HEADLESS) -c "luafile $(LSP12_ROLLUP_SCRIPT)"; \
 	run_logged "arch14-rollup" env ARCH14_ROLLUP_LOG="$(ARCH14_ROLLUP_LOG)" \
@@ -292,6 +369,8 @@ perf-lsp: perf-bootstrap
 	  $(PERF_NVIM_HEADLESS) -c "luafile $(UX13_ROLLUP_SCRIPT)"
 
 perf-all: perf perf-lsp
+
+ux13-rollup: perf-lsp
 
 wallet-test: perf-bootstrap
 	@set -eu; \

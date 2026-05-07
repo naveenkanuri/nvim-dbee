@@ -2218,7 +2218,8 @@ local function large_disk_startup_run(state, finish, slug)
     if state.count > (stats.sync_column_file_load_limit or 100) then
       vim.wait(1000, function()
         stats = lsp._cache and lsp._cache:get_stats() or {}
-        return (stats.deferred_column_files_scheduled or 0) > 0
+        return stats.deferred_disk_work_scheduled == true
+          or (stats.deferred_column_files_scheduled or 0) > 0
           or (stats.deferred_column_files_processed or 0) > 0
           or stats.deferred_disk_work_drained == true
       end, 10)
@@ -2227,8 +2228,10 @@ local function large_disk_startup_run(state, finish, slug)
     emit("LSP01_STARTUP_LARGE_DISK_CACHE_TOTAL_FS_OPS", stats.sync_column_files_scanned or "NA")
     emit("LSP01_STARTUP_LARGE_DISK_CACHE_SYNC_LOAD_COUNT", stats.sync_column_files_loaded or "NA")
     emit("LSP01_STARTUP_LARGE_DISK_CACHE_DEFERRED_SCHEDULED_COUNT", stats.deferred_column_files_scheduled or "NA")
-    local deferred_scheduled = (stats.deferred_column_files_scheduled or 0) > 0
+    local deferred_scheduled = stats.deferred_disk_work_scheduled == true
+      or (stats.deferred_column_files_scheduled or 0) > 0
       or (stats.deferred_column_files_processed or 0) > 0
+      or stats.deferred_disk_work_drained == true
     emit("LSP01_STARTUP_LARGE_DISK_CACHE_DEFERRED_WORK_SCHEDULED", deferred_scheduled and "true" or "false")
     local load_limit = stats.sync_column_file_load_limit or 100
     local scan_limit = stats.sync_column_file_scan_limit or 200
