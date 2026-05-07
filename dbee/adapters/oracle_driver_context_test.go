@@ -193,7 +193,7 @@ func runUnsafeBindMatrix(t *testing.T) bool {
 	t.Helper()
 
 	allowed := []string{
-		"id", "name", "p_schema", "p_table", "p_line", "p_status", "A$B", "A#B",
+		"id", "name", "p_schema", "p_table", "p_line", "p_status", "A_B",
 		"my_table", "order_status", "line_count", "table_id", "schema_owner", "date_created",
 	}
 	for _, name := range allowed {
@@ -214,6 +214,7 @@ func runUnsafeBindMatrix(t *testing.T) bool {
 		"table", "schema", "line", "status", "date", "user", "level", "group",
 		"order", "rowid", "number", "rownum", "sysdate", "whenever",
 		"column_value", "nested_table_id", "1", "bad-name", "",
+		"A$B", "A#B", "my$1", "cur_$1", "p#bind",
 	}
 	for _, name := range rejected {
 		assert.Error(t, validateOracleBindName(name), "expected %q to be rejected", name)

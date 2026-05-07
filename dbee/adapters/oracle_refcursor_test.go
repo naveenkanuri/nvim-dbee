@@ -41,36 +41,6 @@ func runRefCursorValidation(t *testing.T) bool {
 		cleaned string
 	}{
 		{
-			query:   "BEGIN proc(:A$B /*CURSOR*/); END;",
-			params:  []string{"A$B"},
-			cleaned: "BEGIN proc(:A$B); END;",
-		},
-		{
-			query:   "BEGIN proc(:A#B  /* CURSOR */); END;",
-			params:  []string{"A#B"},
-			cleaned: "BEGIN proc(:A#B); END;",
-		},
-		{
-			query:   "BEGIN proc(:cur_$1 /*CURSOR*/); END;",
-			params:  []string{"cur_$1"},
-			cleaned: "BEGIN proc(:cur_$1); END;",
-		},
-		{
-			query:   "BEGIN proc(:my$1 /*CURSOR*/); END;",
-			params:  []string{"my$1"},
-			cleaned: "BEGIN proc(:my$1); END;",
-		},
-		{
-			query:   "BEGIN proc(:p#bind /*CURSOR*/); END;",
-			params:  []string{"p#bind"},
-			cleaned: "BEGIN proc(:p#bind); END;",
-		},
-		{
-			query:   "BEGIN proc(:A$B\t/*CURSOR*/); END;",
-			params:  []string{"A$B"},
-			cleaned: "BEGIN proc(:A$B); END;",
-		},
-		{
 			query:   "BEGIN proc(:cur /*cursor*/); END;",
 			params:  []string{"cur"},
 			cleaned: "BEGIN proc(:cur); END;",
@@ -83,7 +53,7 @@ func runRefCursorValidation(t *testing.T) bool {
 		assert.NoError(t, validateRawCursorMarkers(tc.query))
 	}
 
-	for _, name := range []string{"result", "A$B", "A#B"} {
+	for _, name := range []string{"result", "p_result", "A_B"} {
 		assert.NoError(t, validateOracleBindName(name))
 	}
 
@@ -121,6 +91,12 @@ func runMalformedCursorMarkerValidation(t *testing.T) bool {
 		{query: "BEGIN proc(: /*CURSOR*/); END;", name: ""},
 		{query: "BEGIN proc(:1foo /*CURSOR*/); END;", name: "1foo"},
 		{query: "BEGIN proc(:bad-name /*CURSOR*/); END;", name: "bad-name"},
+		{query: "BEGIN proc(:A$B /*CURSOR*/); END;", name: "A$B"},
+		{query: "BEGIN proc(:A#B  /* CURSOR */); END;", name: "A#B"},
+		{query: "BEGIN proc(:cur_$1 /*CURSOR*/); END;", name: "cur_$1"},
+		{query: "BEGIN proc(:my$1 /*CURSOR*/); END;", name: "my$1"},
+		{query: "BEGIN proc(:p#bind /*CURSOR*/); END;", name: "p#bind"},
+		{query: "BEGIN proc(:A$B\t/*CURSOR*/); END;", name: "A$B"},
 	} {
 		assertCursorMarkerRejectedBeforeEnable(t, tc.query, tc.name)
 	}

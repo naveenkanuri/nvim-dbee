@@ -37,7 +37,7 @@ var (
 	_ core.SequenceDriver          = (*oracleDriver)(nil)
 )
 
-var oracleBindNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_$#]*$`)
+var oracleBindNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 var oracleUnsafeBindNames = map[string]struct{}{
 	"ACCESS":          {},

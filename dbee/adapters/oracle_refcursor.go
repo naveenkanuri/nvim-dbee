@@ -16,8 +16,8 @@ import (
 	"github.com/kndndrj/nvim-dbee/dbee/core/builders"
 )
 
-// cursorMarkerPattern matches valid bind variables marked as cursors: :name /*CURSOR*/
-var cursorMarkerPattern = regexp.MustCompile(`(?i):([A-Za-z_][A-Za-z0-9_$#]*)\s*/\*\s*CURSOR\s*\*/`)
+// cursorMarkerPattern matches valid go-ora bind variables marked as cursors: :name /*CURSOR*/
+var cursorMarkerPattern = regexp.MustCompile(`(?i):([A-Za-z_][A-Za-z0-9_]*)\s*/\*\s*CURSOR\s*\*/`)
 
 // cursorMarkerBroadPattern is a lexical guard, not a full SQL parser: it does
 // not strip string literals or comment context. QueryWithBinds only invokes it
