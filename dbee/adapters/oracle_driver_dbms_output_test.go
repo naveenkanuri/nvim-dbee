@@ -89,11 +89,14 @@ func runDBMSOutputLockstep(t *testing.T) bool {
 	}
 
 	out, err := driver.fetchDBMSOutputFromConn(context.Background(), conn)
-	require.NoError(t, err)
+	if !assert.NoError(t, err) {
+		return !t.Failed()
+	}
 	assert.Equal(t, "Hello\nWorld\n", out)
 
-	require.Len(t, conn.queries, 3)
-	require.Len(t, conn.argNames, 3)
+	if !assert.Len(t, conn.queries, 3) || !assert.Len(t, conn.argNames, 3) {
+		return !t.Failed()
+	}
 	for i, query := range conn.queries {
 		assert.Contains(t, query, ":p_line")
 		assert.Contains(t, query, ":p_status")

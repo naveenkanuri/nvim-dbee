@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -72,31 +73,65 @@ func runRefCursorValidation(t *testing.T) bool {
 	}
 	for _, tc := range cases {
 		params, cleaned := parseCursorParams(tc.query)
-		require.Equal(t, tc.params, params)
-		require.Equal(t, tc.cleaned, cleaned)
+		assert.Equal(t, tc.params, params)
+		assert.Equal(t, tc.cleaned, cleaned)
+		assert.NoError(t, validateRawCursorMarkers(tc.query))
 	}
 
 	for _, name := range []string{"result", "A$B", "A#B"} {
-		require.NoError(t, validateOracleBindName(name))
+		assert.NoError(t, validateOracleBindName(name))
 	}
 
 	state := newSessTestState()
 	driver := newSessTestDriver(t, state)
 	result, err := driver.QueryWithBinds(context.Background(), "BEGIN proc(:table /*CURSOR*/); END;", nil)
-	require.Nil(t, result)
+	assert.Nil(t, result)
 	assertOracleBindValidationError(t, err, "table")
-	require.Empty(t, state.getQueryConnIDs())
+	assert.Empty(t, state.getQueryConnIDs())
 
 	state = newSessTestState()
 	driver = newSessTestDriver(t, state)
 	result, err = driver.QueryWithBinds(context.Background(), "BEGIN proc(:result /*CURSOR*/); END;", map[string]string{"table": "x"})
-	require.Nil(t, result)
+	assert.Nil(t, result)
 	assertOracleBindValidationError(t, err, "table")
-	require.Empty(t, state.getQueryConnIDs())
+	assert.Empty(t, state.getQueryConnIDs())
+
+	runMalformedCursorMarkerValidation(t)
 
 	return !t.Failed()
 }
 
 func TestOracleRefCursorValidation(t *testing.T) {
 	runRefCursorValidation(t)
+}
+
+func runMalformedCursorMarkerValidation(t *testing.T) bool {
+	t.Helper()
+
+	for _, tc := range []struct {
+		query string
+		name  string
+	}{
+		{query: "BEGIN proc(:1foo /*CURSOR*/); END;", name: "1foo"},
+		{query: "BEGIN proc(:bad-name /*CURSOR*/); END;", name: "bad-name"},
+	} {
+		err := validateRawCursorMarkers(tc.query)
+		if assert.Error(t, err) {
+			assert.Contains(t, err.Error(), tc.name)
+			assert.Contains(t, err.Error(), "p_"+tc.name)
+		}
+
+		state := newSessTestState()
+		driver := newSessTestDriver(t, state)
+		result, err := driver.QueryWithBinds(context.Background(), tc.query, nil)
+		assert.Nil(t, result)
+		assertOracleBindValidationError(t, err, tc.name)
+		assert.Empty(t, state.getQueryConnIDs())
+	}
+
+	return !t.Failed()
+}
+
+func TestOracleMalformedCursorMarkerRejectedBeforeEnable(t *testing.T) {
+	runMalformedCursorMarkerValidation(t)
 }

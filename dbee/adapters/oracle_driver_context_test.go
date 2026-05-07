@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/kndndrj/nvim-dbee/dbee/core/builders"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -179,11 +180,13 @@ func TestOracleQueryWithBindsPassesNamedArgs(t *testing.T) {
 
 func assertOracleBindValidationError(t *testing.T, err error, name string) {
 	t.Helper()
-	require.Error(t, err)
+	if !assert.Error(t, err) {
+		return
+	}
 	msg := err.Error()
-	require.Contains(t, msg, "oracle bind validation")
-	require.Contains(t, msg, name)
-	require.Contains(t, msg, "p_"+name)
+	assert.Contains(t, msg, "oracle bind validation")
+	assert.Contains(t, msg, name)
+	assert.Contains(t, msg, "p_"+name)
 }
 
 func runUnsafeBindMatrix(t *testing.T) bool {
@@ -194,14 +197,17 @@ func runUnsafeBindMatrix(t *testing.T) bool {
 		"my_table", "order_status", "line_count", "table_id", "schema_owner", "date_created",
 	}
 	for _, name := range allowed {
-		require.NoError(t, validateOracleBindName(name), "expected %q to be allowed", name)
+		assert.NoError(t, validateOracleBindName(name), "expected %q to be allowed", name)
 		args, err := oracleNamedArgs(map[string]string{name: "value"})
-		require.NoError(t, err)
-		require.Len(t, args, 1)
+		if !assert.NoError(t, err) || !assert.Len(t, args, 1) {
+			continue
+		}
 		arg, ok := args[0].(sql.NamedArg)
-		require.True(t, ok)
-		require.Equal(t, name, arg.Name)
-		require.Equal(t, "value", arg.Value)
+		if !assert.True(t, ok) {
+			continue
+		}
+		assert.Equal(t, name, arg.Name)
+		assert.Equal(t, "value", arg.Value)
 	}
 
 	rejected := []string{
@@ -210,7 +216,7 @@ func runUnsafeBindMatrix(t *testing.T) bool {
 		"column_value", "nested_table_id", "1", "bad-name", "",
 	}
 	for _, name := range rejected {
-		require.Error(t, validateOracleBindName(name), "expected %q to be rejected", name)
+		assert.Error(t, validateOracleBindName(name), "expected %q to be rejected", name)
 	}
 
 	_, err := oracleNamedArgs(map[string]string{
@@ -218,13 +224,15 @@ func runUnsafeBindMatrix(t *testing.T) bool {
 		"date":  "y",
 		"id":    "z",
 	})
-	require.Error(t, err)
+	if !assert.Error(t, err) {
+		return !t.Failed()
+	}
 	joined := err.Error()
-	require.Contains(t, joined, `"table"`)
-	require.Contains(t, joined, "p_table")
-	require.Contains(t, joined, `"date"`)
-	require.Contains(t, joined, "p_date")
-	require.NotContains(t, joined, `"id"`)
+	assert.Contains(t, joined, `"table"`)
+	assert.Contains(t, joined, "p_table")
+	assert.Contains(t, joined, `"date"`)
+	assert.Contains(t, joined, "p_date")
+	assert.NotContains(t, joined, `"id"`)
 
 	return !t.Failed()
 }
@@ -235,14 +243,29 @@ func TestOracleNamedArgs(t *testing.T) {
 
 func TestOracleBindNameTable(t *testing.T) {
 	runUnsafeBindMatrix(t)
+	err := validateOracleBindName("table")
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), `"table"`)
+		assert.Contains(t, err.Error(), `"p_table"`)
+	}
 }
 
 func TestOracleBindNameDate(t *testing.T) {
 	runUnsafeBindMatrix(t)
+	err := validateOracleBindName("date")
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), `"date"`)
+		assert.Contains(t, err.Error(), `"p_date"`)
+	}
 }
 
 func TestOracleBindNameWhenever(t *testing.T) {
 	runUnsafeBindMatrix(t)
+	err := validateOracleBindName("whenever")
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), `"whenever"`)
+		assert.Contains(t, err.Error(), `"p_whenever"`)
+	}
 }
 
 func TestOracleBindNamePlainQueryErrorSurface(t *testing.T) {

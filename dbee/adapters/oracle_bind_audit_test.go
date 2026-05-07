@@ -12,14 +12,16 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func discoverOracleProductionFiles(t *testing.T) []string {
 	t.Helper()
 
 	entries, err := os.ReadDir(".")
-	if err != nil {
-		t.Fatalf("read adapter dir: %v", err)
+	if !assert.NoError(t, err, "read adapter dir") {
+		return nil
 	}
 
 	var files []string
@@ -32,8 +34,8 @@ func discoverOracleProductionFiles(t *testing.T) []string {
 	}
 	sort.Strings(files)
 
-	if len(files) == 0 {
-		t.Fatal("oracle bind audit matched zero production files")
+	if !assert.NotEmpty(t, files, "oracle bind audit matched zero production files") {
+		return nil
 	}
 
 	found := make(map[string]bool, len(files))
@@ -41,9 +43,7 @@ func discoverOracleProductionFiles(t *testing.T) []string {
 		found[file] = true
 	}
 	for _, want := range []string{"oracle.go", "oracle_driver.go", "oracle_plsql.go", "oracle_refcursor.go", "oracle_wallet.go"} {
-		if !found[want] {
-			t.Fatalf("oracle bind audit missing expected production file %s from %v", want, files)
-		}
+		assert.True(t, found[want], "oracle bind audit missing expected production file %s from %v", want, files)
 	}
 
 	return files
@@ -126,6 +126,11 @@ func TestOracleBindAuditDetectsViolations(t *testing.T) {
 			name: "unvalidated dynamic",
 			src:  `package adapters; import "database/sql"; func f(name string) { _ = sql.Named(name, 1) }`,
 			want: `unvalidated sql.Named first-arg ident "name"`,
+		},
+		{
+			name: "ignored validation",
+			src:  `package adapters; import "database/sql"; func f(params []string) { var args []any; for _, p := range params { _ = validateOracleBindName(p); args = append(args, sql.Named(p, 1)) }; _ = args }`,
+			want: `unvalidated sql.Named first-arg ident "p"`,
 		},
 	}
 
@@ -246,23 +251,31 @@ func classifySQLNamedFirstArg(fset *token.FileSet, expr ast.Expr, call *ast.Call
 	}
 }
 
+// sqlNamedIdentIsValidated checks Patterns A/B/C from ORA22-20.
+//
+// Trust assumption: Pattern B proves validateOracleBindName(ident) is
+// error-checked before sql.Named(ident, ...), but it does not prove the loop
+// variable is unreassigned between those points. Today's dynamic production
+// sites do not mutate the loop var. If a future dynamic site reassigns it,
+// extend this walker to reject AssignStmt targets for the validated ident
+// between validation and sql.Named in the same RangeStmt body.
 func sqlNamedIdentIsValidated(name string, call *ast.CallExpr, stack []ast.Node) bool {
 	if fn := enclosingFunc(stack); fn != nil && fn.Name.Name == "oracleNamedArgs" {
-		if containsValidateOracleBindNameBefore(fn.Body, name, call.Pos()) {
+		if containsHandledValidateOracleBindNameBefore(fn.Body, name, call.Pos()) {
 			return true
 		}
 	}
 
 	if rng := enclosingRange(stack); rng != nil {
 		if value, ok := rng.Value.(*ast.Ident); ok && value.Name == name {
-			if containsValidateOracleBindNameBefore(rng.Body, name, call.Pos()) {
+			if containsHandledValidateOracleBindNameBefore(rng.Body, name, call.Pos()) {
 				return true
 			}
 		}
 	}
 
 	if ifStmt := enclosingIf(stack); ifStmt != nil {
-		if containsValidateOracleBindName(ifStmt.Init, name) || containsValidateOracleBindName(ifStmt.Cond, name) {
+		if ifStmtHandlesValidateOracleBindName(ifStmt, name) {
 			return true
 		}
 	}
@@ -270,7 +283,7 @@ func sqlNamedIdentIsValidated(name string, call *ast.CallExpr, stack []ast.Node)
 	return false
 }
 
-func containsValidateOracleBindNameBefore(node ast.Node, name string, before token.Pos) bool {
+func containsHandledValidateOracleBindNameBefore(node ast.Node, name string, before token.Pos) bool {
 	found := false
 	ast.Inspect(node, func(n ast.Node) bool {
 		if n == nil || found {
@@ -279,14 +292,56 @@ func containsValidateOracleBindNameBefore(node ast.Node, name string, before tok
 		if n.Pos() >= before {
 			return true
 		}
-		call, ok := n.(*ast.CallExpr)
-		if ok && isValidateOracleBindNameCall(call, name) {
+		ifStmt, ok := n.(*ast.IfStmt)
+		if ok && ifStmtHandlesValidateOracleBindName(ifStmt, name) {
 			found = true
 			return false
 		}
 		return true
 	})
 	return found
+}
+
+func ifStmtHandlesValidateOracleBindName(ifStmt *ast.IfStmt, name string) bool {
+	if ifStmt == nil || !containsValidateOracleBindName(ifStmt.Init, name) {
+		return false
+	}
+	return isErrNotNilCond(ifStmt.Cond) && blockStopsUnsafeBind(ifStmt.Body)
+}
+
+func isErrNotNilCond(expr ast.Expr) bool {
+	binary, ok := unwrapParen(expr).(*ast.BinaryExpr)
+	if !ok || binary.Op != token.NEQ {
+		return false
+	}
+	left, leftOK := unwrapParen(binary.X).(*ast.Ident)
+	right, rightOK := unwrapParen(binary.Y).(*ast.Ident)
+	return (leftOK && left.Name == "err" && rightOK && right.Name == "nil") ||
+		(leftOK && left.Name == "nil" && rightOK && right.Name == "err")
+}
+
+func blockStopsUnsafeBind(block *ast.BlockStmt) bool {
+	if block == nil {
+		return false
+	}
+	for _, stmt := range block.List {
+		switch s := stmt.(type) {
+		case *ast.ReturnStmt:
+			return true
+		case *ast.BranchStmt:
+			if s.Tok == token.CONTINUE {
+				return true
+			}
+		case *ast.ExprStmt:
+			call, ok := unwrapParen(s.X).(*ast.CallExpr)
+			if ok {
+				if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == "panic" {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func containsValidateOracleBindName(node ast.Node, name string) bool {
