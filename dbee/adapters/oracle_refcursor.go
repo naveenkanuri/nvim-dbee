@@ -16,14 +16,39 @@ import (
 	"github.com/kndndrj/nvim-dbee/dbee/core/builders"
 )
 
-// cursorMarkerPattern matches bind variables marked as cursors: :name /*CURSOR*/
+// cursorMarkerPattern matches valid bind variables marked as cursors: :name /*CURSOR*/
 var cursorMarkerPattern = regexp.MustCompile(`(?i):([A-Za-z_][A-Za-z0-9_$#]*)\s*/\*\s*CURSOR\s*\*/`)
+
+// cursorMarkerBroadPattern matches any :raw /*CURSOR*/ shape so malformed
+// cursor bind names fail validation before DBMS_OUTPUT.ENABLE side effects.
+var cursorMarkerBroadPattern = regexp.MustCompile(`(?i):([^\s/:]+)\s*/\*\s*CURSOR\s*\*/`)
 
 var cursorMarkerCleanupPattern = regexp.MustCompile(`(?i)\s*/\*\s*CURSOR\s*\*/`)
 
 // hasCursorMarker checks if the query contains any /*CURSOR*/ markers
 func hasCursorMarker(query string) bool {
 	return cursorMarkerPattern.MatchString(query)
+}
+
+func hasCursorMarkerBroad(query string) bool {
+	return cursorMarkerBroadPattern.MatchString(query)
+}
+
+func validateRawCursorMarkers(query string) error {
+	matches := cursorMarkerBroadPattern.FindAllStringSubmatch(query, -1)
+	var errs []error
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		if err := validateOracleBindName(match[1]); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	return nil
 }
 
 // parseCursorParams extracts cursor parameter names and returns the cleaned query

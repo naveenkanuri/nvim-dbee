@@ -498,9 +498,15 @@ func (d *oracleDriver) QueryWithBinds(ctx context.Context, query string, binds m
 func (d *oracleDriver) executePLSQLLocked(ctx context.Context, conn *sql.Conn, query string, binds map[string]string) (core.ResultStream, error) {
 	defer d.mu.Unlock()
 
-	// Cursor path — worker does NOT touch the mutex
-	if hasCursorMarker(query) {
-		return d.executePLSQLWithCursor(ctx, conn, query, binds)
+	// Cursor-shaped markers must validate before any DBMS_OUTPUT side effect,
+	// including malformed shapes that the strict cursor extractor rejects.
+	if hasCursorMarkerBroad(query) {
+		if err := validateRawCursorMarkers(query); err != nil {
+			return nil, fmt.Errorf("oracle bind validation (cursor marker): %w", err)
+		}
+		if hasCursorMarker(query) {
+			return d.executePLSQLWithCursor(ctx, conn, query, binds)
+		}
 	}
 
 	bindArgs, bindErr := oracleNamedArgs(binds)
