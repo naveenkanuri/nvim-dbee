@@ -17,7 +17,9 @@ import (
 )
 
 // cursorMarkerPattern matches bind variables marked as cursors: :name /*CURSOR*/
-var cursorMarkerPattern = regexp.MustCompile(`:\w+\s*/\*CURSOR\*/`)
+var cursorMarkerPattern = regexp.MustCompile(`(?i):([A-Za-z_][A-Za-z0-9_$#]*)\s*/\*\s*CURSOR\s*\*/`)
+
+var cursorMarkerCleanupPattern = regexp.MustCompile(`(?i)\s*/\*\s*CURSOR\s*\*/`)
 
 // hasCursorMarker checks if the query contains any /*CURSOR*/ markers
 func hasCursorMarker(query string) bool {
@@ -28,17 +30,14 @@ func hasCursorMarker(query string) bool {
 // Example: "BEGIN proc(:result /*CURSOR*/); END;" -> ["result"], "BEGIN proc(:result); END;"
 func parseCursorParams(query string) ([]string, string) {
 	var params []string
-	// Find all :name /*CURSOR*/ patterns
-	matches := cursorMarkerPattern.FindAllString(query, -1)
+	matches := cursorMarkerPattern.FindAllStringSubmatch(query, -1)
 	for _, match := range matches {
-		// Extract param name (everything between : and space)
-		name := strings.TrimSpace(match)
-		name = strings.TrimPrefix(name, ":")
-		name = strings.Split(name, " ")[0]
-		params = append(params, name)
+		if len(match) >= 2 {
+			params = append(params, match[1])
+		}
 	}
 	// Remove /*CURSOR*/ markers from query
-	cleanQuery := regexp.MustCompile(`\s*/\*CURSOR\*/`).ReplaceAllString(query, "")
+	cleanQuery := cursorMarkerCleanupPattern.ReplaceAllString(query, "")
 	return params, cleanQuery
 }
 
@@ -81,23 +80,35 @@ func (d *oracleDriver) executePLSQLWithCursor(ctx context.Context, conn *sql.Con
 		return nil, errors.New("no cursor parameters found")
 	}
 
-	// Enable DBMS_OUTPUT first (same session connection)
+	// Create cursor variables and build named parameters.
+	// Filter bind args that collide with cursor OUT parameters.
+	bindArgs, bindErr := oracleNamedArgs(filterCursorBindNames(binds, cursorParams))
+	if bindErr != nil {
+		return nil, fmt.Errorf("oracle bind validation: %w", bindErr)
+	}
+
+	cursors := make([]go_ora.RefCursor, len(cursorParams))
+	args := make([]any, 0, len(bindArgs)+len(cursorParams))
+	args = append(args, bindArgs...)
+	var nameErrs []error
+	for i, param := range cursorParams {
+		if err := validateOracleBindName(param); err != nil {
+			nameErrs = append(nameErrs, err)
+			continue
+		}
+		args = append(args, sql.Named(param, sql.Out{Dest: &cursors[i]}))
+	}
+	if len(nameErrs) > 0 {
+		return nil, fmt.Errorf("oracle bind validation (cursor param): %w", errors.Join(nameErrs...))
+	}
+
+	// Enable DBMS_OUTPUT only after all bind names are validated.
 	_, err := conn.ExecContext(ctx, "BEGIN DBMS_OUTPUT.ENABLE(NULL); END;")
 	if err != nil {
 		if isSessionConnError(err) {
 			d.resetSessionConnLocked()
 		}
 		return nil, fmt.Errorf("failed to enable DBMS_OUTPUT: %w", err)
-	}
-
-	// Create cursor variables and build named parameters.
-	// Filter bind args that collide with cursor OUT parameters.
-	cursors := make([]go_ora.RefCursor, len(cursorParams))
-	bindArgs := oracleNamedArgs(filterCursorBindNames(binds, cursorParams))
-	args := make([]interface{}, 0, len(bindArgs)+len(cursorParams))
-	args = append(args, bindArgs...)
-	for i, param := range cursorParams {
-		args = append(args, sql.Named(param, sql.Out{Dest: &cursors[i]}))
 	}
 
 	// Add semicolon if needed

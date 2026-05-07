@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -35,6 +36,181 @@ var (
 	_ core.IndexDriver             = (*oracleDriver)(nil)
 	_ core.SequenceDriver          = (*oracleDriver)(nil)
 )
+
+var oracleBindNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_$#]*$`)
+
+var oracleUnsafeBindNames = map[string]struct{}{
+	"ACCESS":          {},
+	"ADD":             {},
+	"ALL":             {},
+	"ALTER":           {},
+	"AND":             {},
+	"ANY":             {},
+	"AS":              {},
+	"ASC":             {},
+	"AT":              {},
+	"AUDIT":           {},
+	"BEGIN":           {},
+	"BETWEEN":         {},
+	"BFILE":           {},
+	"BLOB":            {},
+	"BOOLEAN":         {},
+	"BULK":            {},
+	"BY":              {},
+	"CASE":            {},
+	"CHAR":            {},
+	"CHECK":           {},
+	"CLOB":            {},
+	"CLOSE":           {},
+	"CLUSTER":         {},
+	"CLUSTERS":        {},
+	"COLAUTH":         {},
+	"COLUMN":          {},
+	"COLUMNS":         {},
+	"COLUMN_VALUE":    {},
+	"COMMENT":         {},
+	"COMMIT":          {},
+	"COMPRESS":        {},
+	"CONNECT":         {},
+	"CONSTANT":        {},
+	"CREATE":          {},
+	"CRASH":           {},
+	"CURRENT":         {},
+	"CURSOR":          {},
+	"DATE":            {},
+	"DECIMAL":         {},
+	"DECLARE":         {},
+	"DEFAULT":         {},
+	"DELETE":          {},
+	"DESC":            {},
+	"DISTINCT":        {},
+	"DO":              {},
+	"DROP":            {},
+	"DUAL":            {},
+	"ELSE":            {},
+	"ELSIF":           {},
+	"END":             {},
+	"EXCEPTION":       {},
+	"EXCLUSIVE":       {},
+	"EXECUTE":         {},
+	"EXISTS":          {},
+	"EXIT":            {},
+	"FETCH":           {},
+	"FILE":            {},
+	"FLOAT":           {},
+	"FOR":             {},
+	"FROM":            {},
+	"FUNCTION":        {},
+	"GOTO":            {},
+	"GRANT":           {},
+	"GROUP":           {},
+	"HAVING":          {},
+	"IDENTIFIED":      {},
+	"IF":              {},
+	"IMMEDIATE":       {},
+	"IN":              {},
+	"INCREMENT":       {},
+	"INDEX":           {},
+	"INDEXES":         {},
+	"INITIAL":         {},
+	"INSERT":          {},
+	"INTEGER":         {},
+	"INTERSECT":       {},
+	"INTO":            {},
+	"IS":              {},
+	"LEVEL":           {},
+	"LIKE":            {},
+	"LINE":            {},
+	"LOCK":            {},
+	"LOGFILE":         {},
+	"LONG":            {},
+	"LOOP":            {},
+	"MAXEXTENTS":      {},
+	"MERGE":           {},
+	"MINUS":           {},
+	"MLSLABEL":        {},
+	"MODE":            {},
+	"MODIFY":          {},
+	"NCHAR":           {},
+	"NCLOB":           {},
+	"NESTED_TABLE_ID": {},
+	"NOAUDIT":         {},
+	"NOCOMPRESS":      {},
+	"NOT":             {},
+	"NOWAIT":          {},
+	"NULL":            {},
+	"NUMBER":          {},
+	"NVARCHAR2":       {},
+	"OF":              {},
+	"OFFLINE":         {},
+	"ON":              {},
+	"ONLINE":          {},
+	"OPTION":          {},
+	"OR":              {},
+	"ORDER":           {},
+	"OUT":             {},
+	"OVERLAPS":        {},
+	"PCTFREE":         {},
+	"PRAGMA":          {},
+	"PRIOR":           {},
+	"PRIVILEGES":      {},
+	"PROCEDURE":       {},
+	"PUBLIC":          {},
+	"RAISE":           {},
+	"RAW":             {},
+	"RECORD":          {},
+	"REF":             {},
+	"RELEASE":         {},
+	"RENAME":          {},
+	"RESOURCE":        {},
+	"RETURN":          {},
+	"REVOKE":          {},
+	"ROLE":            {},
+	"ROLLBACK":        {},
+	"ROW":             {},
+	"ROWID":           {},
+	"ROWNUM":          {},
+	"ROWS":            {},
+	"SAVEPOINT":       {},
+	"SCHEMA":          {},
+	"SELECT":          {},
+	"SEPARATE":        {},
+	"SESSION":         {},
+	"SET":             {},
+	"SHARE":           {},
+	"SIZE":            {},
+	"SMALLINT":        {},
+	"SQL":             {},
+	"START":           {},
+	"STATUS":          {},
+	"SUBTYPE":         {},
+	"SUCCESSFUL":      {},
+	"SYNONYM":         {},
+	"SYSDATE":         {},
+	"SYSTIMESTAMP":    {},
+	"TABAUTH":         {},
+	"TABLE":           {},
+	"THEN":            {},
+	"TO":              {},
+	"TRIGGER":         {},
+	"TYPE":            {},
+	"UID":             {},
+	"UNION":           {},
+	"UNIQUE":          {},
+	"UPDATE":          {},
+	"USER":            {},
+	"VALIDATE":        {},
+	"VALUES":          {},
+	"VARCHAR":         {},
+	"VARCHAR2":        {},
+	"VIEW":            {},
+	"VIEWS":           {},
+	"WHEN":            {},
+	"WHENEVER":        {},
+	"WHERE":           {},
+	"WHILE":           {},
+	"WITH":            {},
+}
 
 type oracleDriver struct {
 	c        *builders.Client
@@ -131,9 +307,19 @@ func coerceOracleBindValue(raw string) any {
 	}
 }
 
-func oracleNamedArgs(binds map[string]string) []any {
+func validateOracleBindName(name string) error {
+	if name == "" || !oracleBindNameRe.MatchString(name) {
+		return fmt.Errorf("invalid oracle bind identifier %q; rename the SQL placeholder and bind option to a non-reserved name such as %q", name, "p_"+name)
+	}
+	if _, bad := oracleUnsafeBindNames[strings.ToUpper(name)]; bad {
+		return fmt.Errorf("oracle bind name %q is reserved or unsafe; rename the SQL placeholder and bind option to a non-reserved name such as %q", name, "p_"+name)
+	}
+	return nil
+}
+
+func oracleNamedArgs(binds map[string]string) ([]any, error) {
 	if len(binds) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	keys := make([]string, 0, len(binds))
@@ -142,11 +328,19 @@ func oracleNamedArgs(binds map[string]string) []any {
 	}
 	sort.Strings(keys)
 
+	var nameErrs []error
 	args := make([]any, 0, len(keys))
 	for _, name := range keys {
+		if err := validateOracleBindName(name); err != nil {
+			nameErrs = append(nameErrs, err)
+			continue
+		}
 		args = append(args, sql.Named(name, coerceOracleBindValue(binds[name])))
 	}
-	return args
+	if len(nameErrs) > 0 {
+		return nil, errors.Join(nameErrs...)
+	}
+	return args, nil
 }
 
 // getSessionConnLocked returns the pinned session connection, creating it
@@ -249,7 +443,12 @@ func (d *oracleDriver) QueryWithBinds(ctx context.Context, query string, binds m
 		return result, err
 	}
 
-	bindArgs := oracleNamedArgs(binds)
+	bindArgs, bindErr := oracleNamedArgs(binds)
+	if bindErr != nil {
+		d.mu.Unlock()
+		cancel()
+		return nil, fmt.Errorf("oracle bind validation: %w", bindErr)
+	}
 	hasReturning := strings.Contains(strings.ToLower(query), " returning ")
 
 	// Exec path: statements that don't return result sets
@@ -304,6 +503,11 @@ func (d *oracleDriver) executePLSQLLocked(ctx context.Context, conn *sql.Conn, q
 		return d.executePLSQLWithCursor(ctx, conn, query, binds)
 	}
 
+	bindArgs, bindErr := oracleNamedArgs(binds)
+	if bindErr != nil {
+		return nil, fmt.Errorf("oracle bind validation: %w", bindErr)
+	}
+
 	// Enable DBMS_OUTPUT with unlimited buffer (session-scoped)
 	_, err := conn.ExecContext(ctx, "BEGIN DBMS_OUTPUT.ENABLE(NULL); END;")
 	if err != nil {
@@ -319,7 +523,7 @@ func (d *oracleDriver) executePLSQLLocked(ctx context.Context, conn *sql.Conn, q
 	if !isCall && !strings.HasSuffix(strings.TrimSpace(plsqlQuery), ";") {
 		plsqlQuery += ";"
 	}
-	_, err = conn.ExecContext(ctx, plsqlQuery, oracleNamedArgs(binds)...)
+	_, err = conn.ExecContext(ctx, plsqlQuery, bindArgs...)
 	if err != nil {
 		if isSessionConnError(err) {
 			d.resetSessionConnLocked()
@@ -355,9 +559,9 @@ func (d *oracleDriver) fetchDBMSOutputFromConn(ctx context.Context, conn oracleE
 
 		// Call DBMS_OUTPUT.GET_LINE as a procedure with OUT parameters
 		// Using named parameters as required by go-ora for OUT binds
-		_, err := conn.ExecContext(ctx, `BEGIN DBMS_OUTPUT.GET_LINE(:line, :status); END;`,
-			sql.Named("line", sql.Out{Dest: &line}),
-			sql.Named("status", sql.Out{Dest: &status}))
+		_, err := conn.ExecContext(ctx, `BEGIN DBMS_OUTPUT.GET_LINE(:p_line, :p_status); END;`,
+			sql.Named("p_line", sql.Out{Dest: &line}),
+			sql.Named("p_status", sql.Out{Dest: &status}))
 		if err != nil {
 			return output.String(), fmt.Errorf("DBMS_OUTPUT.GET_LINE: %w", err)
 		}
