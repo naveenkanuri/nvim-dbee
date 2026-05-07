@@ -490,6 +490,18 @@ func (h *Handler) ConnectionGetColumns(connID core.ConnectionID, opts *core.Tabl
 		return nil, fmt.Errorf("unknown connection with id: %q", connID)
 	}
 
+	// Phase 21 Bug 2 fix: route through rich-meta when adapter supports it so
+	// LSP completion annotations (PK/FK/null) and drawer-flat callers see the
+	// same Column shape Phase 17 plumbs through GetColumnsRich. Adapters that
+	// don't implement RichColumnDriver fall back to plain GetColumns.
+	if c.SupportsRichMetadata().Columns {
+		columns, err := c.GetColumnsRich(opts)
+		if err == nil {
+			return columns, nil
+		}
+		// Fall through to plain path if rich call fails (degraded mode).
+	}
+
 	columns, err := c.GetColumns(opts)
 	if err != nil {
 		return nil, err
@@ -528,7 +540,20 @@ func (h *Handler) ConnectionGetColumnsAsync(
 	}
 
 	go func() {
-		columns, err := c.GetColumns(opts)
+		// Phase 21 Bug 2 fix: prefer rich-meta path when adapter supports it.
+		// Same rationale as ConnectionGetColumns above.
+		var columns []*core.Column
+		var err error
+		if c.SupportsRichMetadata().Columns {
+			columns, err = c.GetColumnsRich(opts)
+			if err != nil {
+				// Fall through to plain on rich failure.
+				columns = nil
+			}
+		}
+		if columns == nil {
+			columns, err = c.GetColumns(opts)
+		}
 		if err != nil {
 			h.events.StructureChildrenLoaded(
 				connID,
