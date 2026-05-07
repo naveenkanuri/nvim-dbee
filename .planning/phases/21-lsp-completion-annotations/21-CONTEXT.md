@@ -42,11 +42,16 @@ Line anchors below are the implementation baseline as of 2026-05-07 and must be 
 
 1. Cache version baseline is v4. No v5 bump unless implementation changes serialized disk-cache shape.
 2. Reverse-FK index is derived in memory from already-loaded `Column.ForeignKeys`; it is never serialized.
-3. Column completion labels remain the raw column name so `insertText`, `data.column`, and resolve metadata keep working.
-4. LSP 3.17 clients get `labelDetails.detail`; older clients get a compatible `detail` string.
-5. Reverse-FK docs are added through `completionItem/resolve`, not eager completion item documentation.
-6. Completion and resolve request paths stay cache-only and perform no sync or async DB metadata work.
-7. The three locked helpers are imported and used but not edited:
+3. Reverse-FK indexing uses both `reverse_fk_refs_by_target_key` and `reverse_fk_refs_by_source_key`; source-table eviction must be O(refs-for-source), not O(total refs).
+4. Reverse-FK keys are fold-aware through `schema_name_canonical.canonical(..., quoted=true, self.fold_id)` on writer and reader. Display fields keep exact adapter-provided text.
+5. Reverse-FK reads route through `epoch_authority.read_with_freshness`, then `_fresh_lsp_scope()`, and filter returned refs to the current authority scope.
+6. Reverse-FK docs are bounded: 50 refs per target, 100 refs per source, 50k refs total, with visible truncation and a once-per-overflow warning.
+7. Column completion labels remain the raw column name so `insertText`, `data.column`, and resolve metadata keep working.
+8. LSP 3.17 clients get `labelDetails.detail`; older clients get a compatible `detail` string.
+9. Reverse-FK docs are added through `completionItem/resolve`, not eager completion item documentation.
+10. Completion and resolve request paths stay cache-only and perform no sync or async DB metadata work.
+11. Annotation strings and reverse-doc strings are in-memory only and must not appear in `_save_columns_to_disk` payloads.
+12. The three locked helpers are imported and used but not edited:
    - `lua/dbee/schema_filter_authority.lua`
    - `lua/dbee/schema_name_canonical.lua`
    - `lua/dbee/lsp/epoch_authority.lua`
@@ -55,6 +60,8 @@ Line anchors below are the implementation baseline as of 2026-05-07 and must be 
 
 - There is no existing `_post_load_index` hook. The practical hook is the existing column-index lifecycle: `_store_columns`, `_drop_column_index`, `_rebuild_column_indexes`, and `_reset_indexes`.
 - Reverse-FK docs can only reference FKs from source tables whose columns are already loaded into the schema cache. This preserves the no-DB-work LSP contract.
+- Cross-schema FK targets do not require the target table to be cached during index construction; resolve docs still require the caller to have resolved target column metadata.
+- Composite FK pairing precedence is arrays+valid ordinal, exact `SourceColumn` index in `SourceColumns`, shorthand pair, then skip malformed refs with diagnostics.
+- Composite PK ordinals are never fabricated. Multiple PK columns with ordinal 0/nil render `[PK]` rather than misleading `[PK1]`.
 - Unsupported rich metadata adapters produce nil/empty rich fields. Phase 21 treats nil/empty values as unknown/absent and silently omits annotations.
 - Default-expression annotations are deferred from the popup marker surface. Existing hover/resolve docs can still show `Default` because `object_docs.lua` already formats it.
-

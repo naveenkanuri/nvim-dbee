@@ -90,9 +90,13 @@ Out of scope:
 | Default expression marker | Add popup marker now; docs only; defer entirely | REC-DEFAULT (LOCK): defer popup default marker. Existing docs may keep showing `Default`. |
 | Table completion PK count | Annotate table items; leave table items unchanged | REC-DEFAULT (LOCK): leave table items unchanged. Phase 21 is column-completion scoped, and table items can exist before columns are loaded. |
 | Reverse-FK index | Lazy scan on resolve; eager in-memory index; serialized cache index | REC-DEFAULT (LOCK): eager in-memory index derived from loaded columns, epoch-keyed, never serialized. |
-| Reverse-FK index lifecycle | New `_post_load_index`; fold into existing column-index lifecycle | REC-DEFAULT (LOCK): no `_post_load_index`; update with `_store_columns`, `_drop_column_index`, `_rebuild_column_indexes`, and `_reset_indexes`. |
+| Reverse-FK index data structure | Target-only map; target map plus forward source map | REC-DEFAULT (LOCK): use both `reverse_fk_refs_by_target_key` and `reverse_fk_refs_by_source_key`. The source map makes source-table drop/eviction O(refs-for-source), not O(total reverse refs). |
+| Reverse-FK index lifecycle | New `_post_load_index`; fold into existing column-index lifecycle | REC-DEFAULT (LOCK): no `_post_load_index`; update with `_store_columns`, `_drop_column_index`, `_rebuild_column_indexes`, and `_reset_indexes`. Stamp `reverse_fk_index_epoch` after each successful rebuild/refresh and reset it to 0 on clear/fail-closed paths. |
 | Reverse-FK docs surface | Eager completion docs; resolve docs; hover docs too | REC-DEFAULT (LOCK): `completionItem/resolve.documentation` only. Hover behavior is preserved. |
-| Internal reverse-FK key | Human colon key; exact tuple with safe separator; folded key | REC-DEFAULT (LOCK): logical `target_schema:target_table:target_column`, implemented with a non-printing separator to avoid identifier collisions; retain display fields exactly. |
+| Internal reverse-FK key | Human colon key; exact tuple with safe separator; folded key | REC-DEFAULT (LOCK): logical `target_schema:target_table:target_column`, implemented with a non-printing separator and `schema_name_canonical.canonical(..., quoted=true, self.fold_id)` on writer and reader. Retain display fields exactly. |
+| Reverse-FK overflow policy | Global hard-disable; per-target truncate; source/target/global caps | REC-DEFAULT (LOCK): three-tier caps: per-target 50 rendered refs, per-source 100 refs, total 50k refs. Overflow degrades with truncation text and a once-per-overflow warning, not silent `{}` for every lookup. |
+| Reverse-FK resolve transfer | Deep-copy in cache and deep-copy into metadata; single ownership transfer | REC-DEFAULT (LOCK): `get_reverse_fk_refs` returns owned sorted refs; `resolve.metadata_for` assigns the returned table directly to `meta.referenced_by` and does not deep-copy again. |
+| Resolve memo invalidation | Cache generation only; add reverse-index epoch dimension | REC-DEFAULT (LOCK): include `reverse_fk_index_epoch` in the completion resolve memo key because column eviction can shrink reverse-FK docs without bumping `cache:generation()`. |
 | Disk cache version | Bump to v5; stay v4 | REC-DEFAULT (LOCK): stay v4. Derived in-memory index and completion item annotation shape do not change serialized payloads. |
 | Capability false behavior | Show unknown tags; omit silently; warn | REC-DEFAULT (LOCK): omit silently for nil/empty rich fields. |
 | Test adapter breadth | PG/Oracle only; all adapters; live DB | REC-DEFAULT (LOCK): PG-style lower-case and Oracle-style upper-case Lua fixtures only, plus core Go regression. No live DB in this phase. |
@@ -102,23 +106,23 @@ No design fork currently needs user input.
 ## Hard Questions Answered
 
 1. **Where compute reverse-FK index?**
-   No existing `_post_load_index` hook exists. Add `reverse_fk_refs_by_target_key` to the cache object and maintain it through the existing column-index lifecycle.
+   No existing `_post_load_index` hook exists. Add `reverse_fk_refs_by_target_key` and `reverse_fk_refs_by_source_key` to the cache object and maintain them through the existing column-index lifecycle.
 
    Planned hook points:
 
    ```lua
-   self:_rebuild_column_indexes() -- clears/rebuilds column items and reverse_fk_refs_by_target_key
+   self:_rebuild_column_indexes() -- clears/rebuilds column items, target map, source map, and stamps reverse_fk_index_epoch
    self:_update_column_index(schema, name) -- pre-bakes column annotations and refreshes source-table reverse refs
    ```
 
 2. **Which reload markers invalidate reverse-FK data?**
-   Reuse existing metadata generation/root epoch transitions: `build_from_metadata_rows`, `build_from_structure`, `build_from_schemas`, `load_from_disk`, `on_schema_objects_loaded`, `_store_columns`, `invalidate`, and `set_connection`. Reads route through `epoch_authority.read_with_freshness`.
+   Reuse existing metadata generation/root epoch transitions: `build_from_metadata_rows`, `build_from_structure`, `build_from_schemas`, `load_from_disk`, `on_schema_objects_loaded`, `_store_columns`, `invalidate`, and `set_connection`. Reads route through `epoch_authority.read_with_freshness`, then `_fresh_lsp_scope()` filters returned source refs by current authority scope. Writers stamp `reverse_fk_index_epoch = epoch_authority.cache_epoch(self)` after successful rebuild/refresh and reset it to 0 on index clears.
 
 3. **Build-time vs read-time annotations?**
    Lock build-time pre-bake in `_update_column_index`. The cache already rebuilds `column_items_by_key` when columns change, and `get_column_completion_items` deep-copies items before returning them.
 
 4. **Composite PK ordinals?**
-   Use `Column.PrimaryKeyOrdinal`; render `[PK]` when ordinal <= 1 for a non-composite/single unknown ordinal, and `[PKn]` when ordinal > 0 and composite PK evidence exists.
+   Use `Column.PrimaryKeyOrdinal` without fabricating ordinals. If exactly one column has `primary_key == true`, render `[PK]`. If two or more PK columns exist and `primary_key_ordinal > 0`, render `[PKn]`. If two or more PK columns exist but ordinal is 0/nil, render `[PK]` as degraded-but-honest output.
 
 5. **Can completion resolve add reverse-FK docs?**
    Yes. `server.lua:619-624` already calls `resolve.handle`; `resolve.lua:176-183` already guards stale generations; `object_docs.lua:233-247` already returns `documentation`. Add reverse refs to column metadata before `docs.format_resolve`.
@@ -127,10 +131,10 @@ No design fork currently needs user input.
    Unsupported adapters return empty/nil rich fields (`handler.go:589-600`). Annotation helpers must check truthy/typed fields and omit otherwise.
 
 7. **Bounded fixtures?**
-   Add a real-ish headless fixture with 1k tables x 10 columns and 100 FKs, then a separate perf fixture with 10k columns and 1k FKs.
+   Add a real-ish headless fixture with 1k tables x 10 columns and 100 FKs; explicit edge fixtures for quoted mixed-case, self-FK, cross-schema target out-of-cache, zero-FK, and high-fan-in refs; and perf fixtures at both 10k columns/1k FKs and 250k columns/50k FKs.
 
 8. **Strict marker discipline?**
-   Target exactly 40 `LSP21_*` strict markers plus `LSP21_ALL_PASS=true` as the final rollup sentinel.
+   Target exactly 60 `LSP21_*` strict markers plus `LSP21_ALL_PASS=true` as the final rollup sentinel. The count is higher than the r1 estimate because each review-requested marker is retained explicitly.
 
 9. **Locked helper routing?**
    No helper edits. All completion/reverse-FK reads must route through `epoch_authority.read_with_freshness`. Identifier canonicalization, if needed, calls `schema_name_canonical` rather than duplicating fold rules.
@@ -154,50 +158,82 @@ Dependency graph:
 21-01 -> 21-02 -> 21-03 -> 21-04 -> 21-05
 ```
 
+## Disk Payload Shape Lock
+
+Phase 21 does not mutate serialized cache payloads. Annotation strings (`labelDetails.detail`, hybrid completion `detail`, reverse-FK rendered docs, overflow text) are derived only into in-memory completion/documentation structures. They MUST NOT be written onto `Column` records or into `_save_columns_to_disk`. The v4 serialized column cache shape remains closed for Phase 21:
+
+```lua
+{ version, schema_filter_signature, root_epoch, columns = Column[] }
+```
+
+## Performance Budget Lock
+
+Perf gates use 100 measured iterations per scenario and report p95. Reverse-FK insertion budget is `<= 10us/FK-ref`, which supports `< 50ms` for the 1k-FK mid fixture and `<= 500ms` for the 50k-FK large fixture. Completion read budgets include both the existing hot-table path (`< 1ms`) and a 500-column wide-table path (`< 2.5ms`, `<= 5us/column`). Resolve docs include both cache lookup (`< 1ms`) and E2E formatting/serialization (`< 5ms`).
+
 ## Strict Markers
 
-`LSP21_STRICT_MARKER_COUNT` target is **40**. `LSP21_ALL_PASS=true` is the rollup sentinel and is not counted.
+`LSP21_STRICT_MARKER_COUNT` target is **60**. `LSP21_ALL_PASS=true` is the rollup sentinel and is not counted.
 
 1. `LSP21_COMPLETION_LABEL_UNCHANGED_OK`
 2. `LSP21_LABELDETAILS_DETAIL_RENDERED_OK`
 3. `LSP21_DETAIL_COMPAT_RENDERED_OK`
 4. `LSP21_PK_SINGLE_MARKER_OK`
 5. `LSP21_PK_COMPOSITE_ORDINAL_OK`
-6. `LSP21_NULLABLE_TRUE_MARKER_OK`
-7. `LSP21_PK_NULL_SUPPRESSED_OK`
-8. `LSP21_NOT_NULL_OMITTED_OK`
-9. `LSP21_FK_SINGLE_MARKER_OK`
-10. `LSP21_FK_COMPOSITE_TARGET_TUPLE_OK`
-11. `LSP21_FK_MULTIPLE_REFS_OK`
-12. `LSP21_CAPABILITY_FALSE_EMPTY_RICH_FIELDS_OMIT_OK`
-13. `LSP21_REVERSE_FK_INDEX_EMPTY_INIT_OK`
-14. `LSP21_REVERSE_FK_INDEX_BUILD_ON_COLUMN_STORE_OK`
-15. `LSP21_REVERSE_FK_INDEX_REBUILD_ON_COLUMN_INDEX_REBUILD_OK`
-16. `LSP21_REVERSE_FK_INDEX_CLEAR_ON_RESET_INVALIDATE_OK`
-17. `LSP21_REVERSE_FK_INDEX_EVICTION_DROPS_REFS_OK`
-18. `LSP21_REVERSE_FK_INDEX_EPOCH_FAIL_CLOSED_OK`
-19. `LSP21_REVERSE_FK_COMPOSITE_SOURCE_TARGET_OK`
-20. `LSP21_REVERSE_FK_DEDUP_SHORTHAND_OK`
-21. `LSP21_REVERSE_FK_SIZE_BOUND_OK`
-22. `LSP21_RESOLVE_REFERENCED_BY_DOC_OK`
-23. `LSP21_RESOLVE_REFERENCED_BY_CONSTRAINT_OK`
-24. `LSP21_RESOLVE_REFERENCED_BY_COMPOSITE_OK`
-25. `LSP21_RESOLVE_NO_REFS_DOC_UNCHANGED_OK`
-26. `LSP21_RESOLVE_MARKDOWN_PLAINTEXT_OK`
-27. `LSP21_RESOLVE_MEMO_REVERSE_FK_GENERATION_OK`
-28. `LSP21_RESOLVE_STALE_REVERSE_FK_FAIL_CLOSED_OK`
-29. `LSP21_RESOLVE_NO_DB_CALLS_OK`
-30. `LSP21_HEADLESS_PG_ORACLE_FIXTURES_OK`
-31. `LSP21_HEADLESS_CAPABILITY_FALSE_FIXTURE_OK`
-32. `LSP21_HEADLESS_1K_TABLES_100_FKS_SMOKE_OK`
-33. `LSP21_ROLLUP_EXACTLY_ONCE_OK`
-34. `LSP21_LOCKED_HELPERS_UNTOUCHED_OK`
-35. `LSP21_LOCKED_HELPERS_ALL_CONSUMERS_ROUTED_OK`
-36. `LSP21_CACHE_VERSION4_NO_BUMP_OK`
-37. `LSP21_RICH16_UX13_PRESERVED_OK`
-38. `LSP21_PERF_COMPLETION_READ_P95_OK`
-39. `LSP21_PERF_REVERSE_INDEX_BUILD_50MS_OK`
-40. `LSP21_PERF_RESOLVE_LOOKUP_P95_OK`
+6. `LSP21_PK_COMPOSITE_NO_ORDINAL_FALLBACK_OK`
+7. `LSP21_NULLABLE_TRUE_MARKER_OK`
+8. `LSP21_PK_NULL_SUPPRESSED_OK`
+9. `LSP21_NOT_NULL_OMITTED_OK`
+10. `LSP21_FK_SINGLE_MARKER_OK`
+11. `LSP21_FK_COMPOSITE_TARGET_TUPLE_OK`
+12. `LSP21_FK_MULTIPLE_REFS_OK`
+13. `LSP21_FK_COMPOSITE_PAIRING_PRECEDENCE_OK`
+14. `LSP21_CAPABILITY_FALSE_EMPTY_RICH_FIELDS_OMIT_OK`
+15. `LSP21_DISK_PAYLOAD_SHAPE_UNCHANGED_OK`
+16. `LSP21_REVERSE_FK_INDEX_EMPTY_INIT_OK`
+17. `LSP21_REVERSE_FK_INDEX_BUILD_ON_COLUMN_STORE_OK`
+18. `LSP21_REVERSE_FK_INDEX_REBUILD_ON_COLUMN_INDEX_REBUILD_OK`
+19. `LSP21_REVERSE_FK_INDEX_CLEAR_ON_RESET_INVALIDATE_OK`
+20. `LSP21_REVERSE_FK_INDEX_EVICTION_DROPS_REFS_OK`
+21. `LSP21_REVERSE_FK_INDEX_EPOCH_FAIL_CLOSED_OK`
+22. `LSP21_REVERSE_FK_INDEX_EPOCH_WRITE_STAMP_OK`
+23. `LSP21_REVERSE_FK_COMPOSITE_SOURCE_TARGET_OK`
+24. `LSP21_REVERSE_FK_DEDUP_SHORTHAND_OK`
+25. `LSP21_REVERSE_FK_SIZE_BOUND_OK`
+26. `LSP21_REVERSE_FK_PER_TARGET_CAP_OK`
+27. `LSP21_REVERSE_FK_PER_SOURCE_CAP_OK`
+28. `LSP21_REVERSE_FK_OVERFLOW_TRUNCATED_DISPLAY_OK`
+29. `LSP21_REVERSE_FK_OVERFLOW_NOTIFY_ONCE_OK`
+30. `LSP21_REVERSE_FK_KEY_FOLD_AWARE_OK`
+31. `LSP21_REVERSE_FK_AUTHORITY_FAIL_CLOSED_OK`
+32. `LSP21_RESOLVE_REFERENCED_BY_DOC_OK`
+33. `LSP21_RESOLVE_REFERENCED_BY_CONSTRAINT_OK`
+34. `LSP21_RESOLVE_REFERENCED_BY_COMPOSITE_OK`
+35. `LSP21_RESOLVE_NO_REFS_DOC_UNCHANGED_OK`
+36. `LSP21_RESOLVE_MARKDOWN_PLAINTEXT_OK`
+37. `LSP21_RESOLVE_MEMO_REVERSE_FK_GENERATION_OK`
+38. `LSP21_RESOLVE_MEMO_REVERSE_FK_EPOCH_DIMENSION_OK`
+39. `LSP21_RESOLVE_STALE_REVERSE_FK_FAIL_CLOSED_OK`
+40. `LSP21_RESOLVE_NO_DB_CALLS_OK`
+41. `LSP21_HEADLESS_PG_ORACLE_FIXTURES_OK`
+42. `LSP21_HEADLESS_CAPABILITY_FALSE_FIXTURE_OK`
+43. `LSP21_HEADLESS_1K_TABLES_100_FKS_SMOKE_OK`
+44. `LSP21_QUOTED_MIXED_CASE_FIXTURE_OK`
+45. `LSP21_SELF_FK_FIXTURE_OK`
+46. `LSP21_CROSS_SCHEMA_OUT_OF_CACHE_FIXTURE_OK`
+47. `LSP21_ZERO_FK_FIXTURE_OK`
+48. `LSP21_HIGH_FAN_IN_FIXTURE_OK`
+49. `LSP21_ROLLUP_EXACTLY_ONCE_OK`
+50. `LSP21_LOCKED_HELPERS_UNTOUCHED_OK`
+51. `LSP21_LOCKED_HELPERS_ALL_CONSUMERS_ROUTED_OK`
+52. `LSP21_CACHE_VERSION4_NO_BUMP_OK`
+53. `LSP21_RICH16_UX13_PRESERVED_OK`
+54. `LSP21_PERF_COMPLETION_READ_P95_OK`
+55. `LSP21_PERF_COMPLETION_WIDE_TABLE_P95_OK`
+56. `LSP21_PERF_REVERSE_INDEX_BUILD_50MS_OK`
+57. `LSP21_PERF_REVERSE_INDEX_BUILD_LARGE_OK`
+58. `LSP21_PERF_EVICTION_CHURN_OK`
+59. `LSP21_PERF_RESOLVE_LOOKUP_P95_OK`
+60. `LSP21_PERF_RESOLVE_E2E_P95_OK`
 
 ## Success Gates
 
@@ -208,6 +244,7 @@ make lsp21
 make lsp21-rollup
 make lsp21-locked-helpers-guard
 go -C dbee test ./core
+make perf-headless ARGS='-l ci/headless/check_lsp21_perf.lua'
 make perf-lsp
 make gn23-rollup
 ```
@@ -217,7 +254,7 @@ make gn23-rollup
 ## Rollback Plan
 
 1. Remove `labelDetails`/annotation detail helpers from `schema_cache.lua`; raw labels and type-only detail remain.
-2. Remove `reverse_fk_refs_by_target_key` state and `get_reverse_fk_refs` from `schema_cache.lua`; column cache payloads remain valid v4.
+2. Remove `reverse_fk_refs_by_target_key`, `reverse_fk_refs_by_source_key`, overflow counters, reverse-FK epoch state, and `get_reverse_fk_refs` from `schema_cache.lua`; column cache payloads remain valid v4.
 3. Remove reverse-reference metadata injection from `resolve.lua` and docs formatting from `object_docs.lua`.
 4. Remove `ci/headless/check_lsp21*.lua`, `make lsp21*` targets, and `LSP21_ALL_PASS` rollup requirement.
 
@@ -232,9 +269,10 @@ Rollback does not require cache migration because Phase 21 stores no new disk pa
 - Add `make lsp21-locked-helpers-guard` to prove:
   - no git diff in those helpers;
   - reverse-FK public reads use `epoch_authority.read_with_freshness`;
+  - reverse-FK read bodies call `_fresh_lsp_scope()` and filter to the active authority scope;
+  - reverse-FK key writers/readers import and use `schema_name_canonical`;
   - no new fail-open reverse-FK read path bypasses the cache epoch check.
 
 ## Plan Gate
 
 Execution must stop after these planning files are reviewed. Codex does not stage or commit. A later implementation turn may execute Phase 21 under this plan.
-
