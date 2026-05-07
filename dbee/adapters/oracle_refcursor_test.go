@@ -56,6 +56,11 @@ func runRefCursorValidation(t *testing.T) bool {
 			cleaned: "BEGIN proc(:cur_$1); END;",
 		},
 		{
+			query:   "BEGIN proc(:my$1 /*CURSOR*/); END;",
+			params:  []string{"my$1"},
+			cleaned: "BEGIN proc(:my$1); END;",
+		},
+		{
 			query:   "BEGIN proc(:p#bind /*CURSOR*/); END;",
 			params:  []string{"p#bind"},
 			cleaned: "BEGIN proc(:p#bind); END;",
@@ -97,6 +102,7 @@ func runRefCursorValidation(t *testing.T) bool {
 	assert.Empty(t, state.getQueryConnIDs())
 
 	runMalformedCursorMarkerValidation(t)
+	runStrayCursorCommentValidation(t)
 
 	return !t.Failed()
 }
@@ -112,21 +118,11 @@ func runMalformedCursorMarkerValidation(t *testing.T) bool {
 		query string
 		name  string
 	}{
+		{query: "BEGIN proc(: /*CURSOR*/); END;", name: ""},
 		{query: "BEGIN proc(:1foo /*CURSOR*/); END;", name: "1foo"},
 		{query: "BEGIN proc(:bad-name /*CURSOR*/); END;", name: "bad-name"},
 	} {
-		err := validateRawCursorMarkers(tc.query)
-		if assert.Error(t, err) {
-			assert.Contains(t, err.Error(), tc.name)
-			assert.Contains(t, err.Error(), "p_"+tc.name)
-		}
-
-		state := newSessTestState()
-		driver := newSessTestDriver(t, state)
-		result, err := driver.QueryWithBinds(context.Background(), tc.query, nil)
-		assert.Nil(t, result)
-		assertOracleBindValidationError(t, err, tc.name)
-		assert.Empty(t, state.getQueryConnIDs())
+		assertCursorMarkerRejectedBeforeEnable(t, tc.query, tc.name)
 	}
 
 	return !t.Failed()
@@ -134,4 +130,65 @@ func runMalformedCursorMarkerValidation(t *testing.T) bool {
 
 func TestOracleMalformedCursorMarkerRejectedBeforeEnable(t *testing.T) {
 	runMalformedCursorMarkerValidation(t)
+}
+
+func TestOracleEmptyCursorMarkerRejectedBeforeEnable(t *testing.T) {
+	assertCursorMarkerRejectedBeforeEnable(t, "BEGIN proc(: /*CURSOR*/); END;", "")
+}
+
+func assertCursorMarkerRejectedBeforeEnable(t *testing.T, query string, name string) {
+	t.Helper()
+
+	err := validateRawCursorMarkers(query)
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), name)
+		assert.Contains(t, err.Error(), "p_"+name)
+	}
+
+	state := newSessTestState()
+	driver := newSessTestDriver(t, state)
+	result, err := driver.QueryWithBinds(context.Background(), query, nil)
+	assert.Nil(t, result)
+	assertOracleBindValidationError(t, err, name)
+	// getQueryConnIDs records QueryContext / ExecContext calls in
+	// oracle_driver_session_test.go; empty means DBMS_OUTPUT.ENABLE never ran.
+	assert.Empty(t, state.getQueryConnIDs())
+}
+
+func runStrayCursorCommentValidation(t *testing.T) bool {
+	t.Helper()
+
+	for _, tc := range []struct {
+		query string
+		binds map[string]string
+	}{
+		{
+			query: "BEGIN proc(:p_id); /* CURSOR */ END;",
+			binds: map[string]string{"p_id": "42"},
+		},
+		{
+			query: "BEGIN x := :y;\n/* CURSOR */\nz := 1; END;",
+			binds: map[string]string{"y": "42"},
+		},
+	} {
+		assert.False(t, hasCursorMarkerBroad(tc.query), "stray cursor comment must not look cursor-shaped")
+		assert.NoError(t, validateRawCursorMarkers(tc.query))
+
+		state := newSessTestState()
+		driver := newSessTestDriver(t, state)
+		result, err := driver.QueryWithBinds(context.Background(), tc.query, tc.binds)
+		if result != nil {
+			result.Close()
+		}
+		if err != nil {
+			assert.NotContains(t, err.Error(), "oracle bind validation")
+		}
+		assert.NotEmpty(t, state.getQueryConnIDs(), "normal PL/SQL path should execute")
+	}
+
+	return !t.Failed()
+}
+
+func TestOracleStrayCursorCommentNotRejected(t *testing.T) {
+	runStrayCursorCommentValidation(t)
 }
