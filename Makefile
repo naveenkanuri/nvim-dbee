@@ -34,7 +34,7 @@ WALLET_GO_LOG ?= $(WALLET_ARTIFACT_DIR)/wallet-go.log
 WALLET_LUA_LOG ?= $(WALLET_ARTIFACT_DIR)/wallet-lua.log
 WALLET_ROLLUP_SCRIPT ?= $(CURDIR)/ci/headless/check_oracle_wallet_zip.lua
 
-.PHONY: perf perf-lsp perf-all wallet-test perf-headless ux13-rollup lsp21 lsp21-rollup lsp21-locked-helpers-guard db18-locked-helpers-guard gn23 gn23-rollup gn23-locked-helpers-guard gn23-no-go-rpc-guard
+.PHONY: perf perf-lsp perf-all wallet-test perf-headless ux13-rollup lsp21 lsp21-rollup lsp21-locked-helpers-guard db18-locked-helpers-guard oracle-bind-audit gn23 gn23-rollup gn23-locked-helpers-guard gn23-no-go-rpc-guard
 
 perf-headless: perf-bootstrap
 	@mkdir -p "$(LSP01_PERF_STATE_HOME)"
@@ -195,6 +195,9 @@ db18-locked-helpers-guard:
 	check_empty "git diff working locked helper names" git diff --name-only -- lua/dbee/schema_filter_authority.lua lua/dbee/schema_name_canonical.lua lua/dbee/lsp/epoch_authority.lua; \
 	printf '%s\n' "DB18_LOCKED_HELPERS_GIT_DIFF_OK=true" >> "$(UX13_ROLLUP_LOG)"
 
+oracle-bind-audit:
+	ORACLE22_ROLLUP=1 env GOCACHE="$${GOCACHE:-/tmp/codex-go-cache}" go -C dbee test ./adapters -run 'TestOracle(BindName|NamedArgs|UnsafeBindNames|RefCursor|DBMSOutput|BindAudit)|TestFetchDBMSOutputFromConn|TestPhase22Rollup' -v
+
 perf: perf-bootstrap
 	@set -eu; \
 	nvim_version="$$( "$(NVIM_BIN)" --version | awk 'NR==1 { print $$2 }' )"; \
@@ -335,6 +338,32 @@ perf-lsp: perf-bootstrap
 	  grep -F -- "--- PASS: $$test_name" "$$db18_go_log" >/dev/null || { cat "$$db18_go_log" >&2; rm -f "$$db18_go_log"; printf '%s\n' "missing DB18 focused PASS line $$test_name" >&2; exit 1; }; \
 	done; \
 	rm -f "$$db18_go_log"; \
+	run_logged "source:oracle-bind-audit" "oracle-bind-audit" env GOCACHE="$(LSP01_PERF_ARTIFACT_DIR)/go-cache" \
+	  $(MAKE) --no-print-directory oracle-bind-audit; \
+	oracle22_go_log="$$(mktemp)"; \
+	awk 'found{print} /^===CMD-SOURCE: oracle-bind-audit===$$/{found=1; next}' "$(UX13_ROLLUP_LOG)" > "$$oracle22_go_log"; \
+	if grep -F "no tests to run" "$$oracle22_go_log" >/dev/null; then \
+	  cat "$$oracle22_go_log" >&2; \
+	  rm -f "$$oracle22_go_log"; \
+	  printf '%s\n' "oracle bind audit focused tests did not run" >&2; \
+	  exit 1; \
+	fi; \
+	for test_name in \
+	  TestOracleBindAudit \
+	  TestOracleBindAuditDetectsViolations \
+	  TestOracleNamedArgs \
+	  TestOracleBindNameTable \
+	  TestOracleBindNameDate \
+	  TestOracleBindNameWhenever \
+	  TestOracleUnsafeBindNamesAllUppercase \
+	  TestOracleRefCursorValidation \
+	  TestFetchDBMSOutputFromConn \
+	  TestPhase22Rollup; \
+	do \
+	  grep -F "=== RUN   $$test_name" "$$oracle22_go_log" >/dev/null || { cat "$$oracle22_go_log" >&2; rm -f "$$oracle22_go_log"; printf '%s\n' "missing Oracle bind audit RUN line $$test_name" >&2; exit 1; }; \
+	  grep -F -- "--- PASS: $$test_name" "$$oracle22_go_log" >/dev/null || { cat "$$oracle22_go_log" >&2; rm -f "$$oracle22_go_log"; printf '%s\n' "missing Oracle bind audit PASS line $$test_name" >&2; exit 1; }; \
+	done; \
+	rm -f "$$oracle22_go_log"; \
 	run_logged "source:lua-headless" "check_db_nesting.lua" env UX13_ROLLUP_LOG="$(UX13_ROLLUP_LOG)" \
 	  $(MAKE) --no-print-directory perf-headless ARGS='-l ci/headless/check_db_nesting.lua'; \
 	run_logged "go-arch14" env GOCACHE="$(LSP01_PERF_ARTIFACT_DIR)/go-cache" \
