@@ -27,7 +27,12 @@ end
 ---@param value any
 ---@return string
 function M.code_span(value)
-  local text = M.escape_markdown(value)
+  -- Markdown backtick code-span content is literal; no escape needed except
+  -- for backtick collisions (handled via delimiter-doubling below). The
+  -- previous escape_markdown() call inserted backslashes for `_`/`.`/etc.
+  -- that some renderers (snacks/cmp) display verbatim, producing visible
+  -- `\_` and `\.` in identifier popups.
+  local text = tostring(value or "")
   local longest = 0
   for run in text:gmatch("`+") do
     if #run > longest then
