@@ -148,6 +148,23 @@ func f(params []string, cond bool) {
 }`,
 			want: `unvalidated sql.Named first-arg ident "p"`,
 		},
+		{
+			name: "sql.Named inside if-err-branch rejected",
+			src: `package adapters
+import "database/sql"
+func f(params []string) {
+	var args []any
+	for _, p := range params {
+		if err := validateOracleBindName(p); err != nil {
+			args = append(args, sql.Named(p, 1))
+			continue
+		}
+		args = append(args, sql.Named(p, 1))
+	}
+	_ = args
+}`,
+			want: `unvalidated sql.Named first-arg ident "p"`,
+		},
 	}
 
 	for _, tc := range cases {
@@ -291,7 +308,7 @@ func classifySQLNamedFirstArg(fset *token.FileSet, expr ast.Expr, call *ast.Call
 	}
 }
 
-// sqlNamedIdentIsValidated checks Patterns A/B/C from ORA22-20.
+// sqlNamedIdentIsValidated checks Patterns A/B from ORA22-20.
 //
 // Trust assumption: Pattern B only trusts same-block validation statements that
 // dominate sql.Named(ident, ...), but it does not prove the loop variable is
@@ -311,12 +328,6 @@ func sqlNamedIdentIsValidated(name string, call *ast.CallExpr, stack []ast.Node)
 			if blockHasDominatingValidateOracleBindNameBefore(rng.Body, name, call.Pos()) {
 				return true
 			}
-		}
-	}
-
-	if ifStmt := enclosingIf(stack); ifStmt != nil {
-		if ifStmtHandlesValidateOracleBindName(ifStmt, name) {
-			return true
 		}
 	}
 

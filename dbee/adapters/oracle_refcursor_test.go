@@ -170,6 +170,18 @@ func runStrayCursorCommentValidation(t *testing.T) bool {
 			query: "BEGIN x := :y;\n/* CURSOR */\nz := 1; END;",
 			binds: map[string]string{"y": "42"},
 		},
+		{
+			query: "BEGIN x := /* CURSOR */ 1; END;",
+			binds: nil,
+		},
+		{
+			query: "DECLARE n NUMBER; BEGIN n := 1; /* CURSOR */ n := 2; END;",
+			binds: nil,
+		},
+		{
+			query: "BEGIN result := func( /* CURSOR */ x); END;",
+			binds: nil,
+		},
 	} {
 		assert.False(t, hasCursorMarkerBroad(tc.query), "stray cursor comment must not look cursor-shaped")
 		assert.NoError(t, validateRawCursorMarkers(tc.query))

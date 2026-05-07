@@ -22,8 +22,10 @@ var cursorMarkerPattern = regexp.MustCompile(`(?i):([A-Za-z_][A-Za-z0-9_$#]*)\s*
 // cursorMarkerBroadPattern is a lexical guard, not a full SQL parser: it does
 // not strip string literals or comment context. QueryWithBinds only invokes it
 // after isPLSQL(query), and it exists to reject cursor-shaped bind markers
-// before DBMS_OUTPUT.ENABLE side effects.
-var cursorMarkerBroadPattern = regexp.MustCompile(`(?i):([^\s/:();,'"]*)\s*/\*\s*CURSOR\s*\*/`)
+// before DBMS_OUTPUT.ENABLE side effects. The capture excludes SQL delimiters
+// and "=" so PL/SQL assignment (:=) before a /* CURSOR */ comment is not
+// mistaken for a malformed cursor marker.
+var cursorMarkerBroadPattern = regexp.MustCompile(`(?i):([^\s/:();,'"=]*)\s*/\*\s*CURSOR\s*\*/`)
 
 var cursorMarkerCleanupPattern = regexp.MustCompile(`(?i)\s*/\*\s*CURSOR\s*\*/`)
 
