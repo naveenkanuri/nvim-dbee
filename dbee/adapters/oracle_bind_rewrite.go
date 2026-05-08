@@ -213,19 +213,10 @@ func prepareOracleBindRewrite(query string, binds map[string]string) (oracleBind
 		mapping:      newOracleBindRewriteMapWithCapacity(len(binds)),
 	}
 
-	if len(binds) == 0 && !containsOracleRewriteTriggerASCII(query) {
-		plan.mapping.finalize()
-		return plan, nil
-	}
-
 	needsSQLScan := len(binds) > 0
 	if !needsSQLScan {
 		flags := scanOracleSQLRewriteFlags(query)
-		needsSQLScan = flags.hasDollarHash ||
-			flags.hasSentinel ||
-			flags.hasQQuote ||
-			flags.hasCursorCandidate ||
-			flags.hasBindCandidate
+		needsSQLScan = flags.needsSQLScan()
 	}
 
 	if !needsSQLScan {
@@ -276,7 +267,9 @@ func (plan *oracleBindRewritePlan) buildBindArgs(binds map[string]string) error 
 			return err
 		}
 		plan.bindArgs = args
-		plan.cursorBindArgs = args
+		// Keep cursor bind args independent from plan.bindArgs so later
+		// non-cursor argument appends cannot mutate cursor execution args.
+		plan.cursorBindArgs = append([]any(nil), args...)
 		plan.cursorDriverNames = make([]string, 0, len(plan.cursorParams))
 		var nameErrs []error
 		for _, param := range plan.cursorParams {
@@ -911,31 +904,8 @@ func containsOracleQQuoteCandidateASCII(s string) bool {
 	return false
 }
 
-func containsOracleCursorMarkerCandidateASCII(s string) bool {
-	for i := 0; i+1 < len(s); i++ {
-		if s[i] != '/' || s[i+1] != '*' {
-			continue
-		}
-		for j := i + 2; j+5 < len(s); j++ {
-			if asciiUpper(s[j]) == 'C' &&
-				asciiUpper(s[j+1]) == 'U' &&
-				asciiUpper(s[j+2]) == 'R' &&
-				asciiUpper(s[j+3]) == 'S' &&
-				asciiUpper(s[j+4]) == 'O' &&
-				asciiUpper(s[j+5]) == 'R' {
-				return true
-			}
-			if j+1 < len(s) && s[j] == '*' && s[j+1] == '/' {
-				break
-			}
-		}
-	}
-	return false
-}
-
 func scanOracleSQLRewriteFlags(s string) oracleSQLRewriteFlags {
 	var flags oracleSQLRewriteFlags
-	mayContainSentinel := strings.IndexByte(s, '_') >= 0
 	for i := 0; i < len(s); i++ {
 		switch s[i] {
 		case '$', '#':
@@ -949,16 +919,28 @@ func scanOracleSQLRewriteFlags(s string) oracleSQLRewriteFlags {
 				flags.hasQQuote = true
 			}
 		case '/':
-			if i+1 < len(s) && s[i+1] == '*' && containsOracleCursorMarkerInCommentASCII(s[i+2:]) {
-				flags.hasCursorCandidate = true
+			if i+1 < len(s) && s[i+1] == '*' {
+				commentEnd, hasCursor := scanOracleCommentEndAndCursorMarker(s, i)
+				if hasCursor {
+					flags.hasCursorCandidate = true
+				}
+				i = commentEnd - 1
 			}
 		case '_':
-			if mayContainSentinel && hasOracleSentinelAtASCII(s, i) {
+			if hasOracleSentinelAtASCII(s, i) {
 				flags.hasSentinel = true
 			}
 		}
 	}
 	return flags
+}
+
+func (flags oracleSQLRewriteFlags) needsSQLScan() bool {
+	return flags.hasDollarHash ||
+		flags.hasSentinel ||
+		flags.hasQQuote ||
+		flags.hasCursorCandidate ||
+		flags.hasBindCandidate
 }
 
 func hasOracleSentinelAtASCII(s string, start int) bool {
@@ -977,25 +959,37 @@ func hasFoldASCIIAt(s string, needle string, start int) bool {
 	return true
 }
 
-func containsOracleCursorMarkerInCommentASCII(s string) bool {
-	for j := 0; j+5 < len(s); j++ {
-		if asciiUpper(s[j]) == 'C' &&
-			asciiUpper(s[j+1]) == 'U' &&
-			asciiUpper(s[j+2]) == 'R' &&
-			asciiUpper(s[j+3]) == 'S' &&
-			asciiUpper(s[j+4]) == 'O' &&
-			asciiUpper(s[j+5]) == 'R' {
-			return true
-		}
-		if j+1 < len(s) && s[j] == '*' && s[j+1] == '/' {
-			return false
-		}
+func scanOracleCommentEndAndCursorMarker(s string, start int) (int, bool) {
+	bodyStart := start + 2
+	bodyEnd := len(s)
+	commentEnd := len(s)
+	if endRel := strings.Index(s[bodyStart:], "*/"); endRel >= 0 {
+		bodyEnd = bodyStart + endRel
+		commentEnd = bodyEnd + 2
 	}
-	return false
+	return commentEnd, containsOracleCursorMarkerFoldASCII(s[bodyStart:bodyEnd])
 }
 
-func containsOracleRewriteTriggerASCII(s string) bool {
-	return strings.IndexAny(s, "$#_:qQ/") >= 0
+func containsOracleCursorMarkerFoldASCII(s string) bool {
+	for offset := 0; offset+5 < len(s); {
+		next := strings.IndexAny(s[offset:], "Cc")
+		if next < 0 {
+			return false
+		}
+		i := offset + next
+		if i+5 >= len(s) {
+			return false
+		}
+		if (s[i+1]|0x20) == 'u' &&
+			(s[i+2]|0x20) == 'r' &&
+			(s[i+3]|0x20) == 's' &&
+			(s[i+4]|0x20) == 'o' &&
+			(s[i+5]|0x20) == 'r' {
+			return true
+		}
+		offset = i + 1
+	}
+	return false
 }
 
 func containsFoldASCII(s string, needle string) bool {

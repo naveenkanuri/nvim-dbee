@@ -3,6 +3,7 @@ package adapters
 import (
 	"database/sql/driver"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"sort"
@@ -19,6 +20,67 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+var oracle24StrictMarkers = []string{
+	"ORA24_REWRITE_OK=true",
+	"ORA24_TOKENIZER_OK=true",
+	"ORA24_TOKENIZER_QQUOTE_OK=true",
+	"ORA24_GOORA_QQUOTE_PARITY_OK=true",
+	"ORA24_BIND_MAP_OK=true",
+	"ORA24_REVERSE_ERROR_OK=true",
+	"ORA24_CURSOR_MARKER_DOLLAR_OK=true",
+	"ORA24_CURSOR_FAST_PATH_ROUTED_OK=true",
+	"ORA24_RESERVED_REJECT_OK=true",
+	"ORA24_COLLISION_REJECT_OK=true",
+	"ORA24_PHASE22_INTERNAL_PRESERVED_OK=true",
+	"ORA24_PLSQL_ASSIGN_SKIP_OK=true",
+	"ORA24_AUDIT_SURFACE_OK=true",
+	"ORA24_PHASE22_PRESERVED_OK=true",
+	"ORA24_REWRITE_BUDGET_OK=true",
+}
+
+var oracle24StrictMarkerSet = func() map[string]struct{} {
+	set := make(map[string]struct{}, len(oracle24StrictMarkers))
+	for _, marker := range oracle24StrictMarkers {
+		set[marker] = struct{}{}
+	}
+	return set
+}()
+
+type phase24StrictMarkerRecorder struct {
+	t    *testing.T
+	seen map[string]struct{}
+}
+
+func newPhase24StrictMarkerRecorder(t *testing.T) *phase24StrictMarkerRecorder {
+	t.Helper()
+	return &phase24StrictMarkerRecorder{
+		t:    t,
+		seen: make(map[string]struct{}, len(oracle24StrictMarkers)),
+	}
+}
+
+func (r *phase24StrictMarkerRecorder) emit(marker string) {
+	r.t.Helper()
+	if _, ok := oracle24StrictMarkerSet[marker]; !ok {
+		r.t.Fatalf("unknown Phase 24 strict marker %q", marker)
+	}
+	if _, ok := r.seen[marker]; ok {
+		r.t.Fatalf("duplicate Phase 24 strict marker %q", marker)
+	}
+	r.seen[marker] = struct{}{}
+	if os.Getenv("ORACLE24_ROLLUP") == "1" {
+		r.t.Log(marker)
+	}
+}
+
+func (r *phase24StrictMarkerRecorder) verifyExact() {
+	r.t.Helper()
+	require.Len(r.t, r.seen, len(oracle24StrictMarkers))
+	for _, marker := range oracle24StrictMarkers {
+		require.Contains(r.t, r.seen, marker)
+	}
+}
+
 func TestOracleBindRewrite(t *testing.T) {
 	assertOracleBindValidators(t)
 	assertOracleBindRewriteCore(t)
@@ -27,18 +89,6 @@ func TestOracleBindRewrite(t *testing.T) {
 	assertOracleBindCollisions(t)
 	assertOracleBindReverseErrors(t)
 	assertOracleGoOraQQuoteParity(t)
-
-	if !t.Failed() {
-		logOracle24Marker(t, "ORA24_USER_VALIDATOR_OK=true")
-		logOracle24Marker(t, "ORA24_DRIVER_VALIDATOR_OK=true")
-		logOracle24Marker(t, "ORA24_TOKENIZER_OK=true")
-		logOracle24Marker(t, "ORA24_TOKENIZER_QQUOTE_OK=true")
-		logOracle24Marker(t, "ORA24_BIND_REWRITE_OK=true")
-		logOracle24Marker(t, "ORA24_COLLISION_REJECT_OK=true")
-		logOracle24Marker(t, "ORA24_REVERSE_ERROR_OK=true")
-		logOracle24Marker(t, "ORA24_GOORA_QQUOTE_PARITY_OK=true")
-		logOracle24Marker(t, "ORA24_QQUOTE_UNSUPPORTED=true")
-	}
 }
 
 func assertOracleBindValidators(t *testing.T) {
@@ -105,7 +155,7 @@ func assertOracleBindQQuoteTokenizer(t *testing.T) {
 	} {
 		require.Error(t, mustPrepareOracleBindRewrite(query, nil), query)
 	}
-	logOracle24Marker(t, "ORA24_QQUOTE_UNSUPPORTED=true")
+	logOracle24Markerf(t, "LIVE_PG24_QQUOTE_UNSUPPORTED=true")
 }
 
 func assertOracleBindCollisions(t *testing.T) {
@@ -172,7 +222,7 @@ func assertOracleGoOraQQuoteParity(t *testing.T) {
 		require.NoError(t, err, query)
 		require.Contains(t, plan.rewrittenSQL, ":real_")
 		require.Contains(t, strings.ToLower(plan.rewrittenSQL), "q'")
-		assertGoOraNamedParserDoesNotMissBind(t, plan.rewrittenSQL, plan.mapping.userToDriver[realName])
+		assertGoOraNamedParserSeesExpectedBind(t, plan.rewrittenSQL, plan.mapping.userToDriver[realName])
 	}
 
 	goOraErr := invokeGoOraNamedQueryParser("SELECT q'[it's :fake$1]' FROM dual WHERE :real_x24_1 = 1", "real_x24_1")
@@ -201,64 +251,61 @@ func TestOracleBindRewriteBudget(t *testing.T) {
 		}
 	}))
 
-	logOracle24Markerf(t, "ORA24_REWRITE_P50_US=%d", smallP50.Microseconds())
-	logOracle24Markerf(t, "ORA24_REWRITE_P95_US=%d", smallP95.Microseconds())
 	logOracle24Markerf(t, "ORA24_REWRITE_US_P50=%d", smallP50.Microseconds())
 	logOracle24Markerf(t, "ORA24_REWRITE_US_P95=%d", smallP95.Microseconds())
 	logOracle24Marker(t, "ORA24_REWRITE_BUDGET_OK=true")
 }
 
 func TestPhase24Rollup(t *testing.T) {
+	markers := newPhase24StrictMarkerRecorder(t)
+
 	assertOracleBindValidators(t)
-	if !t.Failed() {
-		logOracle24Marker(t, "ORA24_USER_VALIDATOR_OK=true")
-		logOracle24Marker(t, "ORA24_DRIVER_VALIDATOR_OK=true")
-	}
 	assertOracleBindRewriteCore(t)
 	if !t.Failed() {
-		logOracle24Marker(t, "ORA24_BIND_REWRITE_OK=true")
+		markers.emit("ORA24_REWRITE_OK=true")
 	}
 	assertOracleBindTokenizer(t)
 	if !t.Failed() {
-		logOracle24Marker(t, "ORA24_TOKENIZER_OK=true")
+		markers.emit("ORA24_TOKENIZER_OK=true")
 	}
 	assertOracleBindQQuoteTokenizer(t)
 	if !t.Failed() {
-		logOracle24Marker(t, "ORA24_TOKENIZER_QQUOTE_OK=true")
-		logOracle24Marker(t, "ORA24_QQUOTE_UNSUPPORTED=true")
+		markers.emit("ORA24_TOKENIZER_QQUOTE_OK=true")
 	}
 	assertOracleBindCollisions(t)
 	if !t.Failed() {
-		logOracle24Marker(t, "ORA24_COLLISION_REJECT_OK=true")
+		markers.emit("ORA24_COLLISION_REJECT_OK=true")
 	}
 	assertOracleBindReverseErrors(t)
 	if !t.Failed() {
-		logOracle24Marker(t, "ORA24_REVERSE_ERROR_OK=true")
+		markers.emit("ORA24_REVERSE_ERROR_OK=true")
 	}
 	assertOracleGoOraQQuoteParity(t)
 	if !t.Failed() {
-		logOracle24Marker(t, "ORA24_GOORA_QQUOTE_PARITY_OK=true")
+		markers.emit("ORA24_GOORA_QQUOTE_PARITY_OK=true")
 	}
 	assertOracleBindRefReconciliation(t)
 	if !t.Failed() {
-		logOracle24Marker(t, "ORA24_BIND_MAP_OK=true")
+		markers.emit("ORA24_BIND_MAP_OK=true")
 	}
 	runUnsafeBindMatrix(t)
 	if !t.Failed() {
-		logOracle24Marker(t, "ORA24_RESERVED_REJECT_OK=true")
+		markers.emit("ORA24_RESERVED_REJECT_OK=true")
 	}
 	runRefCursorValidation(t)
 	if !t.Failed() {
-		logOracle24Marker(t, "ORA24_CURSOR_MARKER_DOLLAR_OK=true")
-		logOracle24Marker(t, "ORA24_CURSOR_FAST_PATH_ROUTED_OK=true")
+		markers.emit("ORA24_CURSOR_MARKER_DOLLAR_OK=true")
+		markers.emit("ORA24_CURSOR_FAST_PATH_ROUTED_OK=true")
+		markers.emit("ORA24_PLSQL_ASSIGN_SKIP_OK=true")
 	}
 	runDBMSOutputLockstep(t)
 	if !t.Failed() {
-		logOracle24Marker(t, "ORA24_PHASE22_INTERNAL_PRESERVED_OK=true")
+		markers.emit("ORA24_PHASE22_INTERNAL_PRESERVED_OK=true")
 	}
 	runOracleBindAuditCore(t)
 	if !t.Failed() {
-		logOracle24Marker(t, "ORA24_PHASE22_PRESERVED_OK=true")
+		markers.emit("ORA24_AUDIT_SURFACE_OK=true")
+		markers.emit("ORA24_PHASE22_PRESERVED_OK=true")
 	}
 	smallP50, smallP95 := oracleRewriteBudgetSample(t, oracleSmallRewriteSQL(), nil)
 	_, mediumP95 := oracleRewriteBudgetSample(t, oracleMediumRewriteSQL(), oracleMediumRewriteBinds())
@@ -267,9 +314,10 @@ func TestPhase24Rollup(t *testing.T) {
 	require.LessOrEqual(t, mediumP95, 50*time.Microsecond)
 	require.LessOrEqual(t, largeP95, time.Millisecond)
 	if !t.Failed() {
-		logOracle24Markerf(t, "ORA24_REWRITE_P50_US=%d", smallP50.Microseconds())
-		logOracle24Markerf(t, "ORA24_REWRITE_P95_US=%d", smallP95.Microseconds())
-		logOracle24Marker(t, "ORA24_REWRITE_BUDGET_OK=true")
+		logOracle24Markerf(t, "ORA24_REWRITE_US_P50=%d", smallP50.Microseconds())
+		logOracle24Markerf(t, "ORA24_REWRITE_US_P95=%d", smallP95.Microseconds())
+		markers.emit("ORA24_REWRITE_BUDGET_OK=true")
+		markers.verifyExact()
 	}
 	if os.Getenv("ORACLE24_ROLLUP") == "1" && !t.Failed() {
 		t.Log("PHASE24_ALL_PASS=true")
@@ -278,14 +326,17 @@ func TestPhase24Rollup(t *testing.T) {
 
 func logOracle24Marker(t *testing.T, marker string) {
 	t.Helper()
-	if os.Getenv("ORACLE24_ROLLUP") == "1" {
-		t.Log(marker)
+	if os.Getenv("ORACLE24_ROLLUP") != "1" {
+		return
+	}
+	if t.Name() == "TestPhase24Rollup" {
+		t.Fatalf("Phase 24 strict marker %q must be emitted through phase24StrictMarkerRecorder", marker)
 	}
 }
 
 func logOracle24Markerf(t *testing.T, format string, args ...any) {
 	t.Helper()
-	if os.Getenv("ORACLE24_ROLLUP") == "1" {
+	if os.Getenv("ORACLE24_ROLLUP") == "1" && t.Name() == "TestPhase24Rollup" {
 		t.Logf(format, args...)
 	}
 }
@@ -323,6 +374,7 @@ func BenchmarkOracleBindRewrite(b *testing.B) {
 	}{
 		{name: "no_bind_fast_path", query: "select 1 from dual where 1 = 1"},
 		{name: "large_no_bind", query: oracleLargeNoBindRewriteSQL()},
+		{name: "large_with_comments", query: oracleLargeCommentRewriteSQL()},
 		{name: "few_bind_small", query: oracleFewBindSmallRewriteSQL(), binds: oracleFewBindSmallRewriteBinds()},
 		{name: "many_bind_medium", query: oracleMediumRewriteSQL(), binds: oracleMediumRewriteBinds()},
 		{name: "long_mixed", query: strings.Repeat("select ':fake$1', q'[ :fake#2 ]', -- :skip$1\n :real$1 from dual\n", 80), binds: map[string]string{"real$1": "1"}},
@@ -414,6 +466,19 @@ func oracleLargeNoBindRewriteSQL() string {
 	return strings.Repeat("select 1 from dual where 1 = 1\n", 512)
 }
 
+func oracleLargeCommentRewriteSQL() string {
+	var b strings.Builder
+	for i := 0; i < 50; i++ {
+		b.WriteString("select 1 from dual /* ")
+		b.WriteString(strings.Repeat("heavy block comment without the keyword ", 50))
+		b.WriteString(" */\n")
+	}
+	for b.Len() < 100*1024 {
+		b.WriteString("select 1 from dual where 1 = 1\n")
+	}
+	return b.String()
+}
+
 func mustPrepareOracleBindRewrite(query string, binds map[string]string) error {
 	_, err := prepareOracleBindRewrite(query, binds)
 	return err
@@ -434,20 +499,17 @@ func assertOracleBindRefReconciliation(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func assertGoOraNamedParserDoesNotMissBind(t *testing.T, query string, driverName string) {
+func assertGoOraNamedParserSeesExpectedBind(t *testing.T, query string, driverName string) {
 	t.Helper()
-	err := invokeGoOraNamedQueryParser(query, driverName)
-	if err == nil {
-		return
-	}
-	require.NotContains(t, err.Error(), "parameter ")
-	require.NotContains(t, err.Error(), "is not defined")
+	err := invokeGoOraNamedQueryParser(query, "oracle24_parser_probe")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "parameter "+driverName+" is not defined")
 }
 
 func invokeGoOraNamedQueryParser(query string, driverNames ...string) (err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			err = nil
+			err = fmt.Errorf("go-ora panicked: %v", recovered)
 		}
 	}()
 
