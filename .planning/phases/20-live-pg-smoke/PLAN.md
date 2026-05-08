@@ -1,8 +1,8 @@
 # Phase 20: Live-PG Smoke Test - Coordination Plan
 
-**Status:** Ready for r3 plan-gate after r2 narrow fold
+**Status:** Ready for r4 plan-gate after r3 narrow fold
 **Created:** 2026-05-07
-**Revised:** 2026-05-07 r2 narrow fold
+**Revised:** 2026-05-08 r3 narrow fold
 **Mode:** single-wave plan after combined discuss + research + plan
 
 <objective>
@@ -32,14 +32,15 @@ Single-wave remains intentional. The fixture, live tests, runtime preflight, mar
 - Smoke test discovery: live PG smoke files use `*_smoke_test.go` plus Go build tag `live_pg20`; bare `go test ./tests/integration` must not compile or run the smoke.
 - Phase 17 SQL constants remain locked; Phase 20 may add same-package shape tests but must not edit `postgres_driver_rich_metadata.go`.
 - Historical negative SQL must be the exact pre-fix Phase 17 FK SQL shape from commit `be58045^`, not synthetic multi-array `unnest(ARRAY..., ARRAY...)`.
-- Snapshot uses an external JSON golden with a narrow allowlist and an explicit `UPDATE_GOLDEN=1 make live-pg-smoke` regeneration flow.
+- Snapshot uses an external readable JSON golden with a narrow allowlist and an explicit `UPDATE_GOLDEN=1 make live-pg-smoke` regeneration flow.
 - Runtime health probes are bounded subprocesses: Makefile wraps `podman info` / `docker info` with a 5s timeout, and Go uses `exec.CommandContext` with a 5s context.
 - No-runtime paths are non-success paths: do not emit `LIVE_PG20_STRICT_MARKER_COUNT` unless the live suite actually reaches strict-marker verification.
 - SQL-shape preflight seals all five PostgreSQL rich metadata SQL constants with structural assertions, with the foreign-key `ROWS FROM` shape remaining the highest-risk guard.
+- The SQL-shape marker is split: source preflight and live ROWS FROM execution emit separate strict markers.
 </locked_decisions>
 
 <decision_coverage>
-## Decision Coverage Added In r1/r2 Folds
+## Decision Coverage Added In r1/r2/r3 Folds
 
 | Decision | Covers |
 | --- | --- |
@@ -52,9 +53,9 @@ Single-wave remains intentional. The fixture, live tests, runtime preflight, mar
 | `PG20-29` | New container helper cleans up on every post-start failure and registers cleanup immediately |
 | `PG20-30` | Negative SQL uses a dedicated `*sql.DB`, deferred close, and no shared driver pool |
 | `PG20-31` | Snapshot golden field allowlist, denylist, and digest pin |
-| `PG20-32` | Snapshot update flow and `.gitattributes` line |
+| `PG20-32` | Snapshot update flow keeps readable JSON diffs and avoids binary `.gitattributes` |
 | `PG20-33` | Makefile rollup uses `set -eu`, one `emit_marker`, fail-loud marker guards, and false marker on failure |
-| `PG20-34` | `LIVE_PG20_STRICT_MARKER_COUNT=18` is the strict count contract |
+| `PG20-34` | `LIVE_PG20_STRICT_MARKER_COUNT=19` is the strict count contract |
 | `PG20-35` | CI job overrides root working directory and exports a stable rollup artifact path |
 | `PG20-36` | CI job has `timeout-minutes: 10`, Go `-timeout=10m`, and container context timeout |
 | `PG20-37` | CI uses `sudo -E make live-pg-smoke` to preserve env while matching existing testcontainers parity |
@@ -64,12 +65,14 @@ Single-wave remains intentional. The fixture, live tests, runtime preflight, mar
 | `PG20-41` | Provider health probes are subprocess-timeout bounded in Makefile and Go helper |
 | `PG20-42` | No-runtime marker accounting skips strict count and emits only skip/fail evidence |
 | `PG20-43` | Shape preflight covers all five PostgreSQL rich metadata SQL constants |
+| `PG20-44` | CI fetches enough history for `origin/master` merge-base locked-helper checks |
+| `PG20-45` | Split SQL-shape preflight and live ROWS FROM markers; strict count becomes 19 |
 </decision_coverage>
 
 <strict_markers>
 ## Strict Markers
 
-The implementation plan owns 18 strict rollup records: 17 boolean markers plus the exact count marker. `PHASE20_ALL_PASS` is the rollup gate and is not counted as a strict marker.
+The implementation plan owns 19 strict rollup records: 18 boolean markers plus the exact count marker. `PHASE20_ALL_PASS` is the rollup gate and is not counted as a strict marker.
 
 | Marker | Expected | Meaning |
 | --- | --- | --- |
@@ -80,7 +83,8 @@ The implementation plan owns 18 strict rollup records: 17 boolean markers plus t
 | `LIVE_PG20_COLUMNS_RICH_OK` | `true` | Live `GetColumnsRich` returns generated/default/identity/nullability fields |
 | `LIVE_PG20_COMPOSITE_PK_OK` | `true` | Live composite PK ordinals match fixture order |
 | `LIVE_PG20_FK_COMPOSITE_OK` | `true` | Live composite FK pairing returns full source/target column arrays in ordinal order |
-| `LIVE_PG20_ROWS_FROM_SQL_SHAPE_OK` | `true` | SQL-constant shape preflight passed and production composite-FK SQL succeeded on live PostgreSQL |
+| `LIVE_PG20_SQL_SHAPE_PREFLIGHT_OK` | `true` | Same-package SQL-constant preflight passed before any container startup |
+| `LIVE_PG20_ROWS_FROM_LIVE_OK` | `true` | Production composite-FK ROWS FROM SQL succeeded on live PostgreSQL |
 | `LIVE_PG20_HISTORICAL_UNNEST_NEGATIVE_OK` | `true` | Exact historical broken FK SQL shape fails on live PostgreSQL |
 | `LIVE_PG20_INDEXES_OK` | `true` | Live table indexes return key columns, order, uniqueness, PK-backed state, and INCLUDE separation |
 | `LIVE_PG20_MV_INDEXES_OK` | `true` | Live materialized-view indexes return through `GetIndexes` |
@@ -90,10 +94,10 @@ The implementation plan owns 18 strict rollup records: 17 boolean markers plus t
 | `LIVE_PG20_SCHEMA_SCOPE_OK` | `true` | Same/similar object names in other schemas do not leak into requested schema results |
 | `LIVE_PG20_SNAPSHOT_OK` | `true` | Canonical live metadata snapshot matches the expected deterministic fixture |
 | `LIVE_PG20_LOCKED_HELPERS_UNTOUCHED_OK` | `true` | Git diff proves the three locked helpers are untouched |
-| `LIVE_PG20_STRICT_MARKER_COUNT` | `18` | Rollup reports exact strict record count, including this count record |
+| `LIVE_PG20_STRICT_MARKER_COUNT` | `19` | Rollup reports exact strict record count, including this count record |
 | `PHASE20_ALL_PASS` | `true` | Rollup gate after every strict record is present exactly once with the expected value |
 
-Non-strict advisory timing markers: `LIVE_PG20_DETECT_MS`, `LIVE_PG20_CONTAINER_MS`, `LIVE_PG20_SEED_MS`, `LIVE_PG20_SUITE_DURATION_S`, `LIVE_PG20_WALL_CLOCK_BUDGET_S`, `LIVE_PG20_WALL_CLOCK_OK`.
+Non-strict advisory/gated timing markers: `LIVE_PG20_DETECT_OK`, `LIVE_PG20_DETECT_SLOW`, `LIVE_PG20_DETECT_MS`, `LIVE_PG20_CONTAINER_MS`, `LIVE_PG20_SEED_MS`, `LIVE_PG20_SUITE_DURATION_S`, `LIVE_PG20_WALL_CLOCK_BUDGET_S`, `LIVE_PG20_WALL_CLOCK_OK`.
 </strict_markers>
 
 <verification>
@@ -127,7 +131,6 @@ The second command above must not run the smoke without `-tags live_pg20`; it is
 Implementation may modify only:
 - `Makefile`
 - `.github/workflows/test.yml`
-- `.gitattributes`
 - `dbee/adapters/postgres_driver_rich_metadata_shape_test.go`
 - `dbee/tests/testhelpers/helper.go`
 - `dbee/tests/testhelpers/postgres_rich_metadata.go`
@@ -155,12 +158,13 @@ Implementation must read but not modify:
 | Smoke test accidentally joins integration matrix | `_smoke_test.go` suffix plus `live_pg20` build tag; bootstrap glob remains `*_integration_test.go` |
 | Fixture contamination | Fresh container per suite plus idempotent `DROP SCHEMA IF EXISTS ... CASCADE`; negative SQL uses dedicated DB |
 | Orphaned containers on helper error | Helper cleans up on every post-start error and test registers cleanup immediately |
-| Snapshot flakes from unordered catalog rows or PG drift | Canonical sort, field allowlist/denylist, external golden, digest-pinned image, explicit update flow |
+| Snapshot flakes from unordered catalog rows or PG drift | Canonical sort, field allowlist/denylist, readable text JSON golden, digest-pinned image, explicit update flow |
 | False confidence from sqlmock | Shape test validates SQL constant; live tests call public driver methods against real PostgreSQL parser/executor |
 | Rollup pollution | Use `LIVE_PG20_ROLLUP_LOG`, not `UX13_ROLLUP_LOG` |
 | Rollup false green | `set -eu`, per-marker guards exit nonzero, `PHASE20_ALL_PASS=true` only on success |
 | CI runner waste on stalled runtime/pull/container | Runtime health probes timeout at 5s, CI timeout 10m, Go timeout 10m, container context timeout |
 | Locked helper accidental edit | `LIVE_PG20_LOCKED_HELPERS_UNTOUCHED_OK` requires clean git diff for all three helpers |
+| CI shallow checkout hides base ref | `live-pg20-smoke` checkout uses full history or explicit fetch before `git merge-base HEAD origin/master` |
 </threat_model>
 
 <acceptance>
@@ -168,7 +172,7 @@ Implementation must read but not modify:
 
 - `make live-pg-smoke` runs source-shape preflight, then starts PostgreSQL through a healthy podman/docker runtime or skips locally with `LIVE_PG20_SKIPPED_NO_RUNTIME=true`.
 - `LIVE_PG20_REQUIRED=1 make live-pg-smoke` fails with the exact no-runtime message if no healthy runtime exists, including `timeout after 5s` detail for hung probes.
-- Successful run emits all 18 strict records listed above and `PHASE20_ALL_PASS=true`.
+- Successful run emits all 19 strict records listed above and `PHASE20_ALL_PASS=true`.
 - The live suite proves the Phase 17 composite FK production SQL succeeds and the exact historical broken FK SQL fails.
 - Bare `go -C dbee test ./tests/integration -run '^TestPostgresLiveRichMetadataSmoke$'` does not compile/run the smoke without `-tags live_pg20`.
 - No production PostgreSQL SQL constants are modified.
@@ -178,4 +182,6 @@ Implementation must read but not modify:
 ---
 
 *Phase: 20-live-pg-smoke*
-*Coordination plan revised: 2026-05-07 r2 narrow fold*
+Post-SHIP note: fold the r0/r1/r2/r3 decision trail into `project_v14_phase20_shipped.md` and keep this phase directory as raw review history.
+
+*Coordination plan revised: 2026-05-08 r3 narrow fold*

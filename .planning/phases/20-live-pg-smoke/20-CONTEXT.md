@@ -1,8 +1,8 @@
 # Phase 20: Live-PG Smoke Test - Context
 
 **Gathered:** 2026-05-07
-**Revised:** 2026-05-07 r2 narrow fold
-**Status:** Ready for r3 plan-gate
+**Revised:** 2026-05-08 r3 narrow fold
+**Status:** Ready for r4 plan-gate
 **Source:** User-supplied Phase 20 task, repo validation, Phase 17 memory, local code scout, plan-gate r1 findings
 
 <domain>
@@ -64,40 +64,52 @@ Challenge-up:
 
 ### Rollup And CI
 - **PG20-19:** Keep live-PG markers in a separate `LIVE_PG20_ROLLUP_LOG`. Do not append env-gated live-smoke evidence into `UX13_ROLLUP_LOG`.
-- **PG20-20:** `make live-pg-smoke` owns the rollup gate: it tees verbose Go output, emits every Makefile marker through one log-appending helper, greps every strict marker, emits `LIVE_PG20_STRICT_MARKER_COUNT=18`, and emits `PHASE20_ALL_PASS=true` only after all strict records are present exactly once with the expected values.
+- **PG20-20:** `make live-pg-smoke` owns the rollup gate: it tees verbose Go output, emits every Makefile marker through one log-appending helper, greps every strict marker, emits `LIVE_PG20_STRICT_MARKER_COUNT=19`, and emits `PHASE20_ALL_PASS=true` only after all strict records are present exactly once with the expected values.
 - **PG20-21:** Add a GitHub Actions `live-pg20-smoke` job on `ubuntu-22.04` that runs required mode. Do not add macOS CI for this phase.
 - **PG20-22:** Verification for planning/execution includes existing unit tests for Phase 17 SQL plus the new live target. The live lane is not a replacement for sqlmock; it closes the SQL-parser blind spot sqlmock cannot cover.
 
 ### r1 Fold Decisions
 - **PG20-23:** Historical fix source is `be58045`, not `c3dd1a8`. Use `git show be58045^:dbee/adapters/postgres_driver_rich_metadata.go` for the broken FK SQL and `git show be58045:dbee/adapters/postgres_driver_rich_metadata.go` for the fixed `ROWS FROM` shape.
 - **PG20-24:** Add `dbee/adapters/postgres_driver_rich_metadata_shape_test.go` in package `adapters`. It asserts `postgresForeignKeysSQL` contains `ROWS FROM (`, `pg_catalog.unnest(con.conkey)`, `pg_catalog.unnest(con.confkey)`, and does not contain `pg_catalog.unnest(con.conkey, con.confkey)`. PG20-43 widens the same test file to structural assertions for all five PostgreSQL rich metadata SQL constants.
-- **PG20-25:** Keep `LIVE_PG20_HISTORICAL_UNNEST_NEGATIVE_OK` only for the exact historical broken FK SQL. Before execute, the implementer must run that SQL against `postgres:16-alpine`/the digest image and confirm it fails with SQLSTATE `42883` (`undefined_function`). If it succeeds or fails with any other SQLSTATE, Phase 20 must be replanned and this marker removed.
+- **PG20-25:** Keep `LIVE_PG20_HISTORICAL_UNNEST_NEGATIVE_OK` only for the exact historical broken FK SQL. The live test uses `github.com/lib/pq v1.10.9`, `var pqErr *pq.Error`, `require.ErrorAs(t, err, &pqErr)`, and `require.Equal(t, pq.ErrorCode("42883"), pqErr.Code)`. `database/sql` preserves the `*pq.Error` from `lib/pq`; any non-`42883` error class fails the marker. Empirical PG16 evidence captured 2026-05-08 with `postgres:16-alpine@sha256:4e6e670bb069649261c9c18031f0aded7bb249a5b6664ddec29c013a89310d50`:
+
+```text
+ERROR:  42883: function pg_catalog.unnest(smallint[], smallint[]) does not exist
+LINE 1: ... * FROM pg_catalog.pg_constraint con JOIN LATERAL pg_catalog...
+                                                             ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+LOCATION:  ParseFuncOrColumn, parse_func.c:629
+```
 - **PG20-26:** The live smoke test file must be named `postgres_rich_metadata_smoke_test.go` and begin with `//go:build live_pg20`. Makefile passes `-tags live_pg20`; bootstrap matrix glob remains `*_integration_test.go`.
 - **PG20-27:** Runtime detection produces one selected provider name (`podman` or `docker`) and passes it to Go as `LIVE_PG20_CONTAINER_PROVIDER`. Go must not silently reselect a different provider.
-- **PG20-28:** `GetContainerProvider() testcontainers.ProviderType` public signature remains unchanged. On hosts where exactly one provider is healthy, return value stays the corresponding provider. No-runtime details live in the new health helper used by the smoke target. The live-PG rich metadata helper must select providers through `HealthyContainerRuntime` and fail closed when `ok=false`; it must not bypass this by calling `GetContainerProvider()` directly.
-- **PG20-29:** `NewPostgresRichMetadataContainer` must clean up the started container on every post-start error, including connection-string and adapter construction errors. The test registers `t.Cleanup(tc.CleanupContainer)` immediately after creation succeeds.
+- **PG20-28:** `GetContainerProvider() testcontainers.ProviderType` public signature and presence-only behavior remain unchanged. It continues to return Podman solely on `exec.LookPath("podman")`, else Docker, for existing integration helpers. Only the new `HealthyContainerRuntime` helper is health-aware, and live-PG smoke is its only caller. Current baseline grep count is 9 matches (`8` existing helper callsites plus the `GetContainerProvider` definition); Phase 20 must keep that count unchanged after implementation.
+- **PG20-29:** `NewPostgresRichMetadataContainer` must clean up the started container on every post-start error, including connection-string and adapter construction errors. The test registers `t.Cleanup(tc.CleanupContainer)` immediately after creation succeeds. CI checkout for `live-pg20-smoke` must fetch enough history for locked-helper range checks before any marker emission.
 - **PG20-30:** The negative SQL sentinel opens a dedicated `sql.Open("postgres", connURL)`, defers `db.Close()`, runs one statement with context timeout, and never uses the shared `core.Connection` pool.
-- **PG20-31:** Snapshot contract is external JSON only. Allowlist fields: `Name`, `Schema`, `Nullable`, `IsPrimaryKey`, `PrimaryKeyOrdinal`, `IsGenerated` bool, `IsIdentity` bool, FK source/target column names and ordinals, index names, index columns, DESC flags, INCLUDE columns, sequence name/schema/increment/cache. Denylist fields: column type text, default expression text, comments, type aliases/format aliases, `pg_get_expr` output, OIDs, owner names, timestamps.
-- **PG20-32:** Add `.gitattributes` entry `dbee/tests/testdata/postgres_rich_metadata_snapshot.json binary` and an explicit golden update workflow: `UPDATE_GOLDEN=1 make live-pg-smoke`, then review the isolated snapshot diff.
+- **PG20-31:** Snapshot contract is external readable JSON only. Allowlist fields: `Name`, `Schema`, `Nullable`, `IsPrimaryKey`, `PrimaryKeyOrdinal`, `IsGenerated` bool, `IsIdentity` bool, FK source/target column names and ordinals, index names, index columns, DESC flags, INCLUDE columns, sequence name/schema/increment/cache. Denylist fields: column type text, default expression text, comments, type aliases/format aliases, `pg_get_expr` output, OIDs, owner names, timestamps. Output uses stable field ordering, sorted rows, and indent=2 so PR diffs remain reviewable.
+- **PG20-32:** Golden update workflow is `UPDATE_GOLDEN=1 make live-pg-smoke`, then review the isolated readable JSON snapshot diff. Do not mark `dbee/tests/testdata/postgres_rich_metadata_snapshot.json` as binary in `.gitattributes`.
 - **PG20-33:** Rollup gate uses `set -eu`; any missing marker prints `PHASE20_ALL_PASS=false` and exits nonzero. `PHASE20_ALL_PASS=true` is printed only on the success path.
-- **PG20-34:** `LIVE_PG20_STRICT_MARKER_COUNT=18` is the only valid count. It includes the count record itself and excludes `PHASE20_ALL_PASS`.
+- **PG20-34:** `LIVE_PG20_STRICT_MARKER_COUNT=19` is the only valid count after PG20-45. It includes the count record itself and excludes `PHASE20_ALL_PASS`.
 - **PG20-35:** CI job overrides `defaults.run.working-directory: .`, sets `LIVE_PG20_ROLLUP_LOG: ${{ runner.temp }}/live-pg20/live-pg20.log`, and uploads exactly that path with `if: always()`.
 - **PG20-36:** CI job sets `timeout-minutes: 10`; Makefile runs Go with `-timeout=10m`; container setup uses `context.WithTimeout`.
 - **PG20-37:** CI uses `sudo -E make live-pg-smoke` to match the existing testcontainers job's sudo posture while preserving `LIVE_PG20_*`, `PATH`, and Go cache environment.
 - **PG20-38:** Required-mode no-runtime failure message is exact: `no healthy container runtime: tried podman info (status: <status>; stderr: <stderr>) and docker info (status: <status>; stderr: <stderr>); set LIVE_PG20_REQUIRED=0 to skip`.
-- **PG20-39:** Add non-strict timing markers: `LIVE_PG20_DETECT_MS`, `LIVE_PG20_CONTAINER_MS`, `LIVE_PG20_SEED_MS`, `LIVE_PG20_SUITE_DURATION_S`, `LIVE_PG20_WALL_CLOCK_BUDGET_S=180`, `LIVE_PG20_WALL_CLOCK_OK=<true|false>`. Wall-clock budget is memory's 120s cold-start note multiplied by 1.5.
+- **PG20-39:** Add non-strict timing markers: `LIVE_PG20_DETECT_OK=true`, `LIVE_PG20_DETECT_SLOW=true` when detection exceeds 2000ms on success, `LIVE_PG20_DETECT_MS`, `LIVE_PG20_CONTAINER_MS`, `LIVE_PG20_SEED_MS`, `LIVE_PG20_SUITE_DURATION_S`, `LIVE_PG20_WALL_CLOCK_BUDGET_S=180`, `LIVE_PG20_WALL_CLOCK_OK=<true|false>`. Detection duration is hard-gated at `< 6000ms` on both success and no-runtime paths. Wall-clock budget is memory's 120s cold-start note multiplied by 1.5.
 - **PG20-40:** Phase 21 cross-impact is part of the live contract: PK columns must have `Nullable != nil`, `PrimaryKey == true`, correct `PrimaryKeyOrdinal`, and FK refs must have equal-length `SourceColumns`/`TargetColumns` arrays in ordinal order.
 
 ### r2 Narrow-Fold Decisions
-- **PG20-41:** Every runtime health subprocess is bounded to 5s. Makefile wraps `podman info` and `docker info` with a portable timeout wrapper that uses `timeout 5s` on GNU/Linux, `gtimeout 5s` on macOS with coreutils, or an explicit fallback shell pattern. The Go helper must use `context.WithTimeout(5*time.Second)` and `exec.CommandContext`; bare `exec.Command(...).Run()` is forbidden for provider health probes. Timeout diagnostics record status `124` or equivalent plus `timeout after 5s`. Provider preference remains podman-then-docker, but when both binaries are present the probes must run concurrently so the no-runtime detection budget stays under 6000ms even when both providers hang.
+- **PG20-41:** Every runtime health subprocess is bounded to 5s. Makefile wraps `podman info` and `docker info` with a portable timeout wrapper that uses `timeout 5s` on GNU/Linux or `gtimeout 5s` on macOS with coreutils. macOS users should install coreutils (`brew install coreutils`); fallback is only the explicit single-watchdog pattern with recipe-level `trap` cleanup for `EXIT INT TERM`. The Go helper must use parent `context.WithCancel`, two concurrent probes, child `context.WithTimeout(5*time.Second)`, and `exec.CommandContext`; bare `exec.Command(...).Run()` is forbidden. Healthy podman plus hung docker must complete in `< 1500ms` and cancel the loser before its 5s timeout. Timeout diagnostics record status `124` or equivalent plus `timeout after 5s`.
 - **PG20-42:** No-runtime marker accounting is explicit. On `LIVE_PG20_REQUIRED=1` no-runtime failure, emit only `LIVE_PG20_SKIPPED_NO_RUNTIME=true`, `PHASE20_ALL_PASS=false`, and the exact PG20-38 diagnostic message as output/rollup records; do not emit `LIVE_PG20_STRICT_MARKER_COUNT`. The no-runtime detection duration must still be measured and asserted below 6000ms before the branch completes, but the required failure path must not append a `LIVE_PG20_DETECT_MS` marker. Local no-runtime skip may exit 0, but it is still a skip path and must not print success rollup evidence.
-- **PG20-43:** The SQL-shape preflight covers all five locked PostgreSQL rich metadata SQL constants with structural assertions: `postgresColumnsRichSQL` contains `pg_catalog.pg_attribute`, `postgresPrimaryKeysSQL` contains `pg_catalog.pg_constraint` and `contype = 'p'`, `postgresForeignKeysSQL` contains the fixed `ROWS FROM`/split-unnest shape, `postgresIndexesSQL` contains `pg_catalog.pg_index`, and `postgresSequencesSQL` contains `pg_catalog.pg_sequence`. Current production code has no separate `postgresMaterializedViewIndexesSQL`; if one exists before implementation, add one structural assertion for it too.
+- **PG20-43:** The SQL-shape preflight covers all five locked PostgreSQL rich metadata SQL constants with stable structural anchors only: `postgresColumnsRichSQL` contains `pg_catalog.pg_attribute`, `postgresPrimaryKeysSQL` contains `pg_catalog.pg_constraint` and `contype = 'p'`, `postgresForeignKeysSQL` contains the fixed `ROWS FROM`/split-unnest shape, `postgresIndexesSQL` contains `pg_catalog.pg_index`, and `postgresSequencesSQL` contains `pg_catalog.pg_sequence`. Do not assert alias-fragile strings such as `ix.indisvalid` or `s.seqcache`. Current production code has no separate `postgresMaterializedViewIndexesSQL`; if one exists before implementation, add one stable structural assertion for it too.
+
+### r3 Narrow-Fold Decisions
+- **PG20-44:** CI fetches enough history for the locked-helper range check. The `live-pg20-smoke` checkout uses `actions/checkout@v4` with `fetch-depth: 0`, or an explicit `git fetch origin master:refs/remotes/origin/master` before `make live-pg-smoke`. The Makefile assigns `base="$$(git merge-base HEAD origin/master)"` and fails closed without emitting `LIVE_PG20_LOCKED_HELPERS_UNTOUCHED_OK=true` if merge-base resolution fails.
+- **PG20-45:** Split SQL-shape evidence into two strict markers: `LIVE_PG20_SQL_SHAPE_PREFLIGHT_OK=true` after same-package SQL-constant preflight succeeds, and `LIVE_PG20_ROWS_FROM_LIVE_OK=true` after live `GetColumnsRich` exercises production ROWS FROM SQL successfully. Strict count is `19`.
 
 ### the agent's Discretion
 - Exact fixture table and column names, as long as every marker has a deterministic live assertion.
 - Exact helper function names in `dbee/tests/testhelpers`, as long as existing adapter integration tests keep working.
 - Exact snapshot struct type names, as long as the allowlist/denylist above is enforced.
-- Decision count is allowed to remain at 43 for traceability through plan-gate convergence; consolidation is deferred to v1.5 documentation polish if needed.
+- Decision count is allowed to remain at 45 for traceability through plan-gate convergence; consolidation is deferred to post-SHIP docs. Fold consolidated decisions into `project_v14_phase20_shipped.md` and archive raw r0/r1/r2/r3 entries.
 </decisions>
 
 <canonical_refs>
@@ -175,4 +187,4 @@ Challenge-up:
 ---
 
 *Phase: 20-live-pg-smoke*
-*Context revised: 2026-05-07 r2 narrow fold*
+*Context revised: 2026-05-08 r3 narrow fold*
