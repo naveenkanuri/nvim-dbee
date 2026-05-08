@@ -16,7 +16,11 @@ import (
 	tcpsql "github.com/testcontainers/testcontainers-go/modules/postgres"
 )
 
-const DefaultPostgresRichMetadataImage = "postgres:16-alpine@sha256:4e6e670bb069649261c9c18031f0aded7bb249a5b6664ddec29c013a89310d50"
+const (
+	DefaultPostgresRichMetadataImage = "postgres:16-alpine@sha256:4e6e670bb069649261c9c18031f0aded7bb249a5b6664ddec29c013a89310d50"
+	postgresRichMetadataCleanupLabel = "nvim-dbee.live-pg20"
+	postgresRichMetadataCleanupValue = "true"
+)
 
 type PostgresRichMetadataContainer struct {
 	*tcpsql.PostgresContainer
@@ -34,6 +38,7 @@ func NewPostgresRichMetadataContainer(parent context.Context, params *core.Conne
 		if err := configurePodmanTestcontainersEnv(parent); err != nil {
 			return nil, err
 		}
+		_ = cleanupPodmanRichMetadataContainers(parent)
 	}
 
 	seedFile, err := GetTestDataFile("postgres_rich_metadata_seed.sql")
@@ -47,7 +52,7 @@ func NewPostgresRichMetadataContainer(parent context.Context, params *core.Conne
 		image = DefaultPostgresRichMetadataImage
 	}
 
-	ctx, cancel := context.WithTimeout(parent, 10*time.Minute)
+	ctx, cancel := context.WithTimeout(parent, 150*time.Second)
 	defer cancel()
 
 	ctr, err := tcpsql.Run(
@@ -56,6 +61,11 @@ func NewPostgresRichMetadataContainer(parent context.Context, params *core.Conne
 		tcpsql.BasicWaitStrategies(),
 		tc.CustomizeRequest(tc.GenericContainerRequest{
 			ProviderType: provider,
+			ContainerRequest: tc.ContainerRequest{
+				Labels: map[string]string{
+					postgresRichMetadataCleanupLabel: postgresRichMetadataCleanupValue,
+				},
+			},
 		}),
 		tcpsql.WithInitScripts(seedFile.Name()),
 		tcpsql.WithDatabase("dev"),
@@ -66,7 +76,7 @@ func NewPostgresRichMetadataContainer(parent context.Context, params *core.Conne
 
 	connURL, err := ctr.ConnectionString(ctx, "sslmode=disable")
 	if err != nil {
-		_ = ctr.Terminate(ctx)
+		terminatePostgresRichMetadata(ctr)
 		return nil, err
 	}
 
@@ -82,7 +92,7 @@ func NewPostgresRichMetadataContainer(parent context.Context, params *core.Conne
 
 	driver, err := adapters.NewConnection(params)
 	if err != nil {
-		_ = ctr.Terminate(ctx)
+		terminatePostgresRichMetadata(ctr)
 		return nil, err
 	}
 
@@ -122,6 +132,36 @@ func configurePodmanTestcontainersEnv(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func CleanupPostgresRichMetadataContainers(ctx context.Context, runtimeName string) error {
+	if runtimeName != "podman" {
+		return nil
+	}
+	return cleanupPodmanRichMetadataContainers(ctx)
+}
+
+func cleanupPodmanRichMetadataContainers(parent context.Context) error {
+	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
+	defer cancel()
+
+	filter := fmt.Sprintf("label=%s=%s", postgresRichMetadataCleanupLabel, postgresRichMetadataCleanupValue)
+	out, err := exec.CommandContext(ctx, "podman", "ps", "-a", "-q", "--filter", filter).Output()
+	if err != nil {
+		return err
+	}
+	ids := strings.Fields(string(out))
+	if len(ids) == 0 {
+		return nil
+	}
+	args := append([]string{"rm", "-f"}, ids...)
+	return exec.CommandContext(ctx, "podman", args...).Run()
+}
+
+func terminatePostgresRichMetadata(ctr *tcpsql.PostgresContainer) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_ = ctr.Terminate(ctx)
 }
 
 func discoverPodmanAPISocket(ctx context.Context) (string, error) {

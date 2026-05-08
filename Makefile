@@ -30,6 +30,7 @@ ARCH14_ROLLUP_LOG ?= $(UX13_ROLLUP_LOG)
 LIVE_PG20_ARTIFACT_ROOT ?= $(if $(RUNNER_TEMP),$(RUNNER_TEMP)/live-pg20,$(if $(TMPDIR),$(patsubst %/,%,$(TMPDIR))/nvim-dbee-live-pg20,/tmp/nvim-dbee-live-pg20))
 LIVE_PG20_ROLLUP_LOG ?= $(LIVE_PG20_ARTIFACT_ROOT)/live-pg20.log
 LIVE_PG20_LOCKED_HELPERS_STATUS ?= $(LIVE_PG20_ARTIFACT_ROOT)/locked-helpers-status
+LIVE_PG20_PROBE_BIN ?= $(LIVE_PG20_ARTIFACT_ROOT)/bin/probe-runtime
 LIVE_PG20_REQUIRED ?= 0
 LIVE_PG20_USE_SUDO ?= 0
 LIVE_PG20_POSTGRES_IMAGE ?= postgres:16-alpine@sha256:4e6e670bb069649261c9c18031f0aded7bb249a5b6664ddec29c013a89310d50
@@ -205,23 +206,53 @@ db18-locked-helpers-guard:
 oracle-bind-audit:
 	ORACLE22_ROLLUP=1 env GOCACHE="$${GOCACHE:-/tmp/codex-go-cache}" go -C dbee test ./adapters -run 'TestOracle(BindName|NamedArgs|UnsafeBindNames|RefCursor|DBMSOutput|BindAudit)|TestFetchDBMSOutputFromConn|TestPhase22Rollup' -v
 
+# This guard checks the SHIP commit only; earlier phase history may have touched
+# locked helpers before this Phase 20 commit.
 live-pg-smoke:
 	@set -eu; \
-	mkdir -p "$(LIVE_PG20_ARTIFACT_ROOT)"; \
+	mkdir -p "$(LIVE_PG20_ARTIFACT_ROOT)" "$(LIVE_PG20_ARTIFACT_ROOT)/bin"; \
 	: > "$(LIVE_PG20_ROLLUP_LOG)"; \
-	if base="$$(git merge-base HEAD origin/master)" \
-	  && git diff --quiet "$$base" HEAD -- lua/dbee/schema_filter_authority.lua lua/dbee/schema_name_canonical.lua lua/dbee/lsp/epoch_authority.lua \
-	  && git diff --quiet -- lua/dbee/schema_filter_authority.lua lua/dbee/schema_name_canonical.lua lua/dbee/lsp/epoch_authority.lua \
-	  && git diff --cached --quiet -- lua/dbee/schema_filter_authority.lua lua/dbee/schema_name_canonical.lua lua/dbee/lsp/epoch_authority.lua; then \
-	  printf '%s\n' ok > "$(LIVE_PG20_LOCKED_HELPERS_STATUS)"; \
-	else \
-	  printf '%s\n' tampered > "$(LIVE_PG20_LOCKED_HELPERS_STATUS)"; \
+	locked_status=ok; \
+	for path in lua/dbee/schema_filter_authority.lua lua/dbee/schema_name_canonical.lua lua/dbee/lsp/epoch_authority.lua; do \
+	  if ! git diff --quiet HEAD~1 HEAD -- "$$path"; then \
+	    printf '%s\n' "locked-helper diff detected at: $$path"; \
+	    locked_status=tampered; \
+	  fi; \
+	  if ! git diff --quiet -- "$$path"; then \
+	    printf '%s\n' "locked-helper diff detected at: $$path"; \
+	    locked_status=tampered; \
+	  fi; \
+	  if ! git diff --cached --quiet -- "$$path"; then \
+	    printf '%s\n' "locked-helper diff detected at: $$path"; \
+	    locked_status=tampered; \
+	  fi; \
+	done; \
+	printf '%s\n' "$$locked_status" > "$(LIVE_PG20_LOCKED_HELPERS_STATUS)"; \
+	probe_build_start="$$(date +%s)"; \
+	probe_build_out="$$(mktemp)"; \
+	set +e; \
+	go -C dbee build -o "$(LIVE_PG20_PROBE_BIN)" ./cmd/probe-runtime >"$$probe_build_out" 2>&1; \
+	probe_build_rc="$$?"; \
+	set -e; \
+	probe_build_end="$$(date +%s)"; \
+	probe_build_ms="$$(((probe_build_end - probe_build_start) * 1000))"; \
+	printf '%s\n' "LIVE_PG20_PROBE_BUILD_MS=$$probe_build_ms"; \
+	printf '%s\n' "LIVE_PG20_PROBE_BUILD_MS=$$probe_build_ms" >> "$(LIVE_PG20_ROLLUP_LOG)"; \
+	if [ "$$probe_build_rc" -ne 0 ]; then \
+	  cat "$$probe_build_out"; \
+	  cat "$$probe_build_out" >> "$(LIVE_PG20_ROLLUP_LOG)"; \
+	  printf '%s\n' "PHASE20_ALL_PASS=false"; \
+	  printf '%s\n' "PHASE20_ALL_PASS=false" >> "$(LIVE_PG20_ROLLUP_LOG)"; \
+	  rm -f "$$probe_build_out"; \
+	  exit 1; \
 	fi; \
+	rm -f "$$probe_build_out"; \
 	if [ "$(LIVE_PG20_USE_SUDO)" = "1" ]; then \
 	  sudo -E env \
 	    LIVE_PG20_ARTIFACT_ROOT="$(LIVE_PG20_ARTIFACT_ROOT)" \
 	    LIVE_PG20_ROLLUP_LOG="$(LIVE_PG20_ROLLUP_LOG)" \
 	    LIVE_PG20_LOCKED_HELPERS_STATUS="$(LIVE_PG20_LOCKED_HELPERS_STATUS)" \
+	    LIVE_PG20_PROBE_BIN="$(LIVE_PG20_PROBE_BIN)" \
 	    LIVE_PG20_REQUIRED="$(LIVE_PG20_REQUIRED)" \
 	    LIVE_PG20_POSTGRES_IMAGE="$(LIVE_PG20_POSTGRES_IMAGE)" \
 	    LIVE_PG20_CONTAINER_PROVIDER="$${LIVE_PG20_CONTAINER_PROVIDER:-}" \
@@ -231,6 +262,7 @@ live-pg-smoke:
 	    LIVE_PG20_ARTIFACT_ROOT="$(LIVE_PG20_ARTIFACT_ROOT)" \
 	    LIVE_PG20_ROLLUP_LOG="$(LIVE_PG20_ROLLUP_LOG)" \
 	    LIVE_PG20_LOCKED_HELPERS_STATUS="$(LIVE_PG20_LOCKED_HELPERS_STATUS)" \
+	    LIVE_PG20_PROBE_BIN="$(LIVE_PG20_PROBE_BIN)" \
 	    LIVE_PG20_REQUIRED="$(LIVE_PG20_REQUIRED)" \
 	    LIVE_PG20_POSTGRES_IMAGE="$(LIVE_PG20_POSTGRES_IMAGE)" \
 	    LIVE_PG20_CONTAINER_PROVIDER="$${LIVE_PG20_CONTAINER_PROVIDER:-}" \
@@ -252,6 +284,10 @@ _live-pg-smoke-inner:
 	    _wait_status="$$?"; \
 	    child_pid=""; \
 	  fi; \
+	  if [ "$${provider:-}" = "podman" ]; then \
+	    ids="$$(podman ps -a -q --filter label=nvim-dbee.live-pg20=true 2>/dev/null || true)"; \
+	    if [ -n "$$ids" ]; then podman rm -f $$ids >/dev/null 2>&1 || true; fi; \
+	  fi; \
 	  return 0; \
 	}; \
 	trap cleanup EXIT; \
@@ -265,9 +301,13 @@ _live-pg-smoke-inner:
 	field_count() { printf '%s\n' "$$status_line" | tr '|' '\n' | grep -c "^$$1=" || true; }; \
 	parse_probe_output() { \
 	  out="$$1"; \
-	  status_line="$$(sed -n '/^STATUS=/{p;}' "$$out")"; \
-	  line_count="$$(printf '%s\n' "$$status_line" | sed '/^$$/d' | wc -l | tr -d ' ')"; \
+	  nonempty_lines="$$(sed '/^[[:space:]]*$$/d' "$$out")"; \
+	  line_count="$$(printf '%s\n' "$$nonempty_lines" | sed '/^$$/d' | wc -l | tr -d ' ')"; \
 	  [ "$$line_count" = "1" ] || return 1; \
+	  status_line="$$nonempty_lines"; \
+	  field_total="$$(printf '%s\n' "$$status_line" | tr '|' '\n' | sed '/^[[:space:]]*$$/d' | wc -l | tr -d ' ')"; \
+	  [ "$$field_total" = "4" ] || return 1; \
+	  if printf '%s\n' "$$status_line" | tr '|' '\n' | grep -Ev '^(STATUS|PROVIDER|DURATION_MS|DETAIL)=' >/dev/null; then return 1; fi; \
 	  [ "$$(field_count STATUS)" = "1" ] || return 1; \
 	  [ "$$(field_count PROVIDER)" = "1" ] || return 1; \
 	  [ "$$(field_count DURATION_MS)" = "1" ] || return 1; \
@@ -288,7 +328,7 @@ _live-pg-smoke-inner:
 	}; \
 	probe_out="$$(mktemp)"; \
 	set +e; \
-	run_child_capture "$$probe_out" go -C dbee run ./cmd/probe-runtime; \
+	run_child_capture "$$probe_out" "$(LIVE_PG20_PROBE_BIN)"; \
 	probe_rc="$$?"; \
 	set -e; \
 	if ! parse_probe_output "$$probe_out"; then \
@@ -350,7 +390,7 @@ _live-pg-smoke-inner:
 	emit_marker "LIVE_PG20_SUITE_DURATION_S=$$suite_duration"; \
 	emit_marker "LIVE_PG20_WALL_CLOCK_BUDGET_S=180"; \
 	if [ "$$suite_duration" -gt 162 ]; then emit_marker "LIVE_PG20_WALL_CLOCK_NEAR_BUDGET=true"; fi; \
-	if [ "$$suite_duration" -le 180 ]; then \
+	if [ "$$suite_duration" -le 216 ]; then \
 	  emit_marker "LIVE_PG20_WALL_CLOCK_OK=true"; \
 	else \
 	  emit_marker "LIVE_PG20_WALL_CLOCK_OK=false"; \

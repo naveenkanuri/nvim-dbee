@@ -62,6 +62,13 @@ func TestPostgresLiveRichMetadataSmoke(t *testing.T) {
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { tc.CleanupContainer(t, ctr) })
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cleanupCancel()
+		if err := th.CleanupPostgresRichMetadataContainers(cleanupCtx, ctr.RuntimeName); err != nil {
+			t.Logf("podman label cleanup failed: %v", err)
+		}
+	})
 	t.Logf("LIVE_PG20_CONTAINER_MS=%d", time.Since(startContainer).Milliseconds())
 
 	startSeed := time.Now()

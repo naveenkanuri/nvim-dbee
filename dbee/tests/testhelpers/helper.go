@@ -81,16 +81,19 @@ func HealthyContainerRuntime(ctx context.Context) (string, testcontainers.Provid
 				return r.runtime, r.provider, true, r.detail
 			}
 			if docker.healthy {
+				cancel()
 				return docker.runtime, docker.provider, true, docker.detail
 			}
 		case "docker":
 			docker = r
-			if podman.runtime != "" && !podman.healthy && r.healthy {
+			if r.healthy {
+				cancel()
 				return r.runtime, r.provider, true, r.detail
 			}
 		}
 	}
 	if docker.healthy {
+		cancel()
 		return docker.runtime, docker.provider, true, docker.detail
 	}
 	return "", testcontainers.ProviderDocker, false, formatNoRuntimeDetail(podman, docker)
