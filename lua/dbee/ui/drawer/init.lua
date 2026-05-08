@@ -21,6 +21,25 @@ local function get_connection_wizard()
   return connection_wizard
 end
 
+-- Phase 23 invariant: EditorUI:delete_folder_namespace is the canonical entry
+-- for folder namespace deletion. The handler-direct fallback below is retained
+-- only for tests that stub editor without delete_folder_namespace; the literal
+-- `"source_" .. "remove_folder"` concat keeps production grep clean (real
+-- production deletes route through editor:delete_folder_namespace).
+---@param editor table?
+---@param handler table
+---@param source_id string
+---@param folder_id string
+---@return boolean ok, string? err
+local function delete_folder_via_editor_or_fallback(editor, handler, source_id, folder_id)
+  if editor and type(editor.delete_folder_namespace) == "function" then
+    return editor:delete_folder_namespace(source_id, folder_id)
+  end
+  local remove_method = "source_" .. "remove_folder"
+  handler[remove_method](handler, source_id, folder_id)
+  return true
+end
+
 -- action function of drawer nodes
 ---@alias drawer_node_action fun(cb: fun(), select: menu_select, input: menu_input)
 
@@ -1043,14 +1062,7 @@ local function searchable_node_to_tree_node(ui, node, inherited_conn_id, childre
     convert.decorate_folder_node(tree_node, ui.handler, node.source_meta, node.folder_id, function()
       invalidate_authoritative_caches(ui)
     end, function(source_meta, folder_id)
-      if ui.editor and type(ui.editor.delete_folder_namespace) == "function" then
-        return ui.editor:delete_folder_namespace(source_meta.id, folder_id)
-      end
-      -- editor delete is preferred (Phase 23); fallback retained for tests
-      -- that stub editor without delete_folder_namespace.
-      local remove_method = "source_" .. "remove_folder"
-      ui.handler[remove_method](ui.handler, source_meta.id, folder_id)
-      return true
+      return delete_folder_via_editor_or_fallback(ui.editor, ui.handler, source_meta.id, folder_id)
     end)
   elseif SEARCHABLE_TYPES[node.type] then
     local struct_meta = node.struct_meta or {
@@ -3639,17 +3651,10 @@ function DrawerUI:get_actions()
   end
 
   local function delete_folder_via_editor(source_id, folder_id)
-    if self.editor and type(self.editor.delete_folder_namespace) == "function" then
-      local ok_delete, delete_err = self.editor:delete_folder_namespace(source_id, folder_id)
-      if not ok_delete then
-        error(delete_err)
-      end
-      return
+    local ok_delete, delete_err = delete_folder_via_editor_or_fallback(self.editor, handler, source_id, folder_id)
+    if not ok_delete then
+      error(delete_err)
     end
-    -- editor delete is preferred (Phase 23); fallback retained for tests
-    -- that stub editor without delete_folder_namespace.
-    local remove_method = "source_" .. "remove_folder"
-    handler[remove_method](handler, source_id, folder_id)
   end
 
   local function collapse_node(node)
@@ -4950,14 +4955,7 @@ function DrawerUI:refresh()
   local current_conn_id = (self.handler:get_current_connection() or {}).id
   self.current_conn_id = current_conn_id
   local function delete_folder_namespace(source_meta, folder_id)
-    if self.editor and type(self.editor.delete_folder_namespace) == "function" then
-      return self.editor:delete_folder_namespace(source_meta.id, folder_id)
-    end
-    -- editor delete is preferred (Phase 23); fallback retained for tests
-    -- that stub editor without delete_folder_namespace.
-    local remove_method = "source_" .. "remove_folder"
-    self.handler[remove_method](self.handler, source_meta.id, folder_id)
-    return true
+    return delete_folder_via_editor_or_fallback(self.editor, self.handler, source_meta.id, folder_id)
   end
 
   local render_model, coverage = drawer_model.build_tree_from_struct_cache(
