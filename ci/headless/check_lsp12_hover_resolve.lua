@@ -311,8 +311,15 @@ local markdown = docs.format_hover({
   type = "text",
 }, {})
 assert_eq("markdown kind", markdown.kind, "markdown")
-assert_true("markdown escaped pipe", markdown.value:find("\\|", 1, true) ~= nil)
-assert_true("markdown escaped star", markdown.value:find("\\*", 1, true) ~= nil)
+-- Phase 21 hotfix `ebee35a`: identifiers with special chars are wrapped in
+-- backtick code-spans (not markdown-escaped) for renderer compatibility —
+-- snacks/cmp display `\_`/`\.` as visible backslashes. Verify the column
+-- qualified name appears LITERAL inside the code-span (no \\| or \\*) and
+-- code-span double-delimiter is emitted for the embedded backtick.
+assert_true("markdown literal pipe in code-span", markdown.value:find("bad|", 1, true) ~= nil)
+assert_true("markdown literal star in code-span", markdown.value:find("id*", 1, true) ~= nil)
+assert_true("markdown no escaped pipe", markdown.value:find("\\|", 1, true) == nil)
+assert_true("markdown no escaped star", markdown.value:find("\\*", 1, true) == nil)
 local resolve_plain = docs.format_resolve({
   kind = "table",
   schema = "public",
