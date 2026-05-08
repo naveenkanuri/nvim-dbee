@@ -375,6 +375,42 @@ jobs:
               -c "luafile ${GITHUB_WORKSPACE}/ci/headless/check_arch14_rollup.lua"
           done
 
+  live-pg20-smoke:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    name: Live PG20 Smoke
+    defaults:
+      run:
+        working-directory: .
+    env:
+      LIVE_PG20_REQUIRED: "1"
+      LIVE_PG20_USE_SUDO: "1"
+      LIVE_PG20_ROLLUP_LOG: ${{ runner.temp }}/live-pg20/live-pg20.log
+      LIVE_PG20_POSTGRES_IMAGE: postgres:16-alpine@sha256:4e6e670bb069649261c9c18031f0aded7bb249a5b6664ddec29c013a89310d50
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Setup Go v${{ env.GO_VERSION }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+          cache: true
+          cache-dependency-path: ./dbee/go.sum
+      - name: Run Live PG20 Smoke
+        run: make live-pg-smoke
+      - name: Assert Live PG20 Log
+        if: always()
+        run: test -s "$LIVE_PG20_ROLLUP_LOG"
+      - name: Upload Live PG20 Log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-pg20-smoke-log
+          path: ${{ env.LIVE_PG20_ROLLUP_LOG }}
+          if-no-files-found: error
+
   bootstrap-testcontainers:
     runs-on: ubuntu-22.04
     name: Bootstrap Testcontainers

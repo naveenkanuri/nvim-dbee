@@ -27,6 +27,12 @@ LSP12_ROLLUP_SCRIPT ?= $(CURDIR)/ci/headless/check_lsp12_rollup.lua
 LSP21_ROLLUP_SCRIPT ?= $(CURDIR)/ci/headless/check_lsp21_rollup.lua
 ARCH14_ROLLUP_SCRIPT ?= $(CURDIR)/ci/headless/check_arch14_rollup.lua
 ARCH14_ROLLUP_LOG ?= $(UX13_ROLLUP_LOG)
+LIVE_PG20_ARTIFACT_ROOT ?= $(if $(RUNNER_TEMP),$(RUNNER_TEMP)/live-pg20,$(if $(TMPDIR),$(patsubst %/,%,$(TMPDIR))/nvim-dbee-live-pg20,/tmp/nvim-dbee-live-pg20))
+LIVE_PG20_ROLLUP_LOG ?= $(LIVE_PG20_ARTIFACT_ROOT)/live-pg20.log
+LIVE_PG20_LOCKED_HELPERS_STATUS ?= $(LIVE_PG20_ARTIFACT_ROOT)/locked-helpers-status
+LIVE_PG20_REQUIRED ?= 0
+LIVE_PG20_USE_SUDO ?= 0
+LIVE_PG20_POSTGRES_IMAGE ?= postgres:16-alpine@sha256:4e6e670bb069649261c9c18031f0aded7bb249a5b6664ddec29c013a89310d50
 WALLET_PLATFORM ?= $(if $(filter Darwin,$(UNAME_S)),macos,linux)
 WALLET_ARTIFACT_ROOT ?= $(if $(RUNNER_TEMP),$(RUNNER_TEMP)/wallet-test,$(if $(TMPDIR),$(TMPDIR)nvim-dbee-wallet-test,/tmp/nvim-dbee-wallet-test))
 WALLET_ARTIFACT_DIR ?= $(WALLET_ARTIFACT_ROOT)/$(WALLET_PLATFORM)
@@ -35,6 +41,7 @@ WALLET_LUA_LOG ?= $(WALLET_ARTIFACT_DIR)/wallet-lua.log
 WALLET_ROLLUP_SCRIPT ?= $(CURDIR)/ci/headless/check_oracle_wallet_zip.lua
 
 .PHONY: perf perf-lsp perf-all wallet-test perf-headless ux13-rollup lsp21 lsp21-rollup lsp21-locked-helpers-guard db18-locked-helpers-guard oracle-bind-audit gn23 gn23-rollup gn23-locked-helpers-guard gn23-no-go-rpc-guard
+.PHONY: live-pg-smoke _live-pg-smoke-inner
 
 perf-headless: perf-bootstrap
 	@mkdir -p "$(LSP01_PERF_STATE_HOME)"
@@ -197,6 +204,190 @@ db18-locked-helpers-guard:
 
 oracle-bind-audit:
 	ORACLE22_ROLLUP=1 env GOCACHE="$${GOCACHE:-/tmp/codex-go-cache}" go -C dbee test ./adapters -run 'TestOracle(BindName|NamedArgs|UnsafeBindNames|RefCursor|DBMSOutput|BindAudit)|TestFetchDBMSOutputFromConn|TestPhase22Rollup' -v
+
+live-pg-smoke:
+	@set -eu; \
+	mkdir -p "$(LIVE_PG20_ARTIFACT_ROOT)"; \
+	: > "$(LIVE_PG20_ROLLUP_LOG)"; \
+	if base="$$(git merge-base HEAD origin/master)" \
+	  && git diff --quiet "$$base" HEAD -- lua/dbee/schema_filter_authority.lua lua/dbee/schema_name_canonical.lua lua/dbee/lsp/epoch_authority.lua \
+	  && git diff --quiet -- lua/dbee/schema_filter_authority.lua lua/dbee/schema_name_canonical.lua lua/dbee/lsp/epoch_authority.lua \
+	  && git diff --cached --quiet -- lua/dbee/schema_filter_authority.lua lua/dbee/schema_name_canonical.lua lua/dbee/lsp/epoch_authority.lua; then \
+	  printf '%s\n' ok > "$(LIVE_PG20_LOCKED_HELPERS_STATUS)"; \
+	else \
+	  printf '%s\n' tampered > "$(LIVE_PG20_LOCKED_HELPERS_STATUS)"; \
+	fi; \
+	if [ "$(LIVE_PG20_USE_SUDO)" = "1" ]; then \
+	  sudo -E env \
+	    LIVE_PG20_ARTIFACT_ROOT="$(LIVE_PG20_ARTIFACT_ROOT)" \
+	    LIVE_PG20_ROLLUP_LOG="$(LIVE_PG20_ROLLUP_LOG)" \
+	    LIVE_PG20_LOCKED_HELPERS_STATUS="$(LIVE_PG20_LOCKED_HELPERS_STATUS)" \
+	    LIVE_PG20_REQUIRED="$(LIVE_PG20_REQUIRED)" \
+	    LIVE_PG20_POSTGRES_IMAGE="$(LIVE_PG20_POSTGRES_IMAGE)" \
+	    LIVE_PG20_CONTAINER_PROVIDER="$${LIVE_PG20_CONTAINER_PROVIDER:-}" \
+	    $(MAKE) --no-print-directory _live-pg-smoke-inner; \
+	else \
+	  env \
+	    LIVE_PG20_ARTIFACT_ROOT="$(LIVE_PG20_ARTIFACT_ROOT)" \
+	    LIVE_PG20_ROLLUP_LOG="$(LIVE_PG20_ROLLUP_LOG)" \
+	    LIVE_PG20_LOCKED_HELPERS_STATUS="$(LIVE_PG20_LOCKED_HELPERS_STATUS)" \
+	    LIVE_PG20_REQUIRED="$(LIVE_PG20_REQUIRED)" \
+	    LIVE_PG20_POSTGRES_IMAGE="$(LIVE_PG20_POSTGRES_IMAGE)" \
+	    LIVE_PG20_CONTAINER_PROVIDER="$${LIVE_PG20_CONTAINER_PROVIDER:-}" \
+	    $(MAKE) --no-print-directory _live-pg-smoke-inner; \
+	fi
+
+_live-pg-smoke-inner:
+	@set -eu; \
+	wall_start="$$(date +%s)"; \
+	_cleanup_done=""; \
+	child_pid=""; \
+	cleanup() { \
+	  [ -n "$$_cleanup_done" ] && return 0; \
+	  _cleanup_done=1; \
+	  set +e; \
+	  if [ -n "$$child_pid" ]; then \
+	    kill "$$child_pid" 2>/dev/null; \
+	    wait "$$child_pid" 2>/dev/null; \
+	    _wait_status="$$?"; \
+	    child_pid=""; \
+	  fi; \
+	  return 0; \
+	}; \
+	trap cleanup EXIT; \
+	trap 'cleanup; exit 130' INT; \
+	trap 'cleanup; exit 143' TERM; \
+	emit_marker() { marker="$$1"; printf '%s\n' "$$marker"; printf '%s\n' "$$marker" >> "$(LIVE_PG20_ROLLUP_LOG)"; }; \
+	fail_gate() { emit_marker "PHASE20_ALL_PASS=false"; exit 1; }; \
+	append_log() { cat "$$1"; cat "$$1" >> "$(LIVE_PG20_ROLLUP_LOG)"; }; \
+	run_child_capture() { out="$$1"; shift; "$$@" >"$$out" 2>&1 & child_pid="$$!"; wait "$$child_pid"; rc="$$?"; child_pid=""; return "$$rc"; }; \
+	field_from_line() { printf '%s\n' "$$status_line" | tr '|' '\n' | sed -n "s/^$$1=//p" | head -n 1; }; \
+	field_count() { printf '%s\n' "$$status_line" | tr '|' '\n' | grep -c "^$$1=" || true; }; \
+	parse_probe_output() { \
+	  out="$$1"; \
+	  status_line="$$(sed -n '/^STATUS=/{p;}' "$$out")"; \
+	  line_count="$$(printf '%s\n' "$$status_line" | sed '/^$$/d' | wc -l | tr -d ' ')"; \
+	  [ "$$line_count" = "1" ] || return 1; \
+	  [ "$$(field_count STATUS)" = "1" ] || return 1; \
+	  [ "$$(field_count PROVIDER)" = "1" ] || return 1; \
+	  [ "$$(field_count DURATION_MS)" = "1" ] || return 1; \
+	  [ "$$(field_count DETAIL)" = "1" ] || return 1; \
+	  status="$$(field_from_line STATUS)"; \
+	  provider="$$(field_from_line PROVIDER)"; \
+	  detect_ms="$$(field_from_line DURATION_MS)"; \
+	  detail="$$(field_from_line DETAIL)"; \
+	  case "$$status" in ok|no_runtime|internal_error) ;; *) return 1 ;; esac; \
+	  if [ "$$status" = "ok" ]; then \
+	    case "$$provider" in podman|docker) ;; *) return 1 ;; esac; \
+	  else \
+	    [ "$$provider" = "none" ] || return 1; \
+	  fi; \
+	  if [ "$$status" = "no_runtime" ]; then [ -n "$$detail" ] || return 1; fi; \
+	  case "$$detect_ms" in ''|*[!0-9]*) return 1 ;; *) [ "$$detect_ms" -lt 6000 ] || return 1 ;; esac; \
+	  return 0; \
+	}; \
+	probe_out="$$(mktemp)"; \
+	set +e; \
+	run_child_capture "$$probe_out" go -C dbee run ./cmd/probe-runtime; \
+	probe_rc="$$?"; \
+	set -e; \
+	if ! parse_probe_output "$$probe_out"; then \
+	  append_log "$$probe_out"; \
+	  emit_marker "LIVE_PG20_PROBE_INTERNAL_ERROR=true"; \
+	  emit_marker "PHASE20_ALL_PASS=false"; \
+	  exit 1; \
+	fi; \
+	if [ "$$probe_rc" -eq 1 ] && [ "$$status" = "no_runtime" ]; then \
+	  emit_marker "LIVE_PG20_SKIPPED_NO_RUNTIME=true"; \
+	  emit_marker "LIVE_PG20_DETECT_MS=$$detect_ms"; \
+	  printf '%s\n' "$$detail" | tee -a "$(LIVE_PG20_ROLLUP_LOG)"; \
+	  emit_marker "PHASE20_ALL_PASS=false"; \
+	  if [ "$(LIVE_PG20_REQUIRED)" = "1" ]; then exit 1; fi; \
+	  exit 0; \
+	fi; \
+	if ! { [ "$$probe_rc" -eq 0 ] && [ "$$status" = "ok" ]; }; then \
+	  append_log "$$probe_out"; \
+	  emit_marker "LIVE_PG20_PROBE_INTERNAL_ERROR=true"; \
+	  printf '%s\n' "probe-runtime internal error: rc=$$probe_rc status=$$status detail=$$detail" | tee -a "$(LIVE_PG20_ROLLUP_LOG)"; \
+	  emit_marker "PHASE20_ALL_PASS=false"; \
+	  exit 1; \
+	fi; \
+	emit_marker "LIVE_PG20_DETECT_OK=true"; \
+	emit_marker "LIVE_PG20_DETECT_MS=$$detect_ms"; \
+	if [ "$$detect_ms" -gt 2000 ]; then emit_marker "LIVE_PG20_DETECT_SLOW=true"; fi; \
+	emit_marker "LIVE_PG20_RUNTIME_DETECTED_OK=true"; \
+	locked_result="$$(cat "$(LIVE_PG20_LOCKED_HELPERS_STATUS)" 2>/dev/null || printf '%s\n' tampered)"; \
+	[ "$$locked_result" = "ok" ] || fail_gate; \
+	emit_marker "LIVE_PG20_LOCKED_HELPERS_UNTOUCHED_OK=true"; \
+	if [ "$$provider" = "podman" ] && [ -z "$${TESTCONTAINERS_RYUK_CONTAINER_PRIVILEGED:-}" ]; then \
+	  export TESTCONTAINERS_RYUK_CONTAINER_PRIVILEGED=true; \
+	fi; \
+	if [ "$$provider" = "podman" ] && [ -z "$${TESTCONTAINERS_RYUK_DISABLED:-}" ]; then \
+	  export TESTCONTAINERS_RYUK_DISABLED=true; \
+	fi; \
+	sql_shape_out="$$(mktemp)"; \
+	set +e; \
+	run_child_capture "$$sql_shape_out" go -C dbee test ./adapters -run '^TestPostgresForeignKeysSQLRowsFromShape$$' -count=1 -v; \
+	sql_shape_rc="$$?"; \
+	set -e; \
+	append_log "$$sql_shape_out"; \
+	[ "$$sql_shape_rc" -eq 0 ] || fail_gate; \
+	grep -F "LIVE_PG20_SQL_SHAPE_PREFLIGHT_OK=true" "$$sql_shape_out" >/dev/null || fail_gate; \
+	live_out="$$(mktemp)"; \
+	set +e; \
+	run_child_capture "$$live_out" env \
+	  LIVE_PG20_POSTGRES_IMAGE="$(LIVE_PG20_POSTGRES_IMAGE)" \
+	  LIVE_PG20_CONTAINER_PROVIDER="$$provider" \
+	  go -C dbee test -tags live_pg20 -count=1 -timeout=10m ./tests/integration -run '^TestPostgresLiveRichMetadataSmoke$$' -v; \
+	live_rc="$$?"; \
+	set -e; \
+	append_log "$$live_out"; \
+	[ "$$live_rc" -eq 0 ] || fail_gate; \
+	grep -F "LIVE_PG20_NEGATIVE_SQLSTATE_42883_OK=true" "$$live_out" >/dev/null || fail_gate; \
+	grep -F "42883" "$$live_out" >/dev/null || fail_gate; \
+	wall_end="$$(date +%s)"; \
+	suite_duration="$$((wall_end - wall_start))"; \
+	emit_marker "LIVE_PG20_SUITE_DURATION_S=$$suite_duration"; \
+	emit_marker "LIVE_PG20_WALL_CLOCK_BUDGET_S=180"; \
+	if [ "$$suite_duration" -gt 162 ]; then emit_marker "LIVE_PG20_WALL_CLOCK_NEAR_BUDGET=true"; fi; \
+	if [ "$$suite_duration" -le 180 ]; then \
+	  emit_marker "LIVE_PG20_WALL_CLOCK_OK=true"; \
+	else \
+	  emit_marker "LIVE_PG20_WALL_CLOCK_OK=false"; \
+	  fail_gate; \
+	fi; \
+	grep -F "LIVE_PG20_WALL_CLOCK_OK=true" "$(LIVE_PG20_ROLLUP_LOG)" >/dev/null || fail_gate; \
+	for marker in \
+	  LIVE_PG20_RUNTIME_DETECTED_OK=true \
+	  LIVE_PG20_CONTAINER_READY_OK=true \
+	  LIVE_PG20_SEED_OK=true \
+	  LIVE_PG20_SUPPORT_OK=true \
+	  LIVE_PG20_COLUMNS_RICH_OK=true \
+	  LIVE_PG20_COMPOSITE_PK_OK=true \
+	  LIVE_PG20_FK_COMPOSITE_OK=true \
+	  LIVE_PG20_SQL_SHAPE_PREFLIGHT_OK=true \
+	  LIVE_PG20_ROWS_FROM_LIVE_OK=true \
+	  LIVE_PG20_HISTORICAL_UNNEST_NEGATIVE_OK=true \
+	  LIVE_PG20_NEGATIVE_SQLSTATE_42883_OK=true \
+	  LIVE_PG20_INDEXES_OK=true \
+	  LIVE_PG20_MV_INDEXES_OK=true \
+	  LIVE_PG20_VIEW_NO_INDEXES_OK=true \
+	  LIVE_PG20_SEQUENCE_OK=true \
+	  LIVE_PG20_MULTI_SCHEMA_OK=true \
+	  LIVE_PG20_SCHEMA_SCOPE_OK=true \
+	  LIVE_PG20_SNAPSHOT_OK=true \
+	  LIVE_PG20_LOCKED_HELPERS_UNTOUCHED_OK=true; \
+	do \
+	  count="$$(grep -F "$$marker" "$(LIVE_PG20_ROLLUP_LOG)" | wc -l | tr -d ' ')"; \
+	  if [ "$$count" != "1" ]; then \
+	    printf '%s\n' "marker $$marker count $$count != 1" | tee -a "$(LIVE_PG20_ROLLUP_LOG)"; \
+	    fail_gate; \
+	  fi; \
+	done; \
+	emit_marker "LIVE_PG20_STRICT_MARKER_COUNT=20"; \
+	count="$$(grep -F "LIVE_PG20_STRICT_MARKER_COUNT=20" "$(LIVE_PG20_ROLLUP_LOG)" | wc -l | tr -d ' ')"; \
+	[ "$$count" = "1" ] || fail_gate; \
+	emit_marker "PHASE20_ALL_PASS=true"
 
 perf: perf-bootstrap
 	@set -eu; \

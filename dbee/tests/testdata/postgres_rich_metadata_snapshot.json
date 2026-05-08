@@ -1,0 +1,183 @@
+{
+  "columns": [
+    {
+      "name": "item_id",
+      "schema": "pg20_sales",
+      "nullable": false,
+      "is_primary_key": false,
+      "primary_key_ordinal": 0,
+      "is_generated": false,
+      "is_identity": true
+    },
+    {
+      "name": "line_no",
+      "schema": "pg20_sales",
+      "nullable": false,
+      "is_primary_key": true,
+      "primary_key_ordinal": 3,
+      "is_generated": false,
+      "is_identity": false
+    },
+    {
+      "name": "line_total",
+      "schema": "pg20_sales",
+      "nullable": true,
+      "is_primary_key": false,
+      "primary_key_ordinal": 0,
+      "is_generated": true,
+      "is_identity": false
+    },
+    {
+      "name": "order_id",
+      "schema": "pg20_sales",
+      "nullable": false,
+      "is_primary_key": true,
+      "primary_key_ordinal": 2,
+      "is_generated": false,
+      "is_identity": false,
+      "foreign_keys": [
+        {
+          "source_column": "order_id",
+          "source_columns": [
+            "tenant_id",
+            "order_id"
+          ],
+          "source_ordinal": 2,
+          "target_schema": "pg20_sales",
+          "target_table": "orders",
+          "target_column": "order_id",
+          "target_columns": [
+            "tenant_id",
+            "order_id"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "quantity",
+      "schema": "pg20_sales",
+      "nullable": false,
+      "is_primary_key": false,
+      "primary_key_ordinal": 0,
+      "is_generated": false,
+      "is_identity": false
+    },
+    {
+      "name": "sku",
+      "schema": "pg20_sales",
+      "nullable": false,
+      "is_primary_key": false,
+      "primary_key_ordinal": 0,
+      "is_generated": false,
+      "is_identity": false
+    },
+    {
+      "name": "tenant_id",
+      "schema": "pg20_sales",
+      "nullable": false,
+      "is_primary_key": true,
+      "primary_key_ordinal": 1,
+      "is_generated": false,
+      "is_identity": false,
+      "foreign_keys": [
+        {
+          "source_column": "tenant_id",
+          "source_columns": [
+            "tenant_id",
+            "order_id"
+          ],
+          "source_ordinal": 1,
+          "target_schema": "pg20_sales",
+          "target_table": "orders",
+          "target_column": "tenant_id",
+          "target_columns": [
+            "tenant_id",
+            "order_id"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "unit_price",
+      "schema": "pg20_sales",
+      "nullable": false,
+      "is_primary_key": false,
+      "primary_key_ordinal": 0,
+      "is_generated": false,
+      "is_identity": false
+    }
+  ],
+  "indexes": [
+    {
+      "name": "idx_customer_order_summary_customer",
+      "schema": "pg20_analytics",
+      "columns": [
+        "tenant_id",
+        "customer_id"
+      ],
+      "orders": [
+        "ASC",
+        "ASC"
+      ]
+    },
+    {
+      "name": "idx_customer_order_summary_lookup",
+      "schema": "pg20_analytics",
+      "columns": [
+        "tenant_id",
+        "order_count"
+      ],
+      "orders": [
+        "ASC",
+        "DESC"
+      ],
+      "include_columns": [
+        "total_items"
+      ]
+    },
+    {
+      "name": "idx_order_items_lookup",
+      "schema": "pg20_sales",
+      "columns": [
+        "tenant_id",
+        "order_id"
+      ],
+      "orders": [
+        "ASC",
+        "DESC"
+      ],
+      "include_columns": [
+        "sku",
+        "quantity"
+      ]
+    },
+    {
+      "name": "order_items_pkey",
+      "schema": "pg20_sales",
+      "columns": [
+        "tenant_id",
+        "order_id",
+        "line_no"
+      ],
+      "orders": [
+        "ASC",
+        "ASC",
+        "ASC"
+      ]
+    }
+  ],
+  "sequences": [
+    {
+      "name": "stock_movement_seq",
+      "schema": "pg20_inventory",
+      "increment": 3,
+      "cache_size": 5
+    },
+    {
+      "name": "invoice_number_seq",
+      "schema": "pg20_sales",
+      "increment": 7,
+      "cache_size": 11
+    }
+  ]
+}
