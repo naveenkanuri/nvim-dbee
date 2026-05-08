@@ -720,7 +720,26 @@ function sources.FileSource:create(conn)
 
   local existing = read_json_records(self.path)
   local record = strip_control_fields(conn)
-  record.id = record.id or ("file_source_/" .. utils.random_string())
+  -- Default id to the user-provided name so that notes (keyed by connection id)
+  -- survive delete-then-recreate of a connection with the same name. The
+  -- random-id fallback only fires when neither id nor name is provided
+  -- (defensive — wizard always supplies name). encode_local_namespace_path
+  -- handles arbitrary characters in the id when it's used as a filesystem path.
+  if not record.id or record.id == "" then
+    if type(record.name) == "string" and vim.trim(record.name) ~= "" then
+      record.id = record.name
+    else
+      record.id = "file_source_/" .. utils.random_string()
+    end
+  end
+  for _, existing_record in ipairs(existing) do
+    if existing_record.id == record.id then
+      error(string.format(
+        "connection id '%s' already exists in this source; choose a different name",
+        record.id
+      ))
+    end
+  end
   validate_record_schema_filter(record)
   existing[#existing + 1] = record
 
