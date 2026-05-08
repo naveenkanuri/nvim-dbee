@@ -41,13 +41,13 @@ Single-wave remains intentional. The fixture, live tests, runtime preflight, mar
 </locked_decisions>
 
 <decision_coverage>
-## Decision Coverage Added In r1/r2/r3/r4 Folds
+## Decision Coverage Added In r1-r6 Folds
 
 | Decision | Covers |
 | --- | --- |
 | `PG20-23` | Historical source of truth is commit `be58045`; `c3dd1a8` is not the Phase 17 PG fix commit |
 | `PG20-24` | Exact SQL-constant shape preflight over `postgresForeignKeysSQL` after runtime detection and before container start |
-| `PG20-25` | Historical negative test uses exact old FK SQL and must be live-verified to fail before marker emission |
+| `PG20-25` | Historical negative test uses exact old FK SQL and must emit SQLSTATE 42883 evidence before marker emission |
 | `PG20-26` | Smoke test build tag and `_smoke_test.go` suffix prevent bootstrap matrix auto-enrollment |
 | `PG20-27` | Runtime detection selects one provider and passes `LIVE_PG20_CONTAINER_PROVIDER` to Go |
 | `PG20-28` | Shared `GetContainerProvider()` signature remains unchanged for existing integration helpers |
@@ -56,24 +56,24 @@ Single-wave remains intentional. The fixture, live tests, runtime preflight, mar
 | `PG20-31` | Snapshot golden field allowlist, denylist, and digest pin |
 | `PG20-32` | Snapshot update flow keeps readable JSON diffs and avoids binary `.gitattributes` |
 | `PG20-33` | Makefile rollup uses `set -eu`, one `emit_marker`, fail-loud marker guards, and false marker on failure |
-| `PG20-34` | `LIVE_PG20_STRICT_MARKER_COUNT=19` is the strict count contract |
+| `PG20-34` | `LIVE_PG20_STRICT_MARKER_COUNT=20` is the strict count contract |
 | `PG20-35` | CI job overrides root working directory and exports a stable rollup artifact path |
 | `PG20-36` | CI job has `timeout-minutes: 10`, Go `-timeout=10m`, and container context timeout |
 | `PG20-37` | CI invokes non-sudo outer `make live-pg-smoke`; any sudo is confined to the inner live-test target after pre-sudo checks |
 | `PG20-38` | Required-mode no-runtime failure message is exact and cross-platform parseable |
-| `PG20-39` | Non-strict timing markers record detect/container/seed/suite duration and wall-clock budget |
+| `PG20-39` | Non-strict timing markers record detect/container/seed/suite duration, wall-clock budget, and near-budget warning band |
 | `PG20-40` | Phase 21 downstream shape contract is asserted on live `Column`/`FKRef` values |
 | `PG20-41` | Provider health probes are subprocess-timeout bounded in the shared Go probe; shell probe fallback removed |
 | `PG20-42` | No-runtime marker accounting runs before strict markers and emits only skip/detect-ms/fail evidence |
 | `PG20-43` | Shape preflight covers all five PostgreSQL rich metadata SQL constants |
-| `PG20-44` | CI fetches enough history and runs locked-helper Git checks before sudo escalation |
-| `PG20-45` | Split SQL-shape preflight and live ROWS FROM markers; strict count becomes 19 |
+| `PG20-44` | CI fetches enough history and records locked-helper Git status before sudo escalation, but emits the strict marker only after runtime succeeds |
+| `PG20-45` | Split SQL-shape preflight and live ROWS FROM markers; SQLSTATE marker moves strict count to 20 |
 </decision_coverage>
 
 <strict_markers>
 ## Strict Markers
 
-The implementation plan owns 19 strict rollup records: 18 boolean markers plus the exact count marker. `PHASE20_ALL_PASS` is the rollup gate and is not counted as a strict marker.
+The implementation plan owns 20 strict rollup records: 19 boolean markers plus the exact count marker. `PHASE20_ALL_PASS` is the rollup gate and is not counted as a strict marker.
 
 | Marker | Expected | Meaning |
 | --- | --- | --- |
@@ -87,6 +87,7 @@ The implementation plan owns 19 strict rollup records: 18 boolean markers plus t
 | `LIVE_PG20_SQL_SHAPE_PREFLIGHT_OK` | `true` | Same-package SQL-constant preflight passed before any container startup |
 | `LIVE_PG20_ROWS_FROM_LIVE_OK` | `true` | Production composite-FK ROWS FROM SQL succeeded on live PostgreSQL |
 | `LIVE_PG20_HISTORICAL_UNNEST_NEGATIVE_OK` | `true` | Exact historical broken FK SQL shape fails on live PostgreSQL |
+| `LIVE_PG20_NEGATIVE_SQLSTATE_42883_OK` | `true` | Exact historical broken FK SQL returned SQLSTATE 42883 and the rollup saw 42883 evidence |
 | `LIVE_PG20_INDEXES_OK` | `true` | Live table indexes return key columns, order, uniqueness, PK-backed state, and INCLUDE separation |
 | `LIVE_PG20_MV_INDEXES_OK` | `true` | Live materialized-view indexes return through `GetIndexes` |
 | `LIVE_PG20_VIEW_NO_INDEXES_OK` | `true` | Regular view index lookup returns empty without failure |
@@ -95,10 +96,10 @@ The implementation plan owns 19 strict rollup records: 18 boolean markers plus t
 | `LIVE_PG20_SCHEMA_SCOPE_OK` | `true` | Same/similar object names in other schemas do not leak into requested schema results |
 | `LIVE_PG20_SNAPSHOT_OK` | `true` | Canonical live metadata snapshot matches the expected deterministic fixture |
 | `LIVE_PG20_LOCKED_HELPERS_UNTOUCHED_OK` | `true` | Git diff proves the three locked helpers are untouched |
-| `LIVE_PG20_STRICT_MARKER_COUNT` | `19` | Rollup reports exact strict record count, including this count record |
+| `LIVE_PG20_STRICT_MARKER_COUNT` | `20` | Rollup reports exact strict record count, including this count record |
 | `PHASE20_ALL_PASS` | `true` | Rollup gate after every strict record is present exactly once with the expected value |
 
-Non-strict advisory/gated timing markers: `LIVE_PG20_DETECT_OK`, `LIVE_PG20_DETECT_SLOW`, `LIVE_PG20_DETECT_MS`, `LIVE_PG20_CONTAINER_MS`, `LIVE_PG20_SEED_MS`, `LIVE_PG20_SUITE_DURATION_S`, `LIVE_PG20_WALL_CLOCK_BUDGET_S`, `LIVE_PG20_WALL_CLOCK_OK`.
+Non-strict advisory/gated timing markers: `LIVE_PG20_DETECT_OK`, `LIVE_PG20_DETECT_SLOW`, `LIVE_PG20_DETECT_MS`, `LIVE_PG20_CONTAINER_MS`, `LIVE_PG20_SEED_MS`, `LIVE_PG20_SUITE_DURATION_S`, `LIVE_PG20_WALL_CLOCK_BUDGET_S`, `LIVE_PG20_WALL_CLOCK_NEAR_BUDGET`, `LIVE_PG20_WALL_CLOCK_OK`.
 </strict_markers>
 
 <verification>
@@ -174,7 +175,7 @@ Implementation must read but not modify:
 
 - `make live-pg-smoke` detects a healthy podman/docker runtime first; no-runtime paths skip/fail before any strict marker, and healthy paths then run source-shape preflight before container startup.
 - `LIVE_PG20_REQUIRED=1 make live-pg-smoke` fails with the exact no-runtime message if no healthy runtime exists, including `timeout after 5s` detail for hung probes.
-- Successful run emits all 19 strict records listed above and `PHASE20_ALL_PASS=true`.
+- Successful run emits all 20 strict records listed above and `PHASE20_ALL_PASS=true`.
 - The live suite proves the Phase 17 composite FK production SQL succeeds and the exact historical broken FK SQL fails.
 - Bare `go -C dbee test ./tests/integration -run '^TestPostgresLiveRichMetadataSmoke$'` does not compile/run the smoke without `-tags live_pg20`.
 - No production PostgreSQL SQL constants are modified.
