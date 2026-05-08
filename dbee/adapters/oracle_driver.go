@@ -309,12 +309,40 @@ func coerceOracleBindValue(raw string) any {
 
 func validateOracleBindName(name string) error {
 	if name == "" || !oracleBindNameRe.MatchString(name) {
-		return fmt.Errorf("invalid oracle bind identifier %q; rename the SQL placeholder and bind option to a non-reserved name such as %q", name, "p_"+name)
+		return fmt.Errorf("invalid oracle bind identifier %q (go-ora driver permits only [A-Za-z_][A-Za-z0-9_]*; '$' and '#' from the Oracle SQL spec are not supported); rename the SQL placeholder and bind option to %q", name, oracleSafeBindSuggestion(name))
 	}
 	if _, bad := oracleUnsafeBindNames[strings.ToUpper(name)]; bad {
-		return fmt.Errorf("oracle bind name %q is reserved or unsafe; rename the SQL placeholder and bind option to a non-reserved name such as %q", name, "p_"+name)
+		return fmt.Errorf("oracle bind name %q is reserved or unsafe; rename the SQL placeholder and bind option to a non-reserved name such as %q", name, oracleSafeBindSuggestion(name))
 	}
 	return nil
+}
+
+// oracleSafeBindSuggestion produces a rename hint that itself satisfies
+// validateOracleBindName. It strips '$' and '#' (Oracle SQL spec accepts them
+// but go-ora's bind regex does not) and prefixes with "p_" to dodge reserved
+// words and leading-digit issues. Falls back to "p_unnamed" when the cleaned
+// remainder cannot form a valid identifier.
+func oracleSafeBindSuggestion(name string) string {
+	var b strings.Builder
+	b.Grow(len(name))
+	for _, r := range name {
+		if r == '$' || r == '#' {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	cleaned := b.String()
+	if cleaned == "" {
+		return "p_unnamed"
+	}
+	suggestion := "p_" + cleaned
+	if !oracleBindNameRe.MatchString(suggestion) {
+		return "p_unnamed"
+	}
+	if _, bad := oracleUnsafeBindNames[strings.ToUpper(suggestion)]; bad {
+		return "p_safe_unnamed"
+	}
+	return suggestion
 }
 
 func oracleNamedArgs(binds map[string]string) ([]any, error) {

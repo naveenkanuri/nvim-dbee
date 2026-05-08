@@ -186,7 +186,7 @@ func assertOracleBindValidationError(t *testing.T, err error, name string) {
 	msg := err.Error()
 	assert.Contains(t, msg, "oracle bind validation")
 	assert.Contains(t, msg, name)
-	assert.Contains(t, msg, "p_"+name)
+	assert.Contains(t, msg, oracleSafeBindSuggestion(name))
 }
 
 func runUnsafeBindMatrix(t *testing.T) bool {

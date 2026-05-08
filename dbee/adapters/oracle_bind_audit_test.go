@@ -227,11 +227,49 @@ func TestOracleUnsafeBindNamesAllUppercase(t *testing.T) {
 	}
 }
 
+func TestOracleSafeBindSuggestionAlwaysValidates(t *testing.T) {
+	corpus := []string{
+		"my$1",          // dollar present
+		"col#2",         // hash present
+		"$$$",           // pure stripped chars
+		"###",           // pure stripped chars
+		"$#$#",          // mixed stripped chars
+		"1abc",          // leading digit
+		"1$abc",         // leading digit + dollar
+		"select",        // reserved word
+		"LEVEL",         // reserved word, uppercase
+		"rownum",        // reserved word
+		"order",         // reserved word
+		"with",          // reserved word
+		"",              // empty
+		" ",             // whitespace
+		"name with spaces",
+		"name-with-dash",
+		"name.with.dots",
+		"_$_",           // underscore + stripped
+		"a$b#c",         // alphanumerics + stripped
+		"verylongname$$$1234",
+	}
+
+	for _, raw := range corpus {
+		suggestion := oracleSafeBindSuggestion(raw)
+		if !assert.NotEmpty(t, suggestion, "suggestion for %q is empty", raw) {
+			continue
+		}
+		err := validateOracleBindName(suggestion)
+		assert.NoErrorf(t, err, "oracleSafeBindSuggestion(%q) = %q must itself pass validateOracleBindName", raw, suggestion)
+	}
+
+	t.Log("ORACLE22_BIND_SUGGESTION_OK=true")
+}
+
 func TestPhase22Rollup(t *testing.T) {
 	runOracleBindAuditCore(t)
 	runUnsafeBindMatrix(t)
 	runRefCursorValidation(t)
 	runDBMSOutputLockstep(t)
+
+	t.Run("safe_bind_suggestion", TestOracleSafeBindSuggestionAlwaysValidates)
 
 	if os.Getenv("ORACLE22_ROLLUP") == "1" && !t.Failed() {
 		t.Log("PHASE22_ALL_PASS=true")

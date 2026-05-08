@@ -118,7 +118,7 @@ func assertCursorMarkerRejectedBeforeEnable(t *testing.T, query string, name str
 	err := validateRawCursorMarkers(query)
 	if assert.Error(t, err) {
 		assert.Contains(t, err.Error(), name)
-		assert.Contains(t, err.Error(), "p_"+name)
+		assert.Contains(t, err.Error(), oracleSafeBindSuggestion(name))
 	}
 
 	state := newSessTestState()
