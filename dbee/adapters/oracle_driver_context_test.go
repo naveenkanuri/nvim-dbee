@@ -24,15 +24,17 @@ var (
 )
 
 type oracleQueryCtxCapture struct {
-	mu   sync.Mutex
-	ctx  context.Context
-	args []driver.NamedValue
+	mu    sync.Mutex
+	ctx   context.Context
+	query string
+	args  []driver.NamedValue
 }
 
-func (c *oracleQueryCtxCapture) set(ctx context.Context, args []driver.NamedValue) {
+func (c *oracleQueryCtxCapture) set(ctx context.Context, query string, args []driver.NamedValue) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.ctx = ctx
+	c.query = query
 	if args == nil {
 		c.args = nil
 		return
@@ -47,6 +49,12 @@ func (c *oracleQueryCtxCapture) get() context.Context {
 	return c.ctx
 }
 
+func (c *oracleQueryCtxCapture) getQuery() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.query
+}
+
 func (c *oracleQueryCtxCapture) getArgs() []driver.NamedValue {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -56,7 +64,7 @@ func (c *oracleQueryCtxCapture) getArgs() []driver.NamedValue {
 }
 
 func (c *oracleQueryCtxCapture) reset() {
-	c.set(nil, nil)
+	c.set(nil, "", nil)
 }
 
 type oracleQueryCtxDriver struct{}
@@ -79,12 +87,20 @@ func (oracleQueryCtxConn) Begin() (driver.Tx, error) {
 	return nil, errors.New("transactions are not supported in this test driver")
 }
 
-func (oracleQueryCtxConn) QueryContext(ctx context.Context, _ string, args []driver.NamedValue) (driver.Rows, error) {
-	oracleQueryCtxState.set(ctx, args)
+func (oracleQueryCtxConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	oracleQueryCtxState.set(ctx, query, args)
 	return &oracleQueryCtxRows{ctx: ctx}, nil
 }
 
-var _ driver.QueryerContext = (*oracleQueryCtxConn)(nil)
+func (oracleQueryCtxConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	oracleQueryCtxState.set(ctx, query, args)
+	return mockResult{}, nil
+}
+
+var (
+	_ driver.QueryerContext = (*oracleQueryCtxConn)(nil)
+	_ driver.ExecerContext  = (*oracleQueryCtxConn)(nil)
+)
 
 type oracleQueryCtxRows struct {
 	ctx  context.Context
@@ -178,6 +194,69 @@ func TestOracleQueryWithBindsPassesNamedArgs(t *testing.T) {
 	require.Equal(t, "ALICE", args[1].Value)
 }
 
+func TestOracleQueryWithBindsRewritesSQLAndNamedArgs(t *testing.T) {
+	oracleQueryCtxRegisterOnce.Do(func() {
+		sql.Register(oracleQueryCtxDriverName, oracleQueryCtxDriver{})
+	})
+	oracleQueryCtxState.reset()
+
+	db, err := sql.Open(oracleQueryCtxDriverName, "oracle-query-ctx-test")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+
+	d := &oracleDriver{
+		c:  builders.NewClient(db),
+		db: db,
+	}
+
+	result, err := d.QueryWithBinds(context.Background(), "SELECT :my$1 FROM dual WHERE :col#2 = :col#2", map[string]string{
+		"col#2": "7",
+		"my$1":  "42",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	result.Close()
+
+	require.Equal(t, "SELECT :my_x24_1 FROM dual WHERE :col_x23_2 = :col_x23_2", oracleQueryCtxState.getQuery())
+	args := oracleQueryCtxState.getArgs()
+	require.Len(t, args, 2)
+	require.Equal(t, "col_x23_2", args[0].Name)
+	require.Equal(t, "7", args[0].Value)
+	require.Equal(t, "my_x24_1", args[1].Name)
+	require.Equal(t, "42", args[1].Value)
+	t.Log("ORA24_BIND_MAP_OK=true")
+}
+
+func TestOracleQueryWithBindsRewritesExecSQL(t *testing.T) {
+	oracleQueryCtxRegisterOnce.Do(func() {
+		sql.Register(oracleQueryCtxDriverName, oracleQueryCtxDriver{})
+	})
+	oracleQueryCtxState.reset()
+
+	db, err := sql.Open(oracleQueryCtxDriverName, "oracle-query-ctx-test")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+
+	d := &oracleDriver{
+		c:  builders.NewClient(db),
+		db: db,
+	}
+
+	result, err := d.QueryWithBinds(context.Background(), "UPDATE t SET c = :col#2", map[string]string{"col#2": "7"})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	result.Close()
+
+	require.Equal(t, "UPDATE t SET c = :col_x23_2", oracleQueryCtxState.getQuery())
+	args := oracleQueryCtxState.getArgs()
+	require.Len(t, args, 1)
+	require.Equal(t, "col_x23_2", args[0].Name)
+}
+
 func assertOracleBindValidationError(t *testing.T, err error, name string) {
 	t.Helper()
 	if !assert.Error(t, err) {
@@ -195,9 +274,10 @@ func runUnsafeBindMatrix(t *testing.T) bool {
 	allowed := []string{
 		"id", "name", "p_schema", "p_table", "p_line", "p_status", "A_B",
 		"my_table", "order_status", "line_count", "table_id", "schema_owner", "date_created",
+		"A$B", "A#B", "my$1", "cur_$1", "p#bind",
 	}
 	for _, name := range allowed {
-		assert.NoError(t, validateOracleBindName(name), "expected %q to be allowed", name)
+		assert.NoError(t, validateOracleBindNameUser(name), "expected %q to be allowed", name)
 		args, err := oracleNamedArgs(map[string]string{name: "value"})
 		if !assert.NoError(t, err) || !assert.Len(t, args, 1) {
 			continue
@@ -206,7 +286,9 @@ func runUnsafeBindMatrix(t *testing.T) bool {
 		if !assert.True(t, ok) {
 			continue
 		}
-		assert.Equal(t, name, arg.Name)
+		driverName, _, err := rewriteOracleBindNameForDriver(name)
+		require.NoError(t, err)
+		assert.Equal(t, driverName, arg.Name)
 		assert.Equal(t, "value", arg.Value)
 	}
 
@@ -214,10 +296,10 @@ func runUnsafeBindMatrix(t *testing.T) bool {
 		"table", "schema", "line", "status", "date", "user", "level", "group",
 		"order", "rowid", "number", "rownum", "sysdate", "whenever",
 		"column_value", "nested_table_id", "1", "bad-name", "",
-		"A$B", "A#B", "my$1", "cur_$1", "p#bind",
+		"$bad", "#bad", "my_x24_1", "my_X23_1",
 	}
 	for _, name := range rejected {
-		assert.Error(t, validateOracleBindName(name), "expected %q to be rejected", name)
+		assert.Error(t, validateOracleBindNameUser(name), "expected %q to be rejected", name)
 	}
 
 	_, err := oracleNamedArgs(map[string]string{
@@ -240,11 +322,14 @@ func runUnsafeBindMatrix(t *testing.T) bool {
 
 func TestOracleNamedArgs(t *testing.T) {
 	runUnsafeBindMatrix(t)
+	if !t.Failed() {
+		t.Log("ORA24_RESERVED_REJECT_OK=true")
+	}
 }
 
 func TestOracleBindNameTable(t *testing.T) {
 	runUnsafeBindMatrix(t)
-	err := validateOracleBindName("table")
+	err := validateOracleBindNameUser("table")
 	if assert.Error(t, err) {
 		assert.Contains(t, err.Error(), `"table"`)
 		assert.Contains(t, err.Error(), `"p_table"`)
@@ -253,7 +338,7 @@ func TestOracleBindNameTable(t *testing.T) {
 
 func TestOracleBindNameDate(t *testing.T) {
 	runUnsafeBindMatrix(t)
-	err := validateOracleBindName("date")
+	err := validateOracleBindNameUser("date")
 	if assert.Error(t, err) {
 		assert.Contains(t, err.Error(), `"date"`)
 		assert.Contains(t, err.Error(), `"p_date"`)
@@ -262,7 +347,7 @@ func TestOracleBindNameDate(t *testing.T) {
 
 func TestOracleBindNameWhenever(t *testing.T) {
 	runUnsafeBindMatrix(t)
-	err := validateOracleBindName("whenever")
+	err := validateOracleBindNameUser("whenever")
 	if assert.Error(t, err) {
 		assert.Contains(t, err.Error(), `"whenever"`)
 		assert.Contains(t, err.Error(), `"p_whenever"`)

@@ -117,7 +117,8 @@ func parseDBMSOutputLines(raw string) []string {
 }
 
 // formatOracleError formats Oracle error messages for better readability.
-// Converts wall of text into separate lines per error.
+// Converts wall of text into separate lines per error; bind-name reverse
+// mapping is layered by wrapOracleError after this formatter runs.
 func formatOracleError(err error) error {
 	if err == nil {
 		return nil

@@ -77,10 +77,26 @@ func runOracleBindAuditCore(t *testing.T) bool {
 		for _, err := range auditOracleBindSource(file, src) {
 			t.Error(err)
 		}
+		if file == "oracle_bind_rewrite.go" && strings.Contains(source, "regexp.") {
+			t.Errorf("%s imports or calls regexp in the per-query rewrite path", file)
+		}
+		if file == "oracle_bind_rewrite.go" && strings.Contains(source, "strings.NewReplacer") {
+			t.Errorf("%s uses strings.NewReplacer in production reverse mapping", file)
+		}
+		legacyValidatorDecl := "func validateOracle" + "BindName("
+		if strings.Contains(source, legacyValidatorDecl) {
+			t.Errorf("%s reintroduced legacy oracle bind validator helper", file)
+		}
 	}
 
-	if got, want := cursorIdentifierPattern(), bindIdentifierPattern(); got != want {
-		t.Errorf("cursor marker identifier pattern %q does not match oracle bind validator %q", got, want)
+	if got, want := userIdentifierPattern(), `[A-Za-z_][A-Za-z0-9_$#]*`; got != want {
+		t.Errorf("user bind identifier pattern %q does not match expected %q", got, want)
+	}
+	if got, want := bindIdentifierPattern(), `[A-Za-z_][A-Za-z0-9_]*`; got != want {
+		t.Errorf("driver bind identifier pattern %q does not match expected %q", got, want)
+	}
+	if !cursorBroadGrammarSupersetsUserGrammar() {
+		t.Errorf("cursor broad grammar must superset strict user grammar and exclude assignment")
 	}
 
 	for _, query := range []string{
@@ -115,7 +131,7 @@ func TestOracleBindAuditDetectsViolations(t *testing.T) {
 		{
 			name: "unsafe literal",
 			src:  `package adapters; import "database/sql"; func f() { _ = sql.Named("table", 1) }`,
-			want: `oracle bind name "table" is reserved or unsafe`,
+			want: `oracle driver bind name "table" is reserved or unsafe after rewrite`,
 		},
 		{
 			name: "unsupported selector",
@@ -129,7 +145,7 @@ func TestOracleBindAuditDetectsViolations(t *testing.T) {
 		},
 		{
 			name: "ignored validation",
-			src:  `package adapters; import "database/sql"; func f(params []string) { var args []any; for _, p := range params { _ = validateOracleBindName(p); args = append(args, sql.Named(p, 1)) }; _ = args }`,
+			src:  `package adapters; import "database/sql"; func f(params []string) { var args []any; for _, p := range params { _ = validateOracleBindNameDriver(p); args = append(args, sql.Named(p, 1)) }; _ = args }`,
 			want: `unvalidated sql.Named first-arg ident "p"`,
 		},
 		{
@@ -140,7 +156,7 @@ func f(params []string, cond bool) {
 	var args []any
 	for _, p := range params {
 		if cond {
-			if err := validateOracleBindName(p); err != nil { return }
+			if err := validateOracleBindNameDriver(p); err != nil { return }
 		}
 		args = append(args, sql.Named(p, 1))
 	}
@@ -155,7 +171,7 @@ import "database/sql"
 func f(params []string) {
 	var args []any
 	for _, p := range params {
-		if err := validateOracleBindName(p); err != nil {
+		if err := validateOracleBindNameDriver(p); err != nil {
 			args = append(args, sql.Named(p, 1))
 			continue
 		}
@@ -196,7 +212,7 @@ import "database/sql"
 func f(params []string) {
 	var args []any
 	for _, p := range params {
-		err := validateOracleBindName(p)
+		err := validateOracleBindNameDriver(p)
 		if err != nil { continue }
 		args = append(args, sql.Named(p, 1))
 	}
@@ -229,25 +245,25 @@ func TestOracleUnsafeBindNamesAllUppercase(t *testing.T) {
 
 func TestOracleSafeBindSuggestionAlwaysValidates(t *testing.T) {
 	corpus := []string{
-		"my$1",          // dollar present
-		"col#2",         // hash present
-		"$$$",           // pure stripped chars
-		"###",           // pure stripped chars
-		"$#$#",          // mixed stripped chars
-		"1abc",          // leading digit
-		"1$abc",         // leading digit + dollar
-		"select",        // reserved word
-		"LEVEL",         // reserved word, uppercase
-		"rownum",        // reserved word
-		"order",         // reserved word
-		"with",          // reserved word
-		"",              // empty
-		" ",             // whitespace
+		"my$1",   // dollar present
+		"col#2",  // hash present
+		"$$$",    // pure stripped chars
+		"###",    // pure stripped chars
+		"$#$#",   // mixed stripped chars
+		"1abc",   // leading digit
+		"1$abc",  // leading digit + dollar
+		"select", // reserved word
+		"LEVEL",  // reserved word, uppercase
+		"rownum", // reserved word
+		"order",  // reserved word
+		"with",   // reserved word
+		"",       // empty
+		" ",      // whitespace
 		"name with spaces",
 		"name-with-dash",
 		"name.with.dots",
-		"_$_",           // underscore + stripped
-		"a$b#c",         // alphanumerics + stripped
+		"_$_",   // underscore + stripped
+		"a$b#c", // alphanumerics + stripped
 		"verylongname$$$1234",
 	}
 
@@ -256,8 +272,8 @@ func TestOracleSafeBindSuggestionAlwaysValidates(t *testing.T) {
 		if !assert.NotEmpty(t, suggestion, "suggestion for %q is empty", raw) {
 			continue
 		}
-		err := validateOracleBindName(suggestion)
-		assert.NoErrorf(t, err, "oracleSafeBindSuggestion(%q) = %q must itself pass validateOracleBindName", raw, suggestion)
+		err := validateOracleBindNameUser(suggestion)
+		assert.NoErrorf(t, err, "oracleSafeBindSuggestion(%q) = %q must itself pass user validation", raw, suggestion)
 	}
 
 	t.Log("ORACLE22_BIND_SUGGESTION_OK=true")
@@ -329,7 +345,7 @@ func classifySQLNamedFirstArg(fset *token.FileSet, expr ast.Expr, call *ast.Call
 		if err != nil {
 			return fmt.Errorf("invalid sql.Named literal at %s: %w", auditLocation(fset, first.Pos()), err)
 		}
-		if err := validateOracleBindName(name); err != nil {
+		if err := validateOracleBindNameDriver(name); err != nil {
 			return fmt.Errorf("sql.Named literal %q at %s failed validation: %w", name, auditLocation(fset, first.Pos()), err)
 		}
 		if !strings.HasPrefix(name, "p_") {
@@ -355,15 +371,15 @@ func classifySQLNamedFirstArg(fset *token.FileSet, expr ast.Expr, call *ast.Call
 // walker to reject AssignStmt targets for the validated ident between
 // validation and sql.Named in the same RangeStmt body.
 func sqlNamedIdentIsValidated(name string, call *ast.CallExpr, stack []ast.Node) bool {
-	if fn := enclosingFunc(stack); fn != nil && fn.Name.Name == "oracleNamedArgs" {
-		if block := enclosingBlock(stack); blockHasDominatingValidateOracleBindNameBefore(block, name, call.Pos()) {
+	if fn := enclosingFunc(stack); fn != nil && (fn.Name.Name == "oracleNamedArgs" || fn.Name.Name == "oracleNamedArgsWithRewrite" || fn.Name.Name == "executePLSQLWithCursor") {
+		if block := enclosingBlock(stack); blockHasDominatingValidateOracleBindSurfaceBefore(block, name, call.Pos()) {
 			return true
 		}
 	}
 
 	if rng := enclosingRange(stack); rng != nil {
 		if value, ok := rng.Value.(*ast.Ident); ok && value.Name == name {
-			if blockHasDominatingValidateOracleBindNameBefore(rng.Body, name, call.Pos()) {
+			if blockHasDominatingValidateOracleBindSurfaceBefore(rng.Body, name, call.Pos()) {
 				return true
 			}
 		}
@@ -372,7 +388,7 @@ func sqlNamedIdentIsValidated(name string, call *ast.CallExpr, stack []ast.Node)
 	return false
 }
 
-func blockHasDominatingValidateOracleBindNameBefore(block *ast.BlockStmt, name string, before token.Pos) bool {
+func blockHasDominatingValidateOracleBindSurfaceBefore(block *ast.BlockStmt, name string, before token.Pos) bool {
 	if block == nil {
 		return false
 	}
@@ -381,10 +397,10 @@ func blockHasDominatingValidateOracleBindNameBefore(block *ast.BlockStmt, name s
 		if stmt.Pos() >= before || (stmt.Pos() <= before && before <= stmt.End()) {
 			return false
 		}
-		if ifStmt, ok := stmt.(*ast.IfStmt); ok && ifStmtHandlesValidateOracleBindName(ifStmt, name) {
+		if ifStmt, ok := stmt.(*ast.IfStmt); ok && ifStmtHandlesValidateOracleBindSurface(ifStmt, name) {
 			return true
 		}
-		errName, ok := validateOracleBindNameAssignErrName(stmt, name)
+		errName, ok := validateOracleBindSurfaceAssignErrName(stmt, name)
 		if !ok || i+1 >= len(block.List) {
 			continue
 		}
@@ -396,11 +412,11 @@ func blockHasDominatingValidateOracleBindNameBefore(block *ast.BlockStmt, name s
 	return false
 }
 
-func ifStmtHandlesValidateOracleBindName(ifStmt *ast.IfStmt, name string) bool {
+func ifStmtHandlesValidateOracleBindSurface(ifStmt *ast.IfStmt, name string) bool {
 	if ifStmt == nil {
 		return false
 	}
-	errName, ok := validateOracleBindNameAssignErrName(ifStmt.Init, name)
+	errName, ok := validateOracleBindSurfaceAssignErrName(ifStmt.Init, name)
 	return ok && ifStmtChecksErrAndStops(ifStmt, errName)
 }
 
@@ -443,14 +459,14 @@ func blockStopsUnsafeBind(block *ast.BlockStmt) bool {
 	return false
 }
 
-func validateOracleBindNameAssignErrName(node ast.Node, name string) (string, bool) {
+func validateOracleBindSurfaceAssignErrName(node ast.Node, name string) (string, bool) {
 	assign, ok := node.(*ast.AssignStmt)
 	if !ok {
 		return "", false
 	}
 	for i, rhs := range assign.Rhs {
 		call, ok := unwrapParen(rhs).(*ast.CallExpr)
-		if !ok || !isValidateOracleBindNameCall(call, name) || i >= len(assign.Lhs) {
+		if !ok || !isValidateOracleBindSurfaceCall(call, name) || i >= len(assign.Lhs) {
 			continue
 		}
 		lhs, ok := unwrapParen(assign.Lhs[i]).(*ast.Ident)
@@ -461,9 +477,9 @@ func validateOracleBindNameAssignErrName(node ast.Node, name string) (string, bo
 	return "", false
 }
 
-func isValidateOracleBindNameCall(call *ast.CallExpr, name string) bool {
+func isValidateOracleBindSurfaceCall(call *ast.CallExpr, name string) bool {
 	fun, ok := call.Fun.(*ast.Ident)
-	if !ok || fun.Name != "validateOracleBindName" || len(call.Args) == 0 {
+	if !ok || (fun.Name != "validateOracleBindNameUser" && fun.Name != "validateOracleBindNameDriver") || len(call.Args) == 0 {
 		return false
 	}
 	arg := unwrapParen(call.Args[0])
@@ -536,16 +552,15 @@ func bindIdentifierPattern() string {
 	return strings.TrimSuffix(pattern, "$")
 }
 
-func cursorIdentifierPattern() string {
-	pattern := cursorMarkerPattern.String()
-	start := strings.Index(pattern, ":(")
-	if start < 0 {
-		return ""
+func userIdentifierPattern() string {
+	return `[A-Za-z_][A-Za-z0-9_$#]*`
+}
+
+func cursorBroadGrammarSupersetsUserGrammar() bool {
+	for _, ch := range []byte("Az_09$#") {
+		if !isOracleCursorBroadNameByte(ch) {
+			return false
+		}
 	}
-	rest := pattern[start+2:]
-	end := strings.Index(rest, `)\s*/`)
-	if end < 0 {
-		return ""
-	}
-	return rest[:end]
+	return !isOracleCursorBroadNameByte('=')
 }

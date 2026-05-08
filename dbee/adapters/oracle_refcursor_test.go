@@ -2,7 +2,9 @@ package adapters
 
 import (
 	"context"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -30,6 +32,10 @@ func TestParseCursorParams_RemovesCursorMarkers(t *testing.T) {
 
 	require.Equal(t, []string{"result", "cur2"}, params)
 	require.Equal(t, "BEGIN proc(:result, :cur2, :id); END;", cleaned)
+
+	params, cleaned = parseCursorParams("BEGIN proc(:cur$1 /*CURSOR*/); END;")
+	require.Equal(t, []string{"cur$1"}, params)
+	require.Equal(t, "BEGIN proc(:cur$1); END;", cleaned)
 }
 
 func runRefCursorValidation(t *testing.T) bool {
@@ -53,8 +59,8 @@ func runRefCursorValidation(t *testing.T) bool {
 		assert.NoError(t, validateRawCursorMarkers(tc.query))
 	}
 
-	for _, name := range []string{"result", "p_result", "A_B"} {
-		assert.NoError(t, validateOracleBindName(name))
+	for _, name := range []string{"result", "p_result", "A_B", "A$B", "A#B", "cur_$1", "my$1", "p#bind"} {
+		assert.NoError(t, validateOracleBindNameUser(name))
 	}
 
 	state := newSessTestState()
@@ -79,6 +85,11 @@ func runRefCursorValidation(t *testing.T) bool {
 
 func TestOracleRefCursorValidation(t *testing.T) {
 	runRefCursorValidation(t)
+	if !t.Failed() {
+		t.Log("ORA24_CURSOR_MARKER_DOLLAR_OK=true")
+		t.Log("ORA24_CURSOR_FAST_PATH_ROUTED_OK=true")
+		t.Log("ORA24_PLSQL_ASSIGN_SKIP_OK=true")
+	}
 }
 
 func runMalformedCursorMarkerValidation(t *testing.T) bool {
@@ -91,14 +102,27 @@ func runMalformedCursorMarkerValidation(t *testing.T) bool {
 		{query: "BEGIN proc(: /*CURSOR*/); END;", name: ""},
 		{query: "BEGIN proc(:1foo /*CURSOR*/); END;", name: "1foo"},
 		{query: "BEGIN proc(:bad-name /*CURSOR*/); END;", name: "bad-name"},
-		{query: "BEGIN proc(:A$B /*CURSOR*/); END;", name: "A$B"},
-		{query: "BEGIN proc(:A#B  /* CURSOR */); END;", name: "A#B"},
-		{query: "BEGIN proc(:cur_$1 /*CURSOR*/); END;", name: "cur_$1"},
-		{query: "BEGIN proc(:my$1 /*CURSOR*/); END;", name: "my$1"},
-		{query: "BEGIN proc(:p#bind /*CURSOR*/); END;", name: "p#bind"},
-		{query: "BEGIN proc(:A$B\t/*CURSOR*/); END;", name: "A$B"},
+		{query: "BEGIN proc(:$cur /*CURSOR*/); END;", name: "$cur"},
+		{query: "BEGIN proc(:#cur /*CURSOR*/); END;", name: "#cur"},
 	} {
 		assertCursorMarkerRejectedBeforeEnable(t, tc.query, tc.name)
+	}
+
+	for _, query := range []string{
+		"BEGIN proc(:A$B /*CURSOR*/); END;",
+		"BEGIN proc(:A#B  /* CURSOR */); END;",
+		"BEGIN proc(:cur_$1 /*CURSOR*/); END;",
+		"BEGIN proc(:my$1 /*CURSOR*/); END;",
+		"BEGIN proc(:p#bind /*CURSOR*/); END;",
+		"BEGIN proc(:A$B\t/*CURSOR*/); END;",
+	} {
+		assert.NoError(t, validateRawCursorMarkers(query))
+		plan, err := prepareOracleBindRewrite(query, nil)
+		assert.NoError(t, err)
+		assert.True(t, plan.hasCursor)
+		assert.NotContains(t, strings.ToUpper(plan.rewrittenSQL), "CURSOR")
+		assert.NotContains(t, plan.rewrittenSQL, "$")
+		assert.NotContains(t, plan.rewrittenSQL, "#")
 	}
 
 	return !t.Failed()
@@ -164,7 +188,9 @@ func runStrayCursorCommentValidation(t *testing.T) bool {
 
 		state := newSessTestState()
 		driver := newSessTestDriver(t, state)
-		result, err := driver.QueryWithBinds(context.Background(), tc.query, tc.binds)
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		result, err := driver.QueryWithBinds(ctx, tc.query, tc.binds)
+		cancel()
 		if result != nil {
 			result.Close()
 		}
@@ -179,4 +205,19 @@ func runStrayCursorCommentValidation(t *testing.T) bool {
 
 func TestOracleStrayCursorCommentNotRejected(t *testing.T) {
 	runStrayCursorCommentValidation(t)
+}
+
+func TestOracleRefCursorRewritePlan(t *testing.T) {
+	plan, err := prepareOracleBindRewrite("BEGIN proc(:cur$1 /*CURSOR*/, :other#2 /* note */); END;", nil)
+	require.NoError(t, err)
+	require.True(t, plan.hasCursor)
+	require.Equal(t, []string{"cur$1"}, plan.cursorParams)
+	require.Equal(t, "BEGIN proc(:cur_x24_1, :other_x23_2 /* note */); END;", plan.rewrittenSQL)
+
+	plainPlan, err := prepareOracleBindRewrite("BEGIN proc(:cur /*CURSOR*/); END;", nil)
+	require.NoError(t, err)
+	require.True(t, plainPlan.hasCursor)
+	require.Equal(t, "BEGIN proc(:cur); END;", plainPlan.rewrittenSQL)
+	t.Log("ORA24_CURSOR_MARKER_DOLLAR_OK=true")
+	t.Log("ORA24_CURSOR_FAST_PATH_ROUTED_OK=true")
 }

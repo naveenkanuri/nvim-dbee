@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"regexp"
 	"strings"
 
 	go_ora "github.com/sijms/go-ora/v2"
@@ -15,60 +14,6 @@ import (
 	"github.com/kndndrj/nvim-dbee/dbee/core"
 	"github.com/kndndrj/nvim-dbee/dbee/core/builders"
 )
-
-// cursorMarkerPattern matches valid go-ora bind variables marked as cursors: :name /*CURSOR*/
-var cursorMarkerPattern = regexp.MustCompile(`(?i):([A-Za-z_][A-Za-z0-9_]*)\s*/\*\s*CURSOR\s*\*/`)
-
-// cursorMarkerBroadPattern is a lexical guard, not a full SQL parser: it does
-// not strip string literals or comment context. QueryWithBinds only invokes it
-// after isPLSQL(query), and it exists to reject cursor-shaped bind markers
-// before DBMS_OUTPUT.ENABLE side effects. The capture excludes SQL delimiters
-// and "=" so PL/SQL assignment (:=) before a /* CURSOR */ comment is not
-// mistaken for a malformed cursor marker.
-var cursorMarkerBroadPattern = regexp.MustCompile(`(?i):([^\s/:();,'"=]*)\s*/\*\s*CURSOR\s*\*/`)
-
-var cursorMarkerCleanupPattern = regexp.MustCompile(`(?i)\s*/\*\s*CURSOR\s*\*/`)
-
-// hasCursorMarker checks if the query contains any /*CURSOR*/ markers
-func hasCursorMarker(query string) bool {
-	return cursorMarkerPattern.MatchString(query)
-}
-
-func hasCursorMarkerBroad(query string) bool {
-	return cursorMarkerBroadPattern.MatchString(query)
-}
-
-func validateRawCursorMarkers(query string) error {
-	matches := cursorMarkerBroadPattern.FindAllStringSubmatch(query, -1)
-	var errs []error
-	for _, match := range matches {
-		if len(match) < 2 {
-			continue
-		}
-		if err := validateOracleBindName(match[1]); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	if len(errs) > 0 {
-		return errors.Join(errs...)
-	}
-	return nil
-}
-
-// parseCursorParams extracts cursor parameter names and returns the cleaned query
-// Example: "BEGIN proc(:result /*CURSOR*/); END;" -> ["result"], "BEGIN proc(:result); END;"
-func parseCursorParams(query string) ([]string, string) {
-	var params []string
-	matches := cursorMarkerPattern.FindAllStringSubmatch(query, -1)
-	for _, match := range matches {
-		if len(match) >= 2 {
-			params = append(params, match[1])
-		}
-	}
-	// Remove /*CURSOR*/ markers from query
-	cleanQuery := cursorMarkerCleanupPattern.ReplaceAllString(query, "")
-	return params, cleanQuery
-}
 
 // cursorData holds the results from a single REF CURSOR
 type cursorData struct {
@@ -102,16 +47,15 @@ func filterCursorBindNames(binds map[string]string, cursorParams []string) map[s
 // Multiple cursors are displayed sequentially with separator rows.
 // This is a worker function — it does NOT manage d.mu. The caller
 // (executePLSQLLocked) owns the mutex via its defer.
-func (d *oracleDriver) executePLSQLWithCursor(ctx context.Context, conn *sql.Conn, query string, binds map[string]string) (core.ResultStream, error) {
-	// Parse cursor parameters
-	cursorParams, cleanQuery := parseCursorParams(query)
+func (d *oracleDriver) executePLSQLWithCursor(ctx context.Context, conn *sql.Conn, rewritePlan oracleBindRewritePlan, binds map[string]string) (core.ResultStream, error) {
+	cursorParams := rewritePlan.cursorParams
 	if len(cursorParams) == 0 {
 		return nil, errors.New("no cursor parameters found")
 	}
 
 	// Create cursor variables and build named parameters.
 	// Filter bind args that collide with cursor OUT parameters.
-	bindArgs, bindErr := oracleNamedArgs(filterCursorBindNames(binds, cursorParams))
+	bindArgs, bindErr := oracleNamedArgsWithRewrite(filterCursorBindNames(binds, cursorParams), &rewritePlan.mapping)
 	if bindErr != nil {
 		return nil, fmt.Errorf("oracle bind validation: %w", bindErr)
 	}
@@ -121,11 +65,16 @@ func (d *oracleDriver) executePLSQLWithCursor(ctx context.Context, conn *sql.Con
 	args = append(args, bindArgs...)
 	var nameErrs []error
 	for i, param := range cursorParams {
-		if err := validateOracleBindName(param); err != nil {
+		driverName, _, err := rewritePlan.mapping.addName(param)
+		if err != nil {
 			nameErrs = append(nameErrs, err)
 			continue
 		}
-		args = append(args, sql.Named(param, sql.Out{Dest: &cursors[i]}))
+		if err := validateOracleBindNameDriver(driverName); err != nil {
+			nameErrs = append(nameErrs, err)
+			continue
+		}
+		args = append(args, sql.Named(driverName, sql.Out{Dest: &cursors[i]}))
 	}
 	if len(nameErrs) > 0 {
 		return nil, fmt.Errorf("oracle bind validation (cursor param): %w", errors.Join(nameErrs...))
@@ -141,7 +90,7 @@ func (d *oracleDriver) executePLSQLWithCursor(ctx context.Context, conn *sql.Con
 	}
 
 	// Add semicolon if needed
-	execQuery := stripTrailingSQLPlusSlashTerminator(cleanQuery)
+	execQuery := stripTrailingSQLPlusSlashTerminator(rewritePlan.rewrittenSQL)
 	isCall := strings.HasPrefix(strings.ToUpper(strings.TrimSpace(execQuery)), "CALL ")
 	if !isCall && !strings.HasSuffix(strings.TrimSpace(execQuery), ";") {
 		execQuery += ";"
@@ -153,7 +102,7 @@ func (d *oracleDriver) executePLSQLWithCursor(ctx context.Context, conn *sql.Con
 		if isSessionConnError(err) {
 			d.resetSessionConnLocked()
 		}
-		return nil, formatOracleError(err)
+		return nil, wrapOracleError(err, rewritePlan.mapping)
 	}
 
 	// Collect results from all cursors
@@ -164,7 +113,7 @@ func (d *oracleDriver) executePLSQLWithCursor(ctx context.Context, conn *sql.Con
 			if isSessionConnError(err) {
 				d.resetSessionConnLocked()
 			}
-			return nil, fmt.Errorf("failed to read cursor %s: %w", cursorParams[i], err)
+			return nil, wrapOracleError(fmt.Errorf("failed to read cursor %s: %w", cursorParams[i], err), rewritePlan.mapping)
 		}
 		allResults = append(allResults, result)
 	}

@@ -307,70 +307,6 @@ func coerceOracleBindValue(raw string) any {
 	}
 }
 
-func validateOracleBindName(name string) error {
-	if name == "" || !oracleBindNameRe.MatchString(name) {
-		return fmt.Errorf("invalid oracle bind identifier %q (go-ora driver permits only [A-Za-z_][A-Za-z0-9_]*; '$' and '#' from the Oracle SQL spec are not supported); rename the SQL placeholder and bind option to %q", name, oracleSafeBindSuggestion(name))
-	}
-	if _, bad := oracleUnsafeBindNames[strings.ToUpper(name)]; bad {
-		return fmt.Errorf("oracle bind name %q is reserved or unsafe; rename the SQL placeholder and bind option to a non-reserved name such as %q", name, oracleSafeBindSuggestion(name))
-	}
-	return nil
-}
-
-// oracleSafeBindSuggestion produces a rename hint that itself satisfies
-// validateOracleBindName. It strips '$' and '#' (Oracle SQL spec accepts them
-// but go-ora's bind regex does not) and prefixes with "p_" to dodge reserved
-// words and leading-digit issues. Falls back to "p_unnamed" when the cleaned
-// remainder cannot form a valid identifier.
-func oracleSafeBindSuggestion(name string) string {
-	var b strings.Builder
-	b.Grow(len(name))
-	for _, r := range name {
-		if r == '$' || r == '#' {
-			continue
-		}
-		b.WriteRune(r)
-	}
-	cleaned := b.String()
-	if cleaned == "" {
-		return "p_unnamed"
-	}
-	suggestion := "p_" + cleaned
-	if !oracleBindNameRe.MatchString(suggestion) {
-		return "p_unnamed"
-	}
-	if _, bad := oracleUnsafeBindNames[strings.ToUpper(suggestion)]; bad {
-		return "p_safe_unnamed"
-	}
-	return suggestion
-}
-
-func oracleNamedArgs(binds map[string]string) ([]any, error) {
-	if len(binds) == 0 {
-		return nil, nil
-	}
-
-	keys := make([]string, 0, len(binds))
-	for name := range binds {
-		keys = append(keys, name)
-	}
-	sort.Strings(keys)
-
-	var nameErrs []error
-	args := make([]any, 0, len(keys))
-	for _, name := range keys {
-		if err := validateOracleBindName(name); err != nil {
-			nameErrs = append(nameErrs, err)
-			continue
-		}
-		args = append(args, sql.Named(name, coerceOracleBindValue(binds[name])))
-	}
-	if len(nameErrs) > 0 {
-		return nil, errors.Join(nameErrs...)
-	}
-	return args, nil
-}
-
 // getSessionConnLocked returns the pinned session connection, creating it
 // lazily if needed. Caller MUST hold d.mu.
 func (d *oracleDriver) getSessionConnLocked(ctx context.Context) (*sql.Conn, error) {
@@ -444,6 +380,14 @@ func (d *oracleDriver) QueryWithBinds(ctx context.Context, query string, binds m
 		return nil, errors.New("empty query")
 	}
 
+	rewritePlan, rewriteErr := prepareOracleBindRewrite(query, binds)
+	if rewriteErr != nil {
+		return nil, fmt.Errorf("oracle bind validation: %w", rewriteErr)
+	}
+	isPLSQLQuery := isPLSQL(query)
+	hasReturning := strings.Contains(strings.ToLower(query), " returning ")
+	isExecQuery := isExecStatement(query)
+
 	d.mu.Lock()
 
 	// Create query context AFTER acquiring mutex so queue wait time is excluded.
@@ -465,30 +409,22 @@ func (d *oracleDriver) QueryWithBinds(ctx context.Context, query string, binds m
 	}
 
 	// PL/SQL path — executePLSQLLocked owns d.mu via defer
-	if isPLSQL(query) {
-		result, err := d.executePLSQLLocked(queryCtx, conn, query, binds)
+	if isPLSQLQuery {
+		result, err := d.executePLSQLLocked(queryCtx, conn, rewritePlan, binds)
 		cancel()
 		return result, err
 	}
 
-	bindArgs, bindErr := oracleNamedArgs(binds)
-	if bindErr != nil {
-		d.mu.Unlock()
-		cancel()
-		return nil, fmt.Errorf("oracle bind validation: %w", bindErr)
-	}
-	hasReturning := strings.Contains(strings.ToLower(query), " returning ")
-
 	// Exec path: statements that don't return result sets
-	if isExecStatement(query) && !hasReturning {
-		res, err := conn.ExecContext(queryCtx, query, bindArgs...)
+	if isExecQuery && !hasReturning {
+		res, err := conn.ExecContext(queryCtx, rewritePlan.rewrittenSQL, rewritePlan.bindArgs...)
 		if err != nil {
 			if isSessionConnError(err) {
 				d.resetSessionConnLocked()
 			}
 			d.mu.Unlock()
 			cancel()
-			return nil, err
+			return nil, wrapOracleError(err, rewritePlan.mapping)
 		}
 		// Read metadata BEFORE unlock — driver may reference conn internally
 		affected, err := res.RowsAffected()
@@ -506,14 +442,14 @@ func (d *oracleDriver) QueryWithBinds(ctx context.Context, query string, binds m
 	}
 
 	// Query path: SELECT / RETURNING / unknown
-	result, err := d.c.QueryOnConn(queryCtx, conn, query, bindArgs...)
+	result, err := d.c.QueryOnConn(queryCtx, conn, rewritePlan.rewrittenSQL, rewritePlan.bindArgs...)
 	if err != nil {
 		if isSessionConnError(err) {
 			d.resetSessionConnLocked()
 		}
 		d.mu.Unlock()
 		cancel()
-		return nil, err
+		return nil, wrapOracleError(err, rewritePlan.mapping)
 	}
 	result.AddCallback(func() { d.mu.Unlock() }) // release gate when rows drained
 	result.AddCallback(cancel)
@@ -523,23 +459,13 @@ func (d *oracleDriver) QueryWithBinds(ctx context.Context, query string, binds m
 // executePLSQLLocked handles PL/SQL block execution with DBMS_OUTPUT capture.
 // Uses the session-pinned connection for all operations.
 // Caller MUST hold d.mu. This method releases it via defer.
-func (d *oracleDriver) executePLSQLLocked(ctx context.Context, conn *sql.Conn, query string, binds map[string]string) (core.ResultStream, error) {
+func (d *oracleDriver) executePLSQLLocked(ctx context.Context, conn *sql.Conn, rewritePlan oracleBindRewritePlan, binds map[string]string) (core.ResultStream, error) {
 	defer d.mu.Unlock()
 
 	// Cursor-shaped markers must validate before any DBMS_OUTPUT side effect,
 	// including malformed shapes that the strict cursor extractor rejects.
-	if hasCursorMarkerBroad(query) {
-		if err := validateRawCursorMarkers(query); err != nil {
-			return nil, fmt.Errorf("oracle bind validation (cursor marker): %w", err)
-		}
-		if hasCursorMarker(query) {
-			return d.executePLSQLWithCursor(ctx, conn, query, binds)
-		}
-	}
-
-	bindArgs, bindErr := oracleNamedArgs(binds)
-	if bindErr != nil {
-		return nil, fmt.Errorf("oracle bind validation: %w", bindErr)
+	if rewritePlan.hasCursor {
+		return d.executePLSQLWithCursor(ctx, conn, rewritePlan, binds)
 	}
 
 	// Enable DBMS_OUTPUT with unlimited buffer (session-scoped)
@@ -552,17 +478,17 @@ func (d *oracleDriver) executePLSQLLocked(ctx context.Context, conn *sql.Conn, q
 	}
 
 	// Execute the PL/SQL block
-	plsqlQuery := stripTrailingSQLPlusSlashTerminator(query)
+	plsqlQuery := stripTrailingSQLPlusSlashTerminator(rewritePlan.rewrittenSQL)
 	isCall := strings.HasPrefix(strings.ToUpper(stripLeadingSQLComments(plsqlQuery)), "CALL ")
 	if !isCall && !strings.HasSuffix(strings.TrimSpace(plsqlQuery), ";") {
 		plsqlQuery += ";"
 	}
-	_, err = conn.ExecContext(ctx, plsqlQuery, bindArgs...)
+	_, err = conn.ExecContext(ctx, plsqlQuery, rewritePlan.bindArgs...)
 	if err != nil {
 		if isSessionConnError(err) {
 			d.resetSessionConnLocked()
 		}
-		return nil, formatOracleError(err)
+		return nil, wrapOracleError(err, rewritePlan.mapping)
 	}
 
 	// Fetch DBMS_OUTPUT lines (same session connection)
