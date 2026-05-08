@@ -254,6 +254,13 @@ func parseOracleTimestamp(value string) (time.Time, error) {
 // coerceOracleBindValue converts explicit typed bind literals into Go values.
 // Unrecognized literals remain strings for backward compatibility.
 func coerceOracleBindValue(raw string) any {
+	if strings.IndexAny(raw, ": \t\n\r\f\v") < 0 {
+		if strings.EqualFold(raw, "null") {
+			return nil
+		}
+		return raw
+	}
+
 	trimmed := strings.TrimSpace(raw)
 	if strings.EqualFold(trimmed, "null") {
 		return nil

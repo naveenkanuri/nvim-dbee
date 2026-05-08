@@ -357,6 +357,11 @@ func classifySQLNamedFirstArg(fset *token.FileSet, expr ast.Expr, call *ast.Call
 			return nil
 		}
 		return fmt.Errorf("unvalidated sql.Named first-arg ident %q at %s", first.Name, auditLocation(fset, first.Pos()))
+	case *ast.IndexExpr:
+		if sqlNamedIndexExprIsPrecomputedCursorDriver(first, stack) {
+			return nil
+		}
+		return fmt.Errorf("unsupported sql.Named first-arg shape at %s", auditLocation(fset, first.Pos()))
 	default:
 		return fmt.Errorf("unsupported sql.Named first-arg shape at %s", auditLocation(fset, first.Pos()))
 	}
@@ -375,6 +380,11 @@ func sqlNamedIdentIsValidated(name string, call *ast.CallExpr, stack []ast.Node)
 		if block := enclosingBlock(stack); blockHasDominatingValidateOracleBindSurfaceBefore(block, name, call.Pos()) {
 			return true
 		}
+		if fn.Name.Name == "oracleNamedArgsWithRewrite" {
+			if block := enclosingBlock(stack); blockHasDominatingOracleBindMapAddNameBefore(block, name, call.Pos()) {
+				return true
+			}
+		}
 	}
 
 	if rng := enclosingRange(stack); rng != nil {
@@ -386,6 +396,19 @@ func sqlNamedIdentIsValidated(name string, call *ast.CallExpr, stack []ast.Node)
 	}
 
 	return false
+}
+
+func sqlNamedIndexExprIsPrecomputedCursorDriver(expr *ast.IndexExpr, stack []ast.Node) bool {
+	fn := enclosingFunc(stack)
+	if fn == nil || fn.Name.Name != "executePLSQLWithCursor" {
+		return false
+	}
+	selector, ok := unwrapParen(expr.X).(*ast.SelectorExpr)
+	if !ok || selector.Sel.Name != "cursorDriverNames" {
+		return false
+	}
+	ident, ok := unwrapParen(selector.X).(*ast.Ident)
+	return ok && ident.Name == "rewritePlan"
 }
 
 func blockHasDominatingValidateOracleBindSurfaceBefore(block *ast.BlockStmt, name string, before token.Pos) bool {
@@ -410,6 +433,58 @@ func blockHasDominatingValidateOracleBindSurfaceBefore(block *ast.BlockStmt, nam
 		}
 	}
 	return false
+}
+
+func blockHasDominatingOracleBindMapAddNameBefore(block *ast.BlockStmt, name string, before token.Pos) bool {
+	if block == nil {
+		return false
+	}
+	for i := 0; i < len(block.List); i++ {
+		stmt := block.List[i]
+		if stmt.Pos() >= before || (stmt.Pos() <= before && before <= stmt.End()) {
+			return false
+		}
+		errName, ok := oracleBindMapAddNameAssignErrName(stmt, name)
+		if !ok || i+1 >= len(block.List) {
+			continue
+		}
+		nextIf, ok := block.List[i+1].(*ast.IfStmt)
+		if ok && nextIf.Pos() < before && ifStmtChecksErrAndStops(nextIf, errName) {
+			return true
+		}
+	}
+	return false
+}
+
+func oracleBindMapAddNameAssignErrName(node ast.Node, name string) (string, bool) {
+	assign, ok := node.(*ast.AssignStmt)
+	if !ok {
+		return "", false
+	}
+	for i, rhs := range assign.Rhs {
+		call, ok := unwrapParen(rhs).(*ast.CallExpr)
+		if !ok || !isOracleBindMapAddNameCall(call) || i >= len(assign.Lhs) {
+			continue
+		}
+		lhs, ok := unwrapParen(assign.Lhs[i]).(*ast.Ident)
+		if !ok || lhs.Name != name {
+			continue
+		}
+		errIndex := i + 2
+		if errIndex >= len(assign.Lhs) {
+			return "", false
+		}
+		errIdent, ok := unwrapParen(assign.Lhs[errIndex]).(*ast.Ident)
+		if ok && errIdent.Name != "_" {
+			return errIdent.Name, true
+		}
+	}
+	return "", false
+}
+
+func isOracleBindMapAddNameCall(call *ast.CallExpr) bool {
+	selector, ok := unwrapParen(call.Fun).(*ast.SelectorExpr)
+	return ok && selector.Sel.Name == "addName"
 }
 
 func ifStmtHandlesValidateOracleBindSurface(ifStmt *ast.IfStmt, name string) bool {

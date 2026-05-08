@@ -32,12 +32,23 @@ type oracleBindRewriteMap struct {
 }
 
 type oracleBindRewritePlan struct {
-	originalSQL  string
-	rewrittenSQL string
-	bindArgs     []any
-	mapping      oracleBindRewriteMap
-	cursorParams []string
-	hasCursor    bool
+	originalSQL       string
+	rewrittenSQL      string
+	bindArgs          []any
+	cursorBindArgs    []any
+	cursorParams      []string
+	cursorDriverNames []string
+	mapping           oracleBindRewriteMap
+	sqlRefs           map[string]struct{}
+	hasCursor         bool
+}
+
+type oracleSQLRewriteFlags struct {
+	hasDollarHash      bool
+	hasSentinel        bool
+	hasQQuote          bool
+	hasCursorCandidate bool
+	hasBindCandidate   bool
 }
 
 func validateOracleBindNameUser(name string) error {
@@ -135,6 +146,17 @@ func newOracleBindRewriteMap() oracleBindRewriteMap {
 	return oracleBindRewriteMap{}
 }
 
+func newOracleBindRewriteMapWithCapacity(size int) oracleBindRewriteMap {
+	if size == 0 {
+		return oracleBindRewriteMap{}
+	}
+	return oracleBindRewriteMap{
+		userToDriver:      make(map[string]string, size),
+		driverToUser:      make(map[string]string, size),
+		driverUpperToUser: make(map[string]string, size),
+	}
+}
+
 func (m *oracleBindRewriteMap) addName(name string) (string, bool, error) {
 	driverName, changed, err := rewriteOracleBindNameForDriver(name)
 	if err != nil {
@@ -188,24 +210,31 @@ func prepareOracleBindRewrite(query string, binds map[string]string) (oracleBind
 	plan := oracleBindRewritePlan{
 		originalSQL:  query,
 		rewrittenSQL: query,
-		mapping:      newOracleBindRewriteMap(),
+		mapping:      newOracleBindRewriteMapWithCapacity(len(binds)),
 	}
 
-	needsSQLScan := strings.IndexAny(query, "$#") >= 0 ||
-		containsOracleSentinelASCII(query) ||
-		containsOracleQQuoteCandidateASCII(query) ||
-		containsOracleCursorMarkerCandidateASCII(query)
+	if len(binds) == 0 && !containsOracleRewriteTriggerASCII(query) {
+		plan.mapping.finalize()
+		return plan, nil
+	}
 
-	if len(binds) > 0 {
-		args, err := oracleNamedArgsWithRewrite(binds, &plan.mapping)
-		if err != nil {
-			return plan, err
-		}
-		plan.bindArgs = args
+	needsSQLScan := len(binds) > 0
+	if !needsSQLScan {
+		flags := scanOracleSQLRewriteFlags(query)
+		needsSQLScan = flags.hasDollarHash ||
+			flags.hasSentinel ||
+			flags.hasQQuote ||
+			flags.hasCursorCandidate ||
+			flags.hasBindCandidate
 	}
 
 	if !needsSQLScan {
-		plan.mapping.finalize()
+		if err := plan.buildBindArgs(binds); err != nil {
+			return plan, err
+		}
+		if err := plan.reconcileBindRefs(binds); err != nil {
+			return plan, err
+		}
 		return plan, nil
 	}
 
@@ -217,7 +246,8 @@ func prepareOracleBindRewrite(query string, binds map[string]string) (oracleBind
 	if err != nil {
 		return plan, err
 	}
-	rewritten, err := transformOracleSQLBinds(query, regions, cursorMarkers, &plan.mapping)
+	plan.sqlRefs = make(map[string]struct{}, len(binds)+len(cursorMarkers))
+	rewritten, err := transformOracleSQLBinds(query, regions, cursorMarkers, &plan.mapping, plan.sqlRefs)
 	if err != nil {
 		return plan, err
 	}
@@ -229,8 +259,99 @@ func prepareOracleBindRewrite(query string, binds map[string]string) (oracleBind
 			plan.cursorParams = append(plan.cursorParams, marker.name)
 		}
 	}
+	if err := plan.buildBindArgs(binds); err != nil {
+		return plan, err
+	}
+	if err := plan.reconcileBindRefs(binds); err != nil {
+		return plan, err
+	}
 	plan.mapping.finalize()
 	return plan, nil
+}
+
+func (plan *oracleBindRewritePlan) buildBindArgs(binds map[string]string) error {
+	if plan.hasCursor {
+		args, err := oracleNamedArgsWithRewrite(filterCursorBindNames(binds, plan.cursorParams), &plan.mapping)
+		if err != nil {
+			return err
+		}
+		plan.bindArgs = args
+		plan.cursorBindArgs = args
+		plan.cursorDriverNames = make([]string, 0, len(plan.cursorParams))
+		var nameErrs []error
+		for _, param := range plan.cursorParams {
+			driverName, _, err := plan.mapping.addName(param)
+			if err != nil {
+				nameErrs = append(nameErrs, err)
+				continue
+			}
+			plan.cursorDriverNames = append(plan.cursorDriverNames, driverName)
+		}
+		if len(nameErrs) > 0 {
+			return fmt.Errorf("oracle bind validation (cursor param): %w", errors.Join(nameErrs...))
+		}
+		plan.mapping.finalize()
+		return nil
+	}
+
+	if len(binds) == 0 {
+		plan.mapping.finalize()
+		return nil
+	}
+
+	args, err := oracleNamedArgsWithRewrite(binds, &plan.mapping)
+	if err != nil {
+		return err
+	}
+	plan.bindArgs = args
+	plan.mapping.finalize()
+	return nil
+}
+
+func (plan oracleBindRewritePlan) reconcileBindRefs(binds map[string]string) error {
+	var cursorNames map[string]struct{}
+	if len(plan.cursorParams) > 0 {
+		cursorNames = make(map[string]struct{}, len(plan.cursorParams))
+	}
+	for _, name := range plan.cursorParams {
+		cursorNames[strings.ToUpper(strings.TrimSpace(name))] = struct{}{}
+		if _, ok := plan.sqlRefs[name]; !ok {
+			return fmt.Errorf("cursor bind %q declared but not referenced in SQL", name)
+		}
+	}
+
+	var missing []string
+	for name := range plan.sqlRefs {
+		if _, cursor := cursorNames[strings.ToUpper(strings.TrimSpace(name))]; cursor {
+			continue
+		}
+		if _, ok := binds[name]; !ok {
+			missing = append(missing, name)
+		}
+	}
+	var extra []string
+	for name := range binds {
+		if _, cursor := cursorNames[strings.ToUpper(strings.TrimSpace(name))]; cursor {
+			continue
+		}
+		if _, ok := plan.sqlRefs[name]; !ok {
+			extra = append(extra, name)
+		}
+	}
+	if len(missing) == 0 && len(extra) == 0 {
+		return nil
+	}
+
+	sort.Strings(missing)
+	sort.Strings(extra)
+	errs := make([]error, 0, len(missing)+len(extra))
+	for _, name := range missing {
+		errs = append(errs, fmt.Errorf("bind %q referenced in SQL but not provided", name))
+	}
+	for _, name := range extra {
+		errs = append(errs, fmt.Errorf("bind %q provided but not referenced in SQL", name))
+	}
+	return errors.Join(errs...)
 }
 
 func oracleNamedArgs(binds map[string]string) ([]any, error) {
@@ -250,11 +371,7 @@ func oracleNamedArgsWithRewrite(binds map[string]string, mapping *oracleBindRewr
 		return nil, nil
 	}
 
-	keys := make([]string, 0, len(binds))
-	for name := range binds {
-		keys = append(keys, name)
-	}
-	sort.Strings(keys)
+	keys := sortedOracleBindMapKeys(binds)
 
 	var nameErrs []error
 	args := make([]any, 0, len(keys))
@@ -264,16 +381,24 @@ func oracleNamedArgsWithRewrite(binds map[string]string, mapping *oracleBindRewr
 			nameErrs = append(nameErrs, err)
 			continue
 		}
-		if err := validateOracleBindNameDriver(driverName); err != nil {
-			nameErrs = append(nameErrs, err)
-			continue
-		}
 		args = append(args, sql.Named(driverName, coerceOracleBindValue(binds[name])))
 	}
 	if len(nameErrs) > 0 {
 		return nil, errors.Join(nameErrs...)
 	}
 	return args, nil
+}
+
+func sortedOracleBindMapKeys(binds map[string]string) []string {
+	if len(binds) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(binds))
+	for name := range binds {
+		keys = append(keys, name)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func scanOracleSQLCodeRegions(query string) ([]codeRegion, error) {
@@ -355,7 +480,7 @@ func scanOracleSQLCodeRegions(query string) ([]codeRegion, error) {
 	return regions, nil
 }
 
-func transformOracleSQLBinds(query string, regions []codeRegion, markers []oracleCursorMarker, mapping *oracleBindRewriteMap) (string, error) {
+func transformOracleSQLBinds(query string, regions []codeRegion, markers []oracleCursorMarker, mapping *oracleBindRewriteMap, sqlRefs map[string]struct{}) (string, error) {
 	if len(regions) == 0 {
 		return query, nil
 	}
@@ -386,10 +511,11 @@ func transformOracleSQLBinds(query string, regions []codeRegion, markers []oracl
 				markerIndex++
 				continue
 			}
-			if query[i] != ':' {
-				i++
-				continue
+			nextColon := strings.IndexByte(query[i:region.end], ':')
+			if nextColon < 0 {
+				break
 			}
+			i += nextColon
 			if i+1 < region.end && isOracleUserBindStart(query[i+1]) {
 				nameStart := i + 1
 				nameEnd := nameStart + 1
@@ -397,6 +523,9 @@ func transformOracleSQLBinds(query string, regions []codeRegion, markers []oracl
 					nameEnd++
 				}
 				name := query[nameStart:nameEnd]
+				if sqlRefs != nil {
+					sqlRefs[name] = struct{}{}
+				}
 				driverName, rewritten, err := mapping.addName(name)
 				if err != nil {
 					return "", err
@@ -539,6 +668,9 @@ func skipOracleQQuote(query string, start int) (int, error) {
 		if query[i] == closer && query[i+1] == '\'' {
 			return i + 2, nil
 		}
+		if query[i] == '\'' {
+			return 0, fmt.Errorf("unsupported oracle q-quote literal containing single quote; go-ora cannot safely parse this q-quote shape")
+		}
 	}
 	return 0, fmt.Errorf("unterminated oracle q-quote literal")
 }
@@ -673,40 +805,83 @@ func reverseDriverNames(msg string, driverToUser map[string]string, sortedKeys [
 }
 
 func reverseDriverNamesInBareTemplates(msg string, driverToUser map[string]string, sortedKeys []string) string {
+	type replacement struct {
+		start int
+		end   int
+		text  string
+	}
+
+	var replacements []replacement
 	for _, key := range sortedKeys {
 		user := driverToUser[key]
 		for _, prefix := range []string{"parameter ", "bind "} {
-			start := strings.Index(msg, prefix+key)
-			if start < 0 {
-				continue
-			}
-			nameStart := start + len(prefix)
-			nameEnd := nameStart + len(key)
-			if prefix == "parameter " {
-				if !strings.HasPrefix(msg[nameEnd:], " is not defined") {
+			searchFrom := 0
+			for {
+				found := strings.Index(msg[searchFrom:], prefix+key)
+				if found < 0 {
+					break
+				}
+				start := searchFrom + found
+				nameStart := start + len(prefix)
+				nameEnd := nameStart + len(key)
+				if nameEnd < len(msg) && isOracleUserBindBody(msg[nameEnd]) {
+					searchFrom = nameEnd
 					continue
 				}
-			} else if !strings.HasPrefix(msg[nameEnd:], " invalid") {
-				continue
+				if prefix == "parameter " {
+					if !strings.HasPrefix(msg[nameEnd:], " is not defined") {
+						searchFrom = nameEnd
+						continue
+					}
+				} else if !strings.HasPrefix(msg[nameEnd:], " invalid") {
+					searchFrom = nameEnd
+					continue
+				}
+				replacements = append(replacements, replacement{start: nameStart, end: nameEnd, text: user})
+				searchFrom = nameEnd
 			}
-			return replaceOracleSpan(msg, nameStart, nameEnd, user)
 		}
 		quotedPrefix := `parameter "`
-		start := strings.Index(msg, quotedPrefix+key+`" not found`)
-		if start >= 0 {
+		searchFrom := 0
+		for {
+			found := strings.Index(msg[searchFrom:], quotedPrefix+key+`" not found`)
+			if found < 0 {
+				break
+			}
+			start := searchFrom + found
 			nameStart := start + len(quotedPrefix)
-			return replaceOracleSpan(msg, nameStart, nameStart+len(key), user)
+			nameEnd := nameStart + len(key)
+			replacements = append(replacements, replacement{start: nameStart, end: nameEnd, text: user})
+			searchFrom = nameEnd
 		}
 	}
-	return msg
-}
+	if len(replacements) == 0 {
+		return msg
+	}
+	sort.Slice(replacements, func(i, j int) bool {
+		if replacements[i].start != replacements[j].start {
+			return replacements[i].start < replacements[j].start
+		}
+		return replacements[i].end > replacements[j].end
+	})
 
-func replaceOracleSpan(s string, start int, end int, replacement string) string {
 	var b strings.Builder
-	b.Grow(len(s) + len(replacement) - (end - start))
-	b.WriteString(s[:start])
-	b.WriteString(replacement)
-	b.WriteString(s[end:])
+	b.Grow(len(msg))
+	last := 0
+	changed := false
+	for _, repl := range replacements {
+		if repl.start < last {
+			continue
+		}
+		b.WriteString(msg[last:repl.start])
+		b.WriteString(repl.text)
+		last = repl.end
+		changed = true
+	}
+	if !changed {
+		return msg
+	}
+	b.WriteString(msg[last:])
 	return b.String()
 }
 
@@ -756,6 +931,71 @@ func containsOracleCursorMarkerCandidateASCII(s string) bool {
 		}
 	}
 	return false
+}
+
+func scanOracleSQLRewriteFlags(s string) oracleSQLRewriteFlags {
+	var flags oracleSQLRewriteFlags
+	mayContainSentinel := strings.IndexByte(s, '_') >= 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '$', '#':
+			flags.hasDollarHash = true
+		case ':':
+			if i+1 < len(s) && s[i+1] != '=' {
+				flags.hasBindCandidate = true
+			}
+		case 'q', 'Q':
+			if i+1 < len(s) && s[i+1] == '\'' {
+				flags.hasQQuote = true
+			}
+		case '/':
+			if i+1 < len(s) && s[i+1] == '*' && containsOracleCursorMarkerInCommentASCII(s[i+2:]) {
+				flags.hasCursorCandidate = true
+			}
+		case '_':
+			if mayContainSentinel && hasOracleSentinelAtASCII(s, i) {
+				flags.hasSentinel = true
+			}
+		}
+	}
+	return flags
+}
+
+func hasOracleSentinelAtASCII(s string, start int) bool {
+	return hasFoldASCIIAt(s, oracleDollarSentinel, start) || hasFoldASCIIAt(s, oracleHashSentinel, start)
+}
+
+func hasFoldASCIIAt(s string, needle string, start int) bool {
+	if start+len(needle) > len(s) {
+		return false
+	}
+	for i := 0; i < len(needle); i++ {
+		if asciiLower(s[start+i]) != asciiLower(needle[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func containsOracleCursorMarkerInCommentASCII(s string) bool {
+	for j := 0; j+5 < len(s); j++ {
+		if asciiUpper(s[j]) == 'C' &&
+			asciiUpper(s[j+1]) == 'U' &&
+			asciiUpper(s[j+2]) == 'R' &&
+			asciiUpper(s[j+3]) == 'S' &&
+			asciiUpper(s[j+4]) == 'O' &&
+			asciiUpper(s[j+5]) == 'R' {
+			return true
+		}
+		if j+1 < len(s) && s[j] == '*' && s[j+1] == '/' {
+			return false
+		}
+	}
+	return false
+}
+
+func containsOracleRewriteTriggerASCII(s string) bool {
+	return strings.IndexAny(s, "$#_:qQ/") >= 0
 }
 
 func containsFoldASCII(s string, needle string) bool {

@@ -52,32 +52,16 @@ func (d *oracleDriver) executePLSQLWithCursor(ctx context.Context, conn *sql.Con
 	if len(cursorParams) == 0 {
 		return nil, errors.New("no cursor parameters found")
 	}
-
-	// Create cursor variables and build named parameters.
-	// Filter bind args that collide with cursor OUT parameters.
-	bindArgs, bindErr := oracleNamedArgsWithRewrite(filterCursorBindNames(binds, cursorParams), &rewritePlan.mapping)
-	if bindErr != nil {
-		return nil, fmt.Errorf("oracle bind validation: %w", bindErr)
+	if len(rewritePlan.cursorDriverNames) != len(cursorParams) {
+		return nil, errors.New("cursor bind rewrite plan is incomplete")
 	}
 
+	// Create cursor variables and attach precomputed driver names.
 	cursors := make([]go_ora.RefCursor, len(cursorParams))
-	args := make([]any, 0, len(bindArgs)+len(cursorParams))
-	args = append(args, bindArgs...)
-	var nameErrs []error
-	for i, param := range cursorParams {
-		driverName, _, err := rewritePlan.mapping.addName(param)
-		if err != nil {
-			nameErrs = append(nameErrs, err)
-			continue
-		}
-		if err := validateOracleBindNameDriver(driverName); err != nil {
-			nameErrs = append(nameErrs, err)
-			continue
-		}
-		args = append(args, sql.Named(driverName, sql.Out{Dest: &cursors[i]}))
-	}
-	if len(nameErrs) > 0 {
-		return nil, fmt.Errorf("oracle bind validation (cursor param): %w", errors.Join(nameErrs...))
+	args := make([]any, 0, len(rewritePlan.cursorBindArgs)+len(cursorParams))
+	args = append(args, rewritePlan.cursorBindArgs...)
+	for i := range cursorParams {
+		args = append(args, sql.Named(rewritePlan.cursorDriverNames[i], sql.Out{Dest: &cursors[i]}))
 	}
 
 	// Enable DBMS_OUTPUT only after all bind names are validated.

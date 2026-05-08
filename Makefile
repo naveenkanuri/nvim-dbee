@@ -41,7 +41,7 @@ WALLET_GO_LOG ?= $(WALLET_ARTIFACT_DIR)/wallet-go.log
 WALLET_LUA_LOG ?= $(WALLET_ARTIFACT_DIR)/wallet-lua.log
 WALLET_ROLLUP_SCRIPT ?= $(CURDIR)/ci/headless/check_oracle_wallet_zip.lua
 
-.PHONY: perf perf-lsp perf-all wallet-test perf-headless ux13-rollup lsp21 lsp21-rollup lsp21-locked-helpers-guard db18-locked-helpers-guard oracle-bind-audit gn23 gn23-rollup gn23-locked-helpers-guard gn23-no-go-rpc-guard
+.PHONY: perf perf-lsp perf-all wallet-test perf-headless ux13-rollup lsp21 lsp21-rollup lsp21-locked-helpers-guard db18-locked-helpers-guard oracle-bind-audit oracle24-bind-rewrite gn23 gn23-rollup gn23-locked-helpers-guard gn23-no-go-rpc-guard
 .PHONY: live-pg-smoke _live-pg-smoke-inner
 
 perf-headless: perf-bootstrap
@@ -205,6 +205,9 @@ db18-locked-helpers-guard:
 
 oracle-bind-audit:
 	ORACLE22_ROLLUP=1 env GOCACHE="$${GOCACHE:-/tmp/codex-go-cache}" go -C dbee test ./adapters -run 'TestOracle(BindName|NamedArgs|UnsafeBindNames|RefCursor|DBMSOutput|BindAudit)|TestFetchDBMSOutputFromConn|TestPhase22Rollup' -v
+
+oracle24-bind-rewrite:
+	ORACLE24_ROLLUP=1 env GOCACHE="$${GOCACHE:-/tmp/codex-go-cache}" go -C dbee test ./adapters -run 'TestOracle(BindRewrite|BindName|NamedArgs|UnsafeBindNames|RefCursor|DBMSOutput|BindAudit)|TestFetchDBMSOutputFromConn|TestPhase22Rollup|TestPhase24Rollup' -v
 
 # This guard checks the SHIP commit only; earlier phase history may have touched
 # locked helpers before this Phase 20 commit.

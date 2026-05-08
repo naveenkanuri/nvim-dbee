@@ -226,7 +226,7 @@ func TestOracleQueryWithBindsRewritesSQLAndNamedArgs(t *testing.T) {
 	require.Equal(t, "7", args[0].Value)
 	require.Equal(t, "my_x24_1", args[1].Name)
 	require.Equal(t, "42", args[1].Value)
-	t.Log("ORA24_BIND_MAP_OK=true")
+	logOracle24Marker(t, "ORA24_BIND_MAP_OK=true")
 }
 
 func TestOracleQueryWithBindsRewritesExecSQL(t *testing.T) {
@@ -323,7 +323,7 @@ func runUnsafeBindMatrix(t *testing.T) bool {
 func TestOracleNamedArgs(t *testing.T) {
 	runUnsafeBindMatrix(t)
 	if !t.Failed() {
-		t.Log("ORA24_RESERVED_REJECT_OK=true")
+		logOracle24Marker(t, "ORA24_RESERVED_REJECT_OK=true")
 	}
 }
 

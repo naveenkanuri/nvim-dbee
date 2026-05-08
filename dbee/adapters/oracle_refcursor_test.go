@@ -86,9 +86,9 @@ func runRefCursorValidation(t *testing.T) bool {
 func TestOracleRefCursorValidation(t *testing.T) {
 	runRefCursorValidation(t)
 	if !t.Failed() {
-		t.Log("ORA24_CURSOR_MARKER_DOLLAR_OK=true")
-		t.Log("ORA24_CURSOR_FAST_PATH_ROUTED_OK=true")
-		t.Log("ORA24_PLSQL_ASSIGN_SKIP_OK=true")
+		logOracle24Marker(t, "ORA24_CURSOR_MARKER_DOLLAR_OK=true")
+		logOracle24Marker(t, "ORA24_CURSOR_FAST_PATH_ROUTED_OK=true")
+		logOracle24Marker(t, "ORA24_PLSQL_ASSIGN_SKIP_OK=true")
 	}
 }
 
@@ -208,7 +208,7 @@ func TestOracleStrayCursorCommentNotRejected(t *testing.T) {
 }
 
 func TestOracleRefCursorRewritePlan(t *testing.T) {
-	plan, err := prepareOracleBindRewrite("BEGIN proc(:cur$1 /*CURSOR*/, :other#2 /* note */); END;", nil)
+	plan, err := prepareOracleBindRewrite("BEGIN proc(:cur$1 /*CURSOR*/, :other#2 /* note */); END;", map[string]string{"other#2": "1"})
 	require.NoError(t, err)
 	require.True(t, plan.hasCursor)
 	require.Equal(t, []string{"cur$1"}, plan.cursorParams)
@@ -218,6 +218,6 @@ func TestOracleRefCursorRewritePlan(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, plainPlan.hasCursor)
 	require.Equal(t, "BEGIN proc(:cur); END;", plainPlan.rewrittenSQL)
-	t.Log("ORA24_CURSOR_MARKER_DOLLAR_OK=true")
-	t.Log("ORA24_CURSOR_FAST_PATH_ROUTED_OK=true")
+	logOracle24Marker(t, "ORA24_CURSOR_MARKER_DOLLAR_OK=true")
+	logOracle24Marker(t, "ORA24_CURSOR_FAST_PATH_ROUTED_OK=true")
 }
