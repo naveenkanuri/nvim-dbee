@@ -8,9 +8,23 @@ local install = require("dbee.install")
 local notes_migration = require("dbee.notes_migration")
 local register = require("dbee.api.__register")
 
--- Phase 23 migration notes:
--- setup_handler() performs a pure-read pre-register probe for an active
--- `.notes-migration-v1.lock` before any core-loaded early return or
+-- Phase 23 invariant (LOAD-BEARING — verified Phase 27 contract review
+-- 2026-05-08; v1.5 backlog item #318 DROPPED):
+--
+-- The lock probe at the top of setup_handler() MUST run on EVERY entry,
+-- including when m.core_loaded and m.migration_complete are cached true.
+-- Another nvim instance can begin a fresh migration at any time regardless
+-- of this process's local cache (m.migration_complete only proves a past
+-- maybe_run() succeeded — not current on-disk state).
+--
+-- Skipping the probe (e.g. via a `core_loaded && migration_complete` early
+-- return placed BEFORE is_migration_in_progress) opens a corruption window
+-- where this instance's editor reads/writes/deletes/renames under notes_dir
+-- collide with the other instance's mid-flight legacy local rename, global
+-- rmdir, or staging promotion (which writes live folder:<id>/ files via
+-- fs_rename — see notes_migration.lua promote_staging).
+--
+-- setup_handler() also performs a pure-read pre-register probe before any
 -- RegisterPlugin call. Fatal migration failures are held by
 -- _assert_migration_ok(); retryable in-progress probes do not set any flag.
 -- RegisterPlugin failure is out of Phase 23 migration-latch scope: the
