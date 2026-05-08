@@ -148,6 +148,46 @@ local function find_latest_disconnected_call(conn_id)
   return nil
 end
 
+local function notes_migration_action_state(current_conn)
+  if not current_conn or not current_conn.id then
+    return { inspect = false, cleanup = false }
+  end
+
+  local ok_cfg, cfg = pcall(api.current_config)
+  cfg = ok_cfg and cfg or {}
+  local notes_dir = (cfg.editor and cfg.editor.directory) or (vim.fn.stdpath("state") .. "/dbee/notes")
+  local uv = vim.uv or vim.loop
+  local function child(name)
+    return notes_dir:sub(-1) == "/" and (notes_dir .. name) or (notes_dir .. "/" .. name)
+  end
+  local function present(path)
+    return uv.fs_stat(path) ~= nil
+  end
+  local function has_backup()
+    local handle = uv.fs_scandir(notes_dir)
+    if not handle then
+      return false
+    end
+    while true do
+      local name = uv.fs_scandir_next(handle)
+      if not name then
+        return false
+      end
+      if name:match("^global%.bak$") or name:match("^global%.bak%.%d%d%d%d%d%d%d%d%d%d%d%d%d%d$") then
+        return true
+      end
+    end
+  end
+
+  local sentinel = present(child(".notes-migration-v1"))
+  local recovery_needed = present(child(".notes-migration-v1.recovery-needed"))
+  local backup = has_backup()
+  return {
+    inspect = sentinel or backup or recovery_needed,
+    cleanup = sentinel and backup and not recovery_needed,
+  }
+end
+
 ---@param conn_id connection_id
 ---@return source_id|nil
 local function find_source_id_for_connection(conn_id)
@@ -1690,6 +1730,31 @@ function dbee.actions(opts)
       run = drawer_action("move_connection_to_folder"),
     },
   }
+
+  local migration_state = notes_migration_action_state(current_conn)
+  if migration_state.inspect then
+    for idx, action in ipairs(actions) do
+      if action.id == "notes" then
+        table.insert(actions, idx + 1, {
+          id = "notes_migration_inspect",
+          label = "Inspect Notes Migration",
+          run = function()
+            dbee.notes_migration_inspect()
+          end,
+        })
+        if migration_state.cleanup then
+          table.insert(actions, idx + 2, {
+            id = "notes_migration_cleanup_backups",
+            label = "Cleanup Notes Migration Backups",
+            run = function()
+              dbee.notes_migration_cleanup_backups()
+            end,
+          })
+        end
+        break
+      end
+    end
+  end
 
   if is_oracle_connection(current_conn) then
     table.insert(actions, 2, {
