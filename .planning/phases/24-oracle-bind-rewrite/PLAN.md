@@ -1,7 +1,7 @@
 # Phase 24 - Oracle Bind Transparent Rewriter
 
 **Milestone:** v1.4
-**Status:** Planned r2 narrow fold, ready for plan-gate r3
+**Status:** Planned r3 narrow fold, ready for plan-gate r4
 **Date:** 2026-05-08
 **Requirement:** Oracle bind names containing `$` or `#` must run through go-ora without forcing user-visible placeholder renames.
 **Reference:** `.planning/phases/24-oracle-bind-rewrite/24-CONTEXT.md`
@@ -10,7 +10,7 @@
 
 Phase 24 changes the Oracle bind contract from "reject Oracle-legal `$` / `#` names because go-ora cannot parse them" to "accept Oracle-legal user bind names and transparently rewrite them at the adapter boundary before go-ora sees SQL or named args." User SQL such as `SELECT :my$1 FROM dual` remains user-facing as `my$1`; the Oracle adapter rewrites it to a driver-safe `my_x24_1` internally, executes through go-ora, and reverse-maps colon-prefixed driver bind names plus known bare go-ora parameter-error templates back to the original name.
 
-The r2 fold closes the remaining plan-gate issues: go-ora bare-name parameter errors reverse-map through template-specific handling, q-quotes are explicitly narrow + fail-loud with go-ora parser parity coverage, SQL-side sentinel refs cannot bypass the fast path, cursor marker cleanup has one locked pipeline order, validation migration is enumerated, reverse mapping uses a manual boundary-aware scan, tokenizer output is single-scan shared state, and rewrite budgets have a deterministic sample method.
+The r3 fold closes the remaining interaction issues: q-quote candidates always route through tokenizer/parity before fast-path return, SQL sentinel probes use allocation-free ASCII byte scans, go-ora parity tests use real go-ora invocation rather than unexported parser calls, cursor cleanup and bind rewrite happen in one original-SQL transform, and legacy REF CURSOR markers cannot be bypassed by the no-change fast path.
 
 ## Scope
 
@@ -44,7 +44,7 @@ Implementation scope note: the prompt's approximate six-file list is expanded to
 
 ## Strict Markers
 
-Strict marker target: **14 ORA24 strict markers + `PHASE24_ALL_PASS=true` rollup**. Diagnostics are emitted but not counted.
+Strict marker target: **15 ORA24 strict markers + `PHASE24_ALL_PASS=true` rollup**. Diagnostics are emitted but not counted.
 
 | Marker | Kind | Owner | Success Criterion |
 | --- | --- | --- | --- |
@@ -55,6 +55,7 @@ Strict marker target: **14 ORA24 strict markers + `PHASE24_ALL_PASS=true` rollup
 | `ORA24_BIND_MAP_OK=true` | Strict | `oracle_driver_context_test.go` or `oracle_bind_rewrite_test.go` | `oracleNamedArgs` transforms map keys with the same scheme as SQL rewriting and preserves sorted deterministic output. |
 | `ORA24_REVERSE_ERROR_OK=true` | Strict | `oracle_bind_rewrite_test.go` | Driver errors containing rewritten names are wrapped so colon-prefixed occurrences and known bare go-ora parameter templates contain original bind names. |
 | `ORA24_CURSOR_MARKER_DOLLAR_OK=true` | Strict | `oracle_refcursor_test.go` | `:cur$1 /*CURSOR*/` parses, rewrites for go-ora, and remains displayed as `cur$1`. |
+| `ORA24_CURSOR_FAST_PATH_ROUTED_OK=true` | Strict | `oracle_refcursor_test.go` | `:cur /*CURSOR*/` with no `$` / `#` still forces cursor scan and routes to REF CURSOR execution. |
 | `ORA24_RESERVED_REJECT_OK=true` | Strict | `oracle_driver_context_test.go` | Reserved/unsafe user names such as `table`, `date`, and `user` still reject before execution. |
 | `ORA24_COLLISION_REJECT_OK=true` | Strict | `oracle_bind_rewrite_test.go` | User bind-map names and SQL code-region refs containing `_x24_` or `_x23_` are rejected with the locked sentinel-collision message. |
 | `ORA24_PHASE22_INTERNAL_PRESERVED_OK=true` | Strict | `oracle_driver_dbms_output_test.go` or audit rollup | DBMS_OUTPUT `:p_line` / `:p_status` SQL and args remain unchanged and are not routed through rewrite. |
@@ -74,12 +75,12 @@ Strict marker target: **14 ORA24 strict markers + `PHASE24_ALL_PASS=true` rollup
 | Decision | Covered By | Success Criterion |
 | --- | --- | --- |
 | ORA24-01 | `24-01` | `$` rewrites to `_x24_`, `#` rewrites to `_x23_`, and sentinel collisions reject case-insensitively. |
-| ORA24-02 / ORA24-17 / ORA24-25 | `24-01` | SQL tokenizer skips all locked literal/comment/identifier regions; supported q-quotes are tested, unsupported delimiter forms fail closed, and go-ora parser parity is verified. |
+| ORA24-02 / ORA24-17 / ORA24-25 / ORA24-29 | `24-01` | SQL tokenizer skips all locked literal/comment/identifier regions; q-quote candidates bypass the zero-scan fast path, supported q-quotes are tested, unsupported delimiter forms fail closed, and real go-ora invocation parity is verified. |
 | ORA24-03 | `24-01` | Code-region bind detection uses `:([A-Za-z_][A-Za-z0-9_$#]*)`, rejecting leading `$` / `#`. |
 | ORA24-04 / ORA24-23 | `24-01` | User SQL and named args are rewritten before `conn.ExecContext`, `d.c.QueryOnConn`, or PL/SQL execution reaches go-ora; rewrite precomputes before `d.mu.Lock()` and SQL-side sentinel refs cannot fast-path through unchanged. |
 | ORA24-05 / ORA24-18 | `24-01` | Validation is split into user and driver surfaces; legacy `validateOracleBindName` is deleted and audit rejects reintroduction. |
 | ORA24-06 / ORA24-19 / ORA24-24 | `24-01` | Colon-prefixed rewritten names and known bare go-ora parameter templates reverse-map to original names after formatting without losing `errors.Unwrap`. |
-| ORA24-07 / ORA24-26 / ORA24-27 | `24-01` | Cursor marker detection, validation, parsing, cleanup, and bind rewrite consume one shared code-region span list and follow the locked cleanup-before-rewrite pipeline. |
+| ORA24-07 / ORA24-26 / ORA24-27 | `24-01` | Cursor marker detection, validation, cleanup, and bind rewrite consume one shared code-region span list and happen in one original-SQL transform. |
 | ORA24-08 | `24-01` | Static DBMS_OUTPUT binds stay `p_`-prefixed and unchanged. |
 | ORA24-09 | `24-01` | The `:= /*CURSOR*/` assignment skip and stray cursor-comment behavior remain covered. |
 | ORA24-10 | `24-01` | Strict markers and diagnostics emit with the ownership table above. |
@@ -91,11 +92,13 @@ Strict marker target: **14 ORA24 strict markers + `PHASE24_ALL_PASS=true` rollup
 | ORA24-16 | `24-01` | Sentinel-collision UX uses the locked error text shape. |
 | ORA24-20 | `24-01` | Rewrite performance budgets and benchmark cohorts are enforced with the locked 220-iteration, 20-warmup, N=200 retained, median-of-5 P95 method. |
 | ORA24-21 | `24-01` | Per-query rewrite path is manual byte scan only; regex is forbidden in the hot path. |
-| ORA24-22 | `24-01` | Case-folding contract covers sentinels, driver-name collisions, cursor filtering, and reverse-map keys. |
+| ORA24-22 / ORA24-28 | `24-01` | Case-folding contract covers sentinels, driver-name collisions, cursor filtering, reverse-map keys, and allocation-free SQL sentinel probes. |
 | ORA24-24 | `24-01` | Known bare go-ora parameter-error templates are reverse-mapped without replacing incidental bare substrings. |
-| ORA24-25 | `24-01` | Q-quote support is narrow + fail-loud and has go-ora parser parity coverage. |
+| ORA24-25 | `24-01` | Q-quote support is narrow + fail-loud and has real go-ora invocation parity coverage. |
 | ORA24-26 | `24-01` | `scanOracleSQLCodeRegions(query)` is the single scanner authority and runs at most once per query/exec call. |
-| ORA24-27 | `24-01` | REF CURSOR marker comments are removed only from code regions before SQL rewrite and driver execution. |
+| ORA24-27 | `24-01` | REF CURSOR marker comments are removed only from code regions during the same output transform that rewrites bind names. |
+| ORA24-28 | `24-01` | SQL fast-path probes use allocation-free ASCII byte scans and never allocate derived uppercase SQL. |
+| ORA24-29 | `24-01` | Go-ora q-quote parity has a concrete mock-session invocation mechanism. |
 
 ## Locked Helpers Contract
 
@@ -148,6 +151,7 @@ ORA24_GOORA_QQUOTE_PARITY_OK=true
 ORA24_BIND_MAP_OK=true
 ORA24_REVERSE_ERROR_OK=true
 ORA24_CURSOR_MARKER_DOLLAR_OK=true
+ORA24_CURSOR_FAST_PATH_ROUTED_OK=true
 ORA24_RESERVED_REJECT_OK=true
 ORA24_COLLISION_REJECT_OK=true
 ORA24_PHASE22_INTERNAL_PRESERVED_OK=true
@@ -167,11 +171,13 @@ Secondary risk is breaking Phase 22 by relaxing too much: reserved bind names mu
 ## Concerns For Implementation Gate
 
 - The rewriter must run before every user SQL path into go-ora and before `d.mu.Lock()`: plain query, plain exec, PL/SQL exec, and REF CURSOR PL/SQL exec.
-- The tokenizer must run at most once per query/exec call and share its `[]codeRegion` span list with bind, cursor, sentinel, and cleanup consumers.
+- The tokenizer must run at most once per query/exec call and share its `[]codeRegion` span list with bind, cursor, sentinel, q-quote, and single-pass output-transform consumers.
 - Current tests in `oracle_driver_context_test.go:213-218` and `oracle_refcursor_test.go:94-99` assert `$` / `#` rejection; execution must update them or broad adapter tests will fail.
 - `filterCursorBindNames` must compare original cursor names before rewriting, then cursor OUT args must use rewritten driver names.
+- Cheap q-quote and cursor-marker lookaheads must force the scanner before any zero-scan fast-path return.
 - Reverse error replacement is manual, boundary-aware, and handles only colon-prefixed bind occurrences plus known go-ora bare-name templates.
 - Sentinel collision errors must reject `_x24_` and `_x23_` case-insensitively in bind-map keys and SQL code-region bind refs even when the query contains no `$` / `#`.
+- SQL fast-path probes must not allocate derived uppercase SQL strings.
 - Driver-name collisions are detected with uppercase-folded driver names because go-ora compares bind names case-insensitively.
 - Do not keep a compatibility `validateOracleBindName`; delete it and force all call sites to choose user or driver validation.
 - Implement SQL capture in tests for all four execution boundaries; args-only capture is insufficient.
