@@ -269,7 +269,7 @@ local function copy_file(src, dst)
   end
   out_file:write(data)
   out_file:close()
-  return true
+  return true, nil, #data
 end
 
 local function is_exdev(err)
@@ -671,7 +671,7 @@ local function validate_promote_manifest(manifest, require_staging_absent)
       return false, RECOVERY_VALIDATION_FAILED, "staging source still exists"
     end
     local size = file_size(entry.planned_dst)
-    if not size or size <= 0 then
+    if size == nil then
       return false, RECOVERY_VALIDATION_FAILED, "planned destination missing"
     end
     if tonumber(entry.src_size_bytes or -1) ~= size then
@@ -761,12 +761,15 @@ local function validate_recovery_manifest(recovery)
   end
   for _, final_path in ipairs(recovery.final_paths) do
     local size = file_size(final_path)
-    if not size or size <= 0 then
+    if size == nil then
       return false, "recovery final path missing"
     end
     local expected = recovery.final_sizes and tonumber(recovery.final_sizes[final_path])
     if expected and expected ~= size then
       return false, "recovery final path size mismatch"
+    end
+    if expected == nil and size <= 0 then
+      return false, "recovery final path missing"
     end
   end
   return true
@@ -914,7 +917,7 @@ local function stage_global_notes(notes_dir, folder_ids, global_files)
     for _, global_file in ipairs(global_files) do
       local src_basename = basename(global_file)
       local staged_path = path_join(staged_dir, src_basename)
-      local ok_copy, copy_err = copy_file(global_file, staged_path)
+      local ok_copy, copy_err, copied_size = copy_file(global_file, staged_path)
       if not ok_copy then
         notes_namespace.recursive_rmdir(staging_dir)
         return nil, nil, copy_err
@@ -926,11 +929,27 @@ local function stage_global_notes(notes_dir, folder_ids, global_files)
         src_basename = src_basename,
         planned_dst = planned_dst,
         collision_suffix = collision_suffix,
-        src_size_bytes = file_size(staged_path) or 0,
+        -- The staging tree is private under the migration lock; verify_staging()
+        -- still stats the staged file before promotion.
+        src_size_bytes = copied_size or 0,
       }
     end
   end
   return staging_dir, entries
+end
+
+local function unique_final_dirs(entries)
+  local seen = {}
+  local dirs = {}
+  for _, entry in ipairs(entries or {}) do
+    local final_dir = dirname(entry.planned_dst)
+    if final_dir and final_dir ~= "" and not seen[final_dir] then
+      seen[final_dir] = true
+      dirs[#dirs + 1] = final_dir
+    end
+  end
+  table.sort(dirs)
+  return dirs
 end
 
 local function verify_staging(entries, expected_count)
@@ -971,11 +990,13 @@ local function promote_staging(notes_dir, staging_dir, entries, folder_ids, migr
     return nil, manifest_err
   end
 
-  for _, entry in ipairs(entries) do
-    local final_dir = dirname(entry.planned_dst)
+  for _, final_dir in ipairs(unique_final_dirs(entries)) do
     if not ensure_dir(final_dir) then
       return nil, "final_dir_mkdir_failed"
     end
+  end
+
+  for _, entry in ipairs(entries) do
     local ok_rename, rename_err = uv.fs_rename(entry.src_staging, entry.planned_dst)
     if not ok_rename then
       if is_exdev(rename_err) then
