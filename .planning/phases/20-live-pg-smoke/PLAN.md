@@ -1,8 +1,8 @@
 # Phase 20: Live-PG Smoke Test - Coordination Plan
 
-**Status:** Ready for r4 plan-gate after r3 narrow fold
+**Status:** Ready for r5 plan-gate after r4 narrow fold
 **Created:** 2026-05-07
-**Revised:** 2026-05-08 r3 narrow fold
+**Revised:** 2026-05-08 r4 narrow fold
 **Mode:** single-wave plan after combined discuss + research + plan
 
 <objective>
@@ -33,19 +33,20 @@ Single-wave remains intentional. The fixture, live tests, runtime preflight, mar
 - Phase 17 SQL constants remain locked; Phase 20 may add same-package shape tests but must not edit `postgres_driver_rich_metadata.go`.
 - Historical negative SQL must be the exact pre-fix Phase 17 FK SQL shape from commit `be58045^`, not synthetic multi-array `unnest(ARRAY..., ARRAY...)`.
 - Snapshot uses an external readable JSON golden with a narrow allowlist and an explicit `UPDATE_GOLDEN=1 make live-pg-smoke` regeneration flow.
-- Runtime health probes are bounded subprocesses: Makefile wraps `podman info` / `docker info` with a 5s timeout, and Go uses `exec.CommandContext` with a 5s context.
+- Runtime health probes are bounded Go subprocesses: `make live-pg-smoke` invokes the shared Go probe command; shell probe fallbacks are forbidden.
 - No-runtime paths are non-success paths: do not emit `LIVE_PG20_STRICT_MARKER_COUNT` unless the live suite actually reaches strict-marker verification.
+- No-runtime paths run before strict marker emission; they may emit only `LIVE_PG20_SKIPPED_NO_RUNTIME=true`, `LIVE_PG20_DETECT_MS=<ms>`, `PHASE20_ALL_PASS=false`, and the PG20-38 diagnostic.
 - SQL-shape preflight seals all five PostgreSQL rich metadata SQL constants with structural assertions, with the foreign-key `ROWS FROM` shape remaining the highest-risk guard.
 - The SQL-shape marker is split: source preflight and live ROWS FROM execution emit separate strict markers.
 </locked_decisions>
 
 <decision_coverage>
-## Decision Coverage Added In r1/r2/r3 Folds
+## Decision Coverage Added In r1/r2/r3/r4 Folds
 
 | Decision | Covers |
 | --- | --- |
 | `PG20-23` | Historical source of truth is commit `be58045`; `c3dd1a8` is not the Phase 17 PG fix commit |
-| `PG20-24` | Exact SQL-constant shape preflight over `postgresForeignKeysSQL` before container start |
+| `PG20-24` | Exact SQL-constant shape preflight over `postgresForeignKeysSQL` after runtime detection and before container start |
 | `PG20-25` | Historical negative test uses exact old FK SQL and must be live-verified to fail before marker emission |
 | `PG20-26` | Smoke test build tag and `_smoke_test.go` suffix prevent bootstrap matrix auto-enrollment |
 | `PG20-27` | Runtime detection selects one provider and passes `LIVE_PG20_CONTAINER_PROVIDER` to Go |
@@ -58,14 +59,14 @@ Single-wave remains intentional. The fixture, live tests, runtime preflight, mar
 | `PG20-34` | `LIVE_PG20_STRICT_MARKER_COUNT=19` is the strict count contract |
 | `PG20-35` | CI job overrides root working directory and exports a stable rollup artifact path |
 | `PG20-36` | CI job has `timeout-minutes: 10`, Go `-timeout=10m`, and container context timeout |
-| `PG20-37` | CI uses `sudo -E make live-pg-smoke` to preserve env while matching existing testcontainers parity |
+| `PG20-37` | CI invokes non-sudo outer `make live-pg-smoke`; any sudo is confined to the inner live-test target after pre-sudo checks |
 | `PG20-38` | Required-mode no-runtime failure message is exact and cross-platform parseable |
 | `PG20-39` | Non-strict timing markers record detect/container/seed/suite duration and wall-clock budget |
 | `PG20-40` | Phase 21 downstream shape contract is asserted on live `Column`/`FKRef` values |
-| `PG20-41` | Provider health probes are subprocess-timeout bounded in Makefile and Go helper |
-| `PG20-42` | No-runtime marker accounting skips strict count and emits only skip/fail evidence |
+| `PG20-41` | Provider health probes are subprocess-timeout bounded in the shared Go probe; shell probe fallback removed |
+| `PG20-42` | No-runtime marker accounting runs before strict markers and emits only skip/detect-ms/fail evidence |
 | `PG20-43` | Shape preflight covers all five PostgreSQL rich metadata SQL constants |
-| `PG20-44` | CI fetches enough history for `origin/master` merge-base locked-helper checks |
+| `PG20-44` | CI fetches enough history and runs locked-helper Git checks before sudo escalation |
 | `PG20-45` | Split SQL-shape preflight and live ROWS FROM markers; strict count becomes 19 |
 </decision_coverage>
 
@@ -131,6 +132,7 @@ The second command above must not run the smoke without `-tags live_pg20`; it is
 Implementation may modify only:
 - `Makefile`
 - `.github/workflows/test.yml`
+- `dbee/cmd/probe-runtime/main.go`
 - `dbee/adapters/postgres_driver_rich_metadata_shape_test.go`
 - `dbee/tests/testhelpers/helper.go`
 - `dbee/tests/testhelpers/postgres_rich_metadata.go`
@@ -151,7 +153,7 @@ Implementation must read but not modify:
 
 | Threat | Mitigation |
 | --- | --- |
-| Podman binary exists but machine is stopped | Makefile/helper use bounded `podman info` probes with 5s subprocess timeout, not executable checks only |
+| Podman binary exists but machine is stopped | Shared Go probe uses bounded `podman info` probes with 5s subprocess timeout, not executable checks only |
 | Docker available in CI but local podman shadows it | Detection falls back to healthy Docker and passes selected provider to Go |
 | Runtime unavailable on a developer machine | Local target emits exact skip marker/message and exits 0 unless `LIVE_PG20_REQUIRED=1` |
 | CI silently skips the live smoke | CI sets `LIVE_PG20_REQUIRED=1`; missing runtime exits nonzero |
@@ -163,14 +165,14 @@ Implementation must read but not modify:
 | Rollup pollution | Use `LIVE_PG20_ROLLUP_LOG`, not `UX13_ROLLUP_LOG` |
 | Rollup false green | `set -eu`, per-marker guards exit nonzero, `PHASE20_ALL_PASS=true` only on success |
 | CI runner waste on stalled runtime/pull/container | Runtime health probes timeout at 5s, CI timeout 10m, Go timeout 10m, container context timeout |
-| Locked helper accidental edit | `LIVE_PG20_LOCKED_HELPERS_UNTOUCHED_OK` requires clean git diff for all three helpers |
+| Locked helper accidental edit | `LIVE_PG20_LOCKED_HELPERS_UNTOUCHED_OK` requires clean git diff for all three helpers before any sudo escalation |
 | CI shallow checkout hides base ref | `live-pg20-smoke` checkout uses full history or explicit fetch before `git merge-base HEAD origin/master` |
 </threat_model>
 
 <acceptance>
 ## Acceptance Criteria
 
-- `make live-pg-smoke` runs source-shape preflight, then starts PostgreSQL through a healthy podman/docker runtime or skips locally with `LIVE_PG20_SKIPPED_NO_RUNTIME=true`.
+- `make live-pg-smoke` detects a healthy podman/docker runtime first; no-runtime paths skip/fail before any strict marker, and healthy paths then run source-shape preflight before container startup.
 - `LIVE_PG20_REQUIRED=1 make live-pg-smoke` fails with the exact no-runtime message if no healthy runtime exists, including `timeout after 5s` detail for hung probes.
 - Successful run emits all 19 strict records listed above and `PHASE20_ALL_PASS=true`.
 - The live suite proves the Phase 17 composite FK production SQL succeeds and the exact historical broken FK SQL fails.
@@ -182,6 +184,6 @@ Implementation must read but not modify:
 ---
 
 *Phase: 20-live-pg-smoke*
-Post-SHIP note: fold the r0/r1/r2/r3 decision trail into `project_v14_phase20_shipped.md` and keep this phase directory as raw review history.
+Post-SHIP note: fold the r0/r1/r2/r3/r4 decision trail into `project_v14_phase20_shipped.md` and keep this phase directory as raw review history.
 
-*Coordination plan revised: 2026-05-08 r3 narrow fold*
+*Coordination plan revised: 2026-05-08 r4 narrow fold*
