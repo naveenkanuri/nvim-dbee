@@ -41,7 +41,7 @@ WALLET_GO_LOG ?= $(WALLET_ARTIFACT_DIR)/wallet-go.log
 WALLET_LUA_LOG ?= $(WALLET_ARTIFACT_DIR)/wallet-lua.log
 WALLET_ROLLUP_SCRIPT ?= $(CURDIR)/ci/headless/check_oracle_wallet_zip.lua
 
-.PHONY: perf perf-lsp perf-all wallet-test perf-headless ux13-rollup lsp21 lsp21-rollup lsp21-locked-helpers-guard db18-locked-helpers-guard oracle-bind-audit oracle24-bind-rewrite gn23 gn23-rollup gn23-locked-helpers-guard gn23-no-go-rpc-guard
+.PHONY: perf perf-lsp perf-all wallet-test perf-headless ux13-rollup lsp21 lsp21-rollup lsp21-locked-helpers-guard db18-locked-helpers-guard oracle-bind-audit oracle24-bind-rewrite gn23 gn23-rollup gn23-locked-helpers-guard gn23-no-go-rpc-guard ship-gate
 .PHONY: live-pg-smoke _live-pg-smoke-inner
 
 perf-headless: perf-bootstrap
@@ -208,6 +208,29 @@ oracle-bind-audit:
 
 oracle24-bind-rewrite:
 	ORACLE24_ROLLUP=1 env GOCACHE="$${GOCACHE:-/tmp/codex-go-cache}" go -C dbee test ./adapters -run 'TestOracle(BindRewrite|BindName|NamedArgs|UnsafeBindNames|RefCursor|DBMSOutput|BindAudit)|TestFetchDBMSOutputFromConn|TestPhase22Rollup|TestPhase24Rollup' -v
+
+# Canonical SHIP-gate target. Run before declaring a phase complete.
+# Bundles the full UX13 rollup (perf-headless) + Oracle bind invariants
+# (Phase 22) so phase-local sub-rollups do not silently mask orphaned tests
+# in unrelated surfaces. v1.5 lesson #12: SHIP gates that ran only
+# phase-specific sub-rollups (gn23-rollup / oracle-bind-audit) missed
+# LSP12 test/impl drift across Phase 21/22/22.5/23/24/25/26 SHIPs.
+#
+# Live-Oracle (Phase 24) coverage is gated by ORACLE24_ROLLUP=1; live-PG
+# smoke (Phase 20) requires a container runtime and is invoked separately
+# via `make live-pg-smoke`.
+ship-gate:
+	@printf '%s\n' "==> ship-gate: full perf-headless rollup"
+	@$(MAKE) --no-print-directory perf-headless
+	@printf '%s\n' "==> ship-gate: oracle-bind-audit (Phase 22 invariants)"
+	@$(MAKE) --no-print-directory oracle-bind-audit
+	@if [ "$${ORACLE24_ROLLUP:-0}" = "1" ]; then \
+	  printf '%s\n' "==> ship-gate: oracle24-bind-rewrite (Phase 24 invariants)"; \
+	  $(MAKE) --no-print-directory oracle24-bind-rewrite; \
+	else \
+	  printf '%s\n' "==> ship-gate: oracle24-bind-rewrite skipped (set ORACLE24_ROLLUP=1 to include)"; \
+	fi
+	@printf '%s\n' "==> ship-gate: ALL PASS"
 
 # This guard checks the SHIP commit only; earlier phase history may have touched
 # locked helpers before this Phase 20 commit.
